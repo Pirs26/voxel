@@ -1,0 +1,12 @@
+[package]
+name = "voxel-audio-dsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cpal.workspace = true
+glam.workspace = true
+rtrb.workspace = true
+rusty-opus.workspace = true
+voxel-acoustics.workspace = true
