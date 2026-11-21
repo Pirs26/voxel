@@ -31,6 +31,12 @@ impl VoxelId {
     pub const fn def(self) -> &'static MaterialDef {
         &MATERIAL_REGISTRY[self as usize]
     }
+
+    #[inline]
+    pub fn is_emissive(self) -> bool {
+        let e = self.def().emissive;
+        e[0] > 0.0 || e[1] > 0.0 || e[2] > 0.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

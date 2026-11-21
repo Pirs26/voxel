@@ -58,21 +58,13 @@ pub fn mesh_chunk(world: &VoxelWorld, chunk_coord: IVec3) -> ChunkMeshData {
     let base = chunk_coord * cs;
     let vs = world.voxel_size_m();
 
-    // Collect emissive voxels for atmospheric cave lighting
-    for y in 0..CHUNK_SIZE {
-        for z in 0..CHUNK_SIZE {
-            for x in 0..CHUNK_SIZE {
-                let mat = chunk.get(x, y, z);
-                if mat.is_solid() {
-                    let def = mat.def();
-                    if def.emissive[0] > 0.0 || def.emissive[1] > 0.0 || def.emissive[2] > 0.0 {
-                        let v = base + IVec3::new(x as i32, y as i32, z as i32);
-                        out.emissive_centers_m
-                            .push((world.config().voxel_to_world_center(v), def.emissive));
-                    }
-                }
-            }
-        }
+    // Collect emissive voxels directly from the chunk's tracked list (O(k), zero scan on non-emissive chunks)
+    for &[lx, ly, lz] in chunk.emissive_voxels() {
+        let mat = chunk.get(lx as usize, ly as usize, lz as usize);
+        let def = mat.def();
+        let v = base + IVec3::new(lx as i32, ly as i32, lz as i32);
+        out.emissive_centers_m
+            .push((world.config().voxel_to_world_center(v), def.emissive));
     }
 
     // Greedy mesh across all 6 face directions: (axis, sign)
@@ -241,5 +233,29 @@ mod tests {
         // An 8x1x8 solid plate with uniform AO merges into 6 quads = 24 verts, 36 indices!
         assert_eq!(mesh.positions.len(), 24);
         assert_eq!(mesh.indices.len(), 36);
+        assert!(mesh.emissive_centers_m.is_empty());
+    }
+
+    #[test]
+    fn mesher_emits_tracked_emissive_centers() {
+        let cfg = VoxelConfig::half_player_scale(UVec3::splat(1));
+        let mut world = VoxelWorld::new(cfg);
+        let p1 = IVec3::new(4, 6, 8);
+        let p2 = IVec3::new(12, 14, 16);
+        world.set(p1, VoxelId::BiolumCrystal);
+        world.set(p2, VoxelId::BiolumCrystal);
+
+        let mesh = mesh_chunk(&world, IVec3::ZERO);
+        assert_eq!(mesh.emissive_centers_m.len(), 2);
+        let expected1 = cfg.voxel_to_world_center(p1);
+        let expected2 = cfg.voxel_to_world_center(p2);
+        assert!(mesh.emissive_centers_m.iter().any(|(pos, _)| *pos == expected1));
+        assert!(mesh.emissive_centers_m.iter().any(|(pos, _)| *pos == expected2));
+
+        // Break one crystal and verify re-meshing updates emissive centers
+        world.set(p1, VoxelId::Air);
+        let mesh2 = mesh_chunk(&world, IVec3::ZERO);
+        assert_eq!(mesh2.emissive_centers_m.len(), 1);
+        assert_eq!(mesh2.emissive_centers_m[0].0, expected2);
     }
 }

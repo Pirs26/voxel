@@ -11,15 +11,19 @@ enum ChunkStorage {
     Dense(Box<[VoxelId; CHUNK_VOLUME]>),
 }
 
-/// A 32×32×32 voxel chunk with uniform compression and a 4×4×4 (`u64`) brick occupancy mask
-/// for fast empty-space skipping during DDA raytracing and meshing.
+/// A 32×32×32 voxel chunk with uniform compression, a 4×4×4 (`u64`) brick occupancy mask
+/// for fast empty-space skipping during DDA raytracing and meshing, and incremental tracking
+/// of emissive voxels so meshing avoids full-chunk scans.
 #[derive(Clone, Debug)]
 pub struct Chunk {
     storage: ChunkStorage,
-    /// Bit `bx + by*4 + bz*16` is 1 if the 8×8×8 brick contains at least one solid voxel.
+    /// Bit `bx + bz*4 + by*16` is 1 if the 8×8×8 brick contains at least one solid voxel.
     brick_mask: u64,
     /// Exact solid voxel count per 8×8×8 brick for O(1) incremental mask updates.
     brick_solid_counts: [u16; 64],
+    /// Local coordinates `[x, y, z]` of all emissive voxels in this chunk.
+    /// Remains empty (zero heap allocation) for non-emissive chunks.
+    emissive_voxels: Vec<[u8; 3]>,
 }
 
 impl Default for Chunk {
@@ -35,10 +39,24 @@ impl Chunk {
         } else {
             (0u64, [0u16; 64])
         };
+        let emissive_voxels = if mat.is_emissive() {
+            let mut list = Vec::with_capacity(CHUNK_VOLUME);
+            for y in 0..CHUNK_SIZE {
+                for z in 0..CHUNK_SIZE {
+                    for x in 0..CHUNK_SIZE {
+                        list.push([x as u8, y as u8, z as u8]);
+                    }
+                }
+            }
+            list
+        } else {
+            Vec::new()
+        };
         Self {
             storage: ChunkStorage::Uniform(mat),
             brick_mask: mask,
             brick_solid_counts: counts,
+            emissive_voxels,
         }
     }
 
@@ -67,6 +85,18 @@ impl Chunk {
     pub fn brick_is_occupied(&self, x: usize, y: usize, z: usize) -> bool {
         let bit = 1u64 << Self::brick_index(x, y, z);
         (self.brick_mask & bit) != 0
+    }
+
+    /// Local `[x, y, z]` coordinates of all emissive voxels currently in this chunk.
+    #[inline]
+    pub fn emissive_voxels(&self) -> &[[u8; 3]] {
+        &self.emissive_voxels
+    }
+
+    /// Number of emissive voxels currently in this chunk.
+    #[inline]
+    pub fn emissive_count(&self) -> usize {
+        self.emissive_voxels.len()
     }
 
     #[inline]
@@ -106,6 +136,17 @@ impl Chunk {
             _ => {}
         }
 
+        let old_emissive = old.is_emissive();
+        let new_emissive = mat.is_emissive();
+        if old_emissive != new_emissive {
+            let coord = [x as u8, y as u8, z as u8];
+            if new_emissive {
+                self.emissive_voxels.push(coord);
+            } else if let Some(pos) = self.emissive_voxels.iter().position(|&c| c == coord) {
+                self.emissive_voxels.swap_remove(pos);
+            }
+        }
+
         true
     }
 
@@ -117,5 +158,39 @@ impl Chunk {
                 self.storage = ChunkStorage::Uniform(first);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emissive_tracking_updates_incrementally() {
+        let mut chunk = Chunk::new_uniform(VoxelId::Air);
+        assert_eq!(chunk.emissive_count(), 0);
+        assert!(chunk.emissive_voxels().is_empty());
+
+        assert!(chunk.set(3, 4, 5, VoxelId::CaveStone));
+        assert_eq!(chunk.emissive_count(), 0);
+
+        assert!(chunk.set(3, 4, 5, VoxelId::BiolumCrystal));
+        assert!(chunk.set(10, 20, 30, VoxelId::BiolumCrystal));
+        assert_eq!(chunk.emissive_count(), 2);
+        assert!(chunk.emissive_voxels().contains(&[3, 4, 5]));
+        assert!(chunk.emissive_voxels().contains(&[10, 20, 30]));
+
+        // Setting same emissive material is a no-op
+        assert!(!chunk.set(3, 4, 5, VoxelId::BiolumCrystal));
+        assert_eq!(chunk.emissive_count(), 2);
+
+        // Replacing emissive with non-emissive removes it
+        assert!(chunk.set(3, 4, 5, VoxelId::Air));
+        assert_eq!(chunk.emissive_count(), 1);
+        assert_eq!(chunk.emissive_voxels(), &[[10, 20, 30]]);
+
+        // Removing last emissive leaves empty list
+        assert!(chunk.set(10, 20, 30, VoxelId::CaveStone));
+        assert_eq!(chunk.emissive_count(), 0);
     }
 }

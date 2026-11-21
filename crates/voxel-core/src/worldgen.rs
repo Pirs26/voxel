@@ -298,8 +298,8 @@ fn build_shaft_and_stairs(
     }
 
     // Simple spiral steel ledges along shaft walls so player can climb between cave and shed in Week 1
-    let mut angle_step = 0i32;
-    for y in (cave_floor_y + 1)..shed_floor_y {
+    for (step_idx, y) in ((cave_floor_y + 1)..shed_floor_y).enumerate() {
+        let angle_step = step_idx as i32;
         let side = (angle_step / 4) % 4;
         let offset = (angle_step % 4) - 1;
         let (dx, dz) = match side {
@@ -309,7 +309,6 @@ fn build_shaft_and_stairs(
             _ => (-3, -offset),
         };
         world.set(IVec3::new(cx + dx, y, cz + dz), VoxelId::Steel);
-        angle_step += 1;
     }
 }
 
@@ -331,9 +330,12 @@ fn build_starter_shed(world: &mut VoxelWorld, cx: i32, cz: i32, shed_floor_y: i3
                     if !in_shaft {
                         world.set(p, VoxelId::Timber);
                     }
-                } else if y == roof_y {
-                    world.set(p, VoxelId::Timber);
-                } else if x == min_x || x == max_x || z == min_z || z == max_z {
+                } else if y == roof_y
+                    || x == min_x
+                    || x == max_x
+                    || z == min_z
+                    || z == max_z
+                {
                     world.set(p, VoxelId::Timber);
                 } else {
                     world.set(p, VoxelId::Air);
