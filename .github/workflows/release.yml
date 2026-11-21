@@ -1,0 +1,115 @@
+name: Build & Release (macOS, Windows, Linux)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: "Optional label for manual build artifacts"
+        required: false
+        default: "dev-build"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-latest
+            bin_name: game
+            archive: echoes-below-macos-arm64.zip
+          - name: windows-x64
+            os: windows-latest
+            bin_name: game.exe
+            archive: echoes-below-windows-x64.zip
+          - name: linux-x64
+            os: ubuntu-latest
+            bin_name: game
+            archive: echoes-below-linux-x64.tar.gz
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux audio & windowing dev libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libasound2-dev \
+            libudev-dev \
+            libwayland-dev \
+            libxkbcommon-dev
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run workspace unit tests
+        run: cargo test --workspace --exclude game
+
+      - name: Build release binary
+        run: cargo build --release -p game
+
+      - name: Package release archive (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist/echoes-below
+          cp target/release/${{ matrix.bin_name }} dist/echoes-below/echoes-below
+          cp -R assets dist/echoes-below/assets
+          (cd dist && zip -r ../${{ matrix.archive }} echoes-below)
+
+      - name: Package release archive (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/echoes-below
+          cp target/release/${{ matrix.bin_name }} dist/echoes-below/echoes-below
+          cp -R assets dist/echoes-below/assets
+          tar -czf ${{ matrix.archive }} -C dist echoes-below
+
+      - name: Package release archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\echoes-below | Out-Null
+          Copy-Item target\release\${{ matrix.bin_name }} dist\echoes-below\echoes-below.exe
+          Copy-Item -Recurse assets dist\echoes-below\assets
+          Compress-Archive -Path dist\echoes-below -DestinationPath ${{ matrix.archive }} -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.archive }}
+
+  publish_release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all platform archives
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-artifacts/*

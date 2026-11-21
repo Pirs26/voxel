@@ -278,6 +278,23 @@ stateDiagram-v2
 - Getting struck by a blind monster puts the player into **Downed** (bleed-out timer `60s`, slow crawl, muffled whispering still works!).
 - Teammates can **drag** a downed friend to safety behind an acoustic foam seal, then use a **consumable Aid Kit** (`4s` channel with faint zipper/spray sound) to revive them.
 
+#### Inventory, Subnautica-Style Batteries & Passive Gear
+- **Active Belt / Hotbar Slots:** Start with **2 slots** (`[1]`, `[2]`), upgradeable in the Shed via **Tool Belt (+1)** and **Expedition Pack (+1–2)** up to **4–5 max** (keeps team roles meaningful—nobody carries everything alone).
+- **Dedicated Battery Pouch (Subnautica-Style Swapping):**
+  - Separate from active belt slots (starts at **2 battery slots**, upgradeable via **Pouch Upgrades** to **4–6**).
+  - Every battery tracks its own charge (`0%..100%`, plus future high-capacity battery tiers) and can be **recharged back in the Base Shed** instead of discarded.
+  - Pressing/holding **`R`** opens a fast **scroll-wheel battery selector** showing every battery in your pouch and its remaining `%`; scrolling selects which battery to swap into your flashlight (or future machinery), returning the old cell to your pouch with a subtle click sound.
+  - **Battery Sharing:** Highlighting a battery in the **`R`** selector and pressing **`Q`** drops/tosses that physical battery cell onto the floor (with a metallic clatter sound!) so friends can pick it up when their light dies in the dark.
+- **Passive Wearable Gear Slots (Permanent Shed Upgrades, Don't Clog Belt):**
+  - **Headgear:** Start with a handheld flashlight (uses 1 belt slot). Buying a **Headlamp** later equips to the Headgear slot—freeing a belt slot and letting you see while carrying 2-handed heavy relics!
+  - **Footwear:** Standard Boots → Soft-Sole Stealth Boots (quieter footsteps).
+  - **Harness / Pouches:** Belt slot upgrades + Battery Pouch upgrades.
+- **Two-Handed Heavy Carry State:** Heavy Quest Relics and dragging downed friends occupy **both hands**, holstering your active belt item (making headlamps and teammate lighting vital).
+- **Consumable Stacks & Physical Acoustics:**
+  - Stackable consumables per belt slot: Flares/Torches (`3–4`), Acoustic Foam Canister (`6–8` voxel charges), Noise Decoys (`2`), Aid Kit (`1`), Small Side-Loot (`1` per slot for greedy risk/reward tension).
+  - Dropping any item (`Q`) spawns it physically and emits a real voxel-echoing impact sound; a heavily stuffed pack slightly increases sprint/jump noise.
+  - **Shed Storage Rack:** Gear left in the Base Shed stays safe if the team wipes underground.
+
 ---
 
 ## Month-1 Execution Roadmap (4 Weekly Vertical Slices)

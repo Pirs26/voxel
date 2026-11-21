@@ -56,13 +56,21 @@ impl SynthClip {
     }
 }
 
-/// Loads a clip from `assets/sfx/<file>` if available, falling back to procedural synthesis.
+/// Loads a clip from `assets/sfx/<file>` (checking current dir, executable dir for packaged
+/// releases, and Cargo workspace dir in dev) with graceful procedural synthesis fallback.
 pub fn load_or_generate_clip(clip: SynthClip, sample_rate: f32) -> Vec<f32> {
     if let Some(file) = clip.wav_filename() {
-        let candidates = [
+        let mut candidates = vec![
             Path::new("assets/sfx").join(file),
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/sfx").join(file),
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/sfx")
+                .join(file),
         ];
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                candidates.insert(0, dir.join("assets/sfx").join(file));
+            }
+        }
         for path in candidates {
             if path.exists() {
                 if let Ok(samples) = load_wav_mono(&path, sample_rate) {
