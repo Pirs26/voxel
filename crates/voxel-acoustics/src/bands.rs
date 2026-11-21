@@ -28,6 +28,7 @@ impl Bands3 {
     }
 
     #[inline]
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(self, rhs: Self) -> Self {
         Self([
             self.0[0] * rhs.0[0],
@@ -42,6 +43,7 @@ impl Bands3 {
     }
 
     #[inline]
+    #[allow(clippy::should_implement_trait)]
     pub fn add(self, rhs: Self) -> Self {
         Self([
             self.0[0] + rhs.0[0],
