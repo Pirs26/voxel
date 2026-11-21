@@ -26,7 +26,36 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 bytes = "1"
 data-encoding = "2"
 rusty-opus = "1.2"
-bevy = "0.20"
+bevy = { version = "0.20", default-features = false, features = [
+    "std",
+    "async_executor",
+    "multi_threaded",
+    "bevy_asset",
+    "bevy_log",
+    "bevy_window",
+    "bevy_winit",
+    "x11",
+    "wayland",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_light",
+    "bevy_mesh",
+    "bevy_camera",
+    "bevy_color",
+    "bevy_image",
+    "bevy_material",
+    "bevy_shader",
+    "bevy_ui",
+    "bevy_ui_render",
+    "bevy_text",
+    "default_font",
+    "bevy_picking",
+    "ui_picking",
+    "tonemapping_luts",
+    "smaa_luts",
+    "zstd_rust",
+] }
 
 # Internal workspace crates
 voxel-core = { path = "crates/voxel-core" }

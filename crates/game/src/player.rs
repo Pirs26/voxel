@@ -224,8 +224,9 @@ fn player_move_system(
     };
 
     let prev_feet = pc.feet_pos_m;
+    let world = world_res.read();
     let (new_feet, new_vel, grounded) =
-        move_and_slide(&world_res.0, pc.feet_pos_m, pc.velocity_m, height, dt);
+        move_and_slide(&world, pc.feet_pos_m, pc.velocity_m, height, dt);
     pc.feet_pos_m = new_feet;
     pc.velocity_m = new_vel;
     pc.grounded = grounded;
@@ -251,11 +252,10 @@ fn player_move_system(
         if pc.footstep_accum_m >= stride {
             pc.footstep_accum_m = 0.0;
             pc.step_counter = pc.step_counter.wrapping_add(1);
-            let below = world_res
-                .0
+            let below = world
                 .config()
                 .world_to_voxel(pc.feet_pos_m - Vec3::Y * 0.15);
-            let clip = match world_res.0.get(below) {
+            let clip = match world.get(below) {
                 VoxelId::Timber => match pc.step_counter % 3 {
                     0 => SynthClip::FootstepWood,
                     1 => SynthClip::FootstepWood2,

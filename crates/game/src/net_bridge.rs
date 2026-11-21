@@ -53,7 +53,7 @@ pub struct CoopState {
     pub visor_idx: usize,
     pub status_text: String,
     pub join_code: Option<String>,
-    pub local_edits: Vec<(IVec3, VoxelId)>,
+    pub local_edits: HashMap<IVec3, VoxelId>,
     pub remote_players: HashMap<PlayerId, RemotePlayerData>,
     pub pose_timer: Timer,
     pub pose_tick: u32,
@@ -68,7 +68,7 @@ impl Default for CoopState {
             visor_idx: 0,
             status_text: "Offline (Solo) — Press [Tab] to Host or Join".to_string(),
             join_code: None,
-            local_edits: Vec::new(),
+            local_edits: HashMap::new(),
             remote_players: HashMap::new(),
             pose_timer: Timer::from_seconds(1.0 / 25.0, TimerMode::Repeating),
             pose_tick: 0,
@@ -90,7 +90,7 @@ impl CoopState {
     }
 
     pub fn send_voxel_delta(&mut self, coord: IVec3, material: VoxelId) {
-        self.local_edits.push((coord, material));
+        self.local_edits.insert(coord, material);
         if let Some(ref s) = self.session {
             s.send_reliable(ReliableMessage::VoxelDelta { coord, material });
         }
@@ -125,12 +125,14 @@ impl CoopState {
     pub fn start_host(&mut self, beacon_pos_m: Vec3) {
         self.session = None;
         self.join_code = None;
+        let edits_snapshot: Vec<(IVec3, VoxelId)> =
+            self.local_edits.iter().map(|(&c, &m)| (c, m)).collect();
         match NetSession::start_host(
             self.local_name.clone(),
             self.visor_rgb(),
             self.level_seed,
             beacon_pos_m,
-            self.local_edits.clone(),
+            edits_snapshot,
         ) {
             Ok(session) => {
                 self.session = Some(session);
@@ -326,7 +328,7 @@ fn poll_network_events_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut coop: ResMut<CoopState>,
-    mut world_res: ResMut<WorldResource>,
+    world_res: Res<WorldResource>,
     mut level_info: ResMut<LevelInfoResource>,
     mut beacon: ResMut<AcousticBeaconState>,
     mut voice_writer: MessageWriter<IncomingVoiceFrame>,
@@ -367,10 +369,10 @@ fn poll_network_events_system(
                         new_world.set(*coord, *mat);
                     }
                     new_world.mark_all_dirty();
-                    world_res.0 = new_world;
+                    *world_res.write() = new_world;
                     level_info.0 = new_info;
                     coop.level_seed = level_seed;
-                    coop.local_edits = voxel_edits;
+                    coop.local_edits = voxel_edits.into_iter().collect();
                 }
                 beacon.pos_m = beacon_pos_m;
 
@@ -425,9 +427,16 @@ fn poll_network_events_system(
                 }
             }
             NetEvent::VoxelDelta { coord, material } => {
-                coop.local_edits.push((coord, material));
-                if world_res.0.set(coord, material) {
-                    let pos_m = world_res.0.config().voxel_to_world_center(coord);
+                coop.local_edits.insert(coord, material);
+                let changed_pos = {
+                    let mut world = world_res.write();
+                    if world.set(coord, material) {
+                        Some(world.config().voxel_to_world_center(coord))
+                    } else {
+                        None
+                    }
+                };
+                if let Some(pos_m) = changed_pos {
                     let clip = if material.is_air() {
                         SynthClip::PickaxeHit
                     } else {

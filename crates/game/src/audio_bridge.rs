@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use bevy::prelude::*;
 use voxel_acoustics::{
-    AcousticEvent, AcousticSourceQuery, PathTraceConfig, ReverbEstimate, SourceAcousticParams,
-    solve_acoustics,
+    AcousticEvent, AcousticSourceQuery, AcousticWorkRequest, AcousticWorker, PathTraceConfig,
+    ReverbEstimate, SourceAcousticParams, solve_single_source,
 };
 use voxel_audio_dsp::{
     AudioCommand, AudioEngine, LOCAL_LOOPBACK_SPEAKER_ID, MicCapture, MicTelemetry, SynthClip,
@@ -26,6 +28,7 @@ pub struct PlaySpatialSoundEvent {
     pub clip: SynthClip,
     pub volume: f32,
     pub pitch: f32,
+    #[allow(dead_code)]
     pub ai_event: Option<AcousticEvent>,
 }
 
@@ -66,6 +69,7 @@ impl Default for VoiceSettings {
 pub struct AcousticTelemetry {
     pub reverb: ReverbEstimate,
     pub beacon_params: Option<SourceAcousticParams>,
+    pub drip_params: Option<SourceAcousticParams>,
     pub mic: MicTelemetry,
 }
 
@@ -74,6 +78,7 @@ impl Default for AcousticTelemetry {
         Self {
             reverb: ReverbEstimate::default(),
             beacon_params: None,
+            drip_params: None,
             mic: MicTelemetry {
                 rms_db: -90.0,
                 gate_open: false,
@@ -93,6 +98,9 @@ pub struct AcousticBeaconState {
     pub frame_counter: u64,
     pub next_oneshot_id: u64,
 }
+
+#[derive(Resource)]
+struct AcousticWorkerHolder(AcousticWorker);
 
 #[derive(Component)]
 struct BeaconVisual;
@@ -128,7 +136,7 @@ impl Plugin for AudioBridgePlugin {
                 (
                     voice_hotkeys_system,
                     sync_beacon_visual,
-                    solve_and_update_acoustics,
+                    submit_and_poll_acoustics,
                     process_mic_and_voice_frames,
                     process_spatial_sound_events,
                 )
@@ -141,14 +149,20 @@ fn setup_beacon_and_acoustics(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    world_res: Res<WorldResource>,
     level_info: Res<LevelInfoResource>,
 ) {
+    // Spawn off-thread 20 Hz acoustic raytracer reading shared Arc<RwLock<VoxelWorld>>
+    commands.insert_resource(AcousticWorkerHolder(AcousticWorker::spawn(Arc::clone(
+        &world_res.0,
+    ))));
+
     let beacon_pos = level_info.0.acoustic_beacon_pos_m;
     commands.insert_resource(AcousticBeaconState {
         pos_m: beacon_pos,
         ping_timer: Timer::from_seconds(1.5, TimerMode::Repeating),
         drip_timer: Timer::from_seconds(4.2, TimerMode::Repeating),
-        solve_timer: Timer::from_seconds(1.0 / 20.0, TimerMode::Repeating), // 20 Hz acoustic solver
+        solve_timer: Timer::from_seconds(1.0 / 20.0, TimerMode::Repeating),
         frame_counter: 0,
         next_oneshot_id: 100,
     });
@@ -211,12 +225,14 @@ fn sync_beacon_visual(
     }
 }
 
-fn solve_and_update_acoustics(
+/// Submits 20 Hz acoustic raytracing work to the background `AcousticWorker` and polls
+/// completed snapshots without ever blocking Bevy's main render thread!
+fn submit_and_poll_acoustics(
     time: Res<Time>,
-    world_res: Res<WorldResource>,
     level_info: Res<LevelInfoResource>,
     coop: Res<CoopState>,
     settings: Res<VoiceSettings>,
+    worker: Res<AcousticWorkerHolder>,
     player_q: Query<&Transform, With<PlayerController>>,
     mut beacon: ResMut<AcousticBeaconState>,
     mut telemetry: ResMut<AcousticTelemetry>,
@@ -234,26 +250,25 @@ fn solve_and_update_acoustics(
     let listener_fwd = cam_tf.forward().as_vec3();
     let listener_right = cam_tf.right().as_vec3();
 
-    // Re-solve voxel acoustics at 20 Hz for beacon, drips, AND all active voice speakers!
+    // 1. Submit non-blocking work request at 20 Hz (overwrites any unstarted pending request)
     if beacon.solve_timer.just_finished() {
         beacon.frame_counter = beacon.frame_counter.wrapping_add(1);
-        let mut queries = vec![
-            AcousticSourceQuery {
-                id: BEACON_SOURCE_ID,
-                pos_m: beacon.pos_m,
-                ref_distance_m: 2.0,
-                max_distance_m: 65.0,
-            },
-            AcousticSourceQuery {
-                id: DRIP_SOURCE_ID,
-                pos_m: level_info.0.grand_cavern_pos_m,
-                ref_distance_m: 2.5,
-                max_distance_m: 70.0,
-            },
-        ];
+        let mut sources = Vec::with_capacity(2 + coop.remote_players.len());
+        sources.push(AcousticSourceQuery {
+            id: BEACON_SOURCE_ID,
+            pos_m: beacon.pos_m,
+            ref_distance_m: 2.0,
+            max_distance_m: 65.0,
+        });
+        sources.push(AcousticSourceQuery {
+            id: DRIP_SOURCE_ID,
+            pos_m: level_info.0.grand_cavern_pos_m,
+            ref_distance_m: 2.5,
+            max_distance_m: 70.0,
+        });
 
         for (&player_id, rp) in &coop.remote_players {
-            queries.push(AcousticSourceQuery {
+            sources.push(AcousticSourceQuery {
                 id: VOICE_SOURCE_BASE_ID + player_id as u64,
                 pos_m: remote_player_head_pos(rp),
                 ref_distance_m: 2.2,
@@ -261,27 +276,34 @@ fn solve_and_update_acoustics(
             });
         }
 
-        let snap = solve_acoustics(
-            &world_res.0,
-            listener_pos,
-            listener_fwd,
+        worker.0.submit(AcousticWorkRequest {
+            listener_pos_m: listener_pos,
+            listener_forward: listener_fwd,
             listener_right,
-            &queries,
-            PathTraceConfig::default(),
-            beacon.frame_counter,
-        );
+            sources,
+            cfg: PathTraceConfig::default(),
+            frame_seed: beacon.frame_counter,
+        });
+    }
 
+    // 2. Poll latest completed snapshot from background worker (completely non-blocking)
+    if let Some(snap) = worker.0.try_take_snapshot() {
         telemetry.reverb = telemetry.reverb.lerp(snap.reverb, 0.25);
-        telemetry.beacon_params = snap.sources.first().copied();
 
         audio.engine.send(AudioCommand::UpdateListener {
-            pos_m: listener_pos,
-            right: listener_right,
+            pos_m: snap.listener_pos_m,
+            right: snap.listener_right,
             reverb: telemetry.reverb,
         });
 
         for src in snap.sources {
-            if src.id >= VOICE_SOURCE_BASE_ID {
+            if src.id == BEACON_SOURCE_ID {
+                telemetry.beacon_params = Some(src);
+                audio.engine.send(AudioCommand::UpdateSource(src));
+            } else if src.id == DRIP_SOURCE_ID {
+                telemetry.drip_params = Some(src);
+                audio.engine.send(AudioCommand::UpdateSource(src));
+            } else if src.id >= VOICE_SOURCE_BASE_ID {
                 let speaker_id = (src.id - VOICE_SOURCE_BASE_ID) as u16;
                 audio.engine.update_voice_acoustics(speaker_id, src);
             } else {
@@ -289,8 +311,6 @@ fn solve_and_update_acoustics(
             }
         }
 
-        // If Self-Echo Test is enabled, place our own loopback voice at the Beacon position
-        // so you can walk behind stone/foam walls solo and hear your voice muffle & echo!
         if settings.self_echo_test {
             if let Some(beacon_params) = telemetry.beacon_params {
                 audio
@@ -300,7 +320,7 @@ fn solve_and_update_acoustics(
         }
     }
 
-    // Trigger periodic Acoustic Beacon Ping (tests stone/foam wall muffling & breach clarity!)
+    // 3. Trigger periodic Acoustic Beacon Ping using already-solved params (zero raycasts!)
     if beacon.ping_timer.just_finished() && !settings.self_echo_test {
         if let Some(params) = telemetry.beacon_params {
             audio.engine.send(AudioCommand::PlayClip {
@@ -314,29 +334,9 @@ fn solve_and_update_acoustics(
         }
     }
 
-    // Trigger periodic atmospheric Grand Cavern water drip
+    // 4. Trigger periodic Grand Cavern water drip using already-solved drip params (zero raycasts!)
     if beacon.drip_timer.just_finished() {
-        let drip_pos = level_info.0.grand_cavern_pos_m;
-        let q = [AcousticSourceQuery {
-            id: DRIP_SOURCE_ID,
-            pos_m: drip_pos,
-            ref_distance_m: 2.5,
-            max_distance_m: 70.0,
-        }];
-        let snap = solve_acoustics(
-            &world_res.0,
-            listener_pos,
-            listener_fwd,
-            listener_right,
-            &q,
-            PathTraceConfig {
-                reverb_rays: 16,
-                early_reflection_rays: 16,
-                ..Default::default()
-            },
-            beacon.frame_counter.wrapping_add(99),
-        );
-        if let Some(params) = snap.sources.first().copied() {
+        if let Some(params) = telemetry.drip_params {
             audio.engine.send(AudioCommand::PlayClip {
                 source_id: DRIP_SOURCE_ID,
                 clip: SynthClip::WaterDrip,
@@ -400,8 +400,11 @@ fn process_mic_and_voice_frames(
     }
 }
 
+/// Solves one-shot SFX (footsteps, flare bounces, breaches) using `solve_single_source` —
+/// reuses the background worker's `ReverbEstimate` with ZERO wasted 4-bounce reverb rays!
 fn process_spatial_sound_events(
     world_res: Res<WorldResource>,
+    telemetry: Res<AcousticTelemetry>,
     player_q: Query<&Transform, With<PlayerController>>,
     mut beacon: ResMut<AcousticBeaconState>,
     mut events: MessageReader<PlaySpatialSoundEvent>,
@@ -413,42 +416,27 @@ fn process_spatial_sound_events(
     };
 
     let listener_pos = cam_tf.translation;
-    let listener_fwd = cam_tf.forward().as_vec3();
-    let listener_right = cam_tf.right().as_vec3();
+    let world = world_res.read();
 
     for ev in events.read() {
         let id = beacon.next_oneshot_id;
         beacon.next_oneshot_id = beacon.next_oneshot_id.wrapping_add(1).max(100);
 
-        let q = [AcousticSourceQuery {
+        let query = AcousticSourceQuery {
             id,
             pos_m: ev.pos_m,
             ref_distance_m: 1.8,
             max_distance_m: 60.0,
-        }];
-        let snap = solve_acoustics(
-            &world_res.0,
-            listener_pos,
-            listener_fwd,
-            listener_right,
-            &q,
-            PathTraceConfig {
-                reverb_rays: 12,
-                early_reflection_rays: 18,
-                ..Default::default()
-            },
-            id,
-        );
+        };
+        let params = solve_single_source(&world, listener_pos, query, telemetry.reverb, 16, id);
 
-        if let Some(params) = snap.sources.first().copied() {
-            audio.engine.send(AudioCommand::PlayClip {
-                source_id: id,
-                clip: ev.clip,
-                volume: ev.volume,
-                pitch: ev.pitch,
-                looping: false,
-                initial_params: params,
-            });
-        }
+        audio.engine.send(AudioCommand::PlayClip {
+            source_id: id,
+            clip: ev.clip,
+            volume: ev.volume,
+            pitch: ev.pitch,
+            looping: false,
+            initial_params: params,
+        });
     }
 }

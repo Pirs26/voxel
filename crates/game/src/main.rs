@@ -6,7 +6,9 @@ mod player;
 mod tools;
 mod voxel_render;
 
-use bevy::prelude::*;
+use std::sync::{Arc, RwLock};
+
+use bevy::{light::cluster::GlobalClusterSettings, prelude::*};
 use voxel_core::{VoxelConfig, generate_world};
 
 use crate::{
@@ -17,6 +19,14 @@ use crate::{
     tools::ToolsPlugin,
     voxel_render::{LevelInfoResource, VoxelRenderPlugin, WorldResource},
 };
+
+fn configure_gpu_clustering(mut cluster_settings: Option<ResMut<GlobalClusterSettings>>) {
+    if let Some(ref mut settings) = cluster_settings {
+        if let Some(ref mut gpu) = settings.gpu_clustering {
+            gpu.initial_index_list_capacity = gpu.initial_index_list_capacity.max(131_072);
+        }
+    }
+}
 
 fn main() {
     let config = VoxelConfig::default();
@@ -37,8 +47,9 @@ fn main() {
             brightness: 22.0,
             ..default()
         })
-        .insert_resource(WorldResource(world))
+        .insert_resource(WorldResource(Arc::new(RwLock::new(world))))
         .insert_resource(LevelInfoResource(level_info))
+        .add_systems(Startup, configure_gpu_clustering)
         .add_plugins((
             VoxelRenderPlugin,
             NetBridgePlugin,

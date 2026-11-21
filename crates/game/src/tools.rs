@@ -30,22 +30,45 @@ pub struct ThrownFlare {
 #[derive(Component)]
 pub struct FlareLight;
 
+#[derive(Resource)]
+struct FlareAssets {
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+}
+
 pub struct ToolsPlugin;
 
 impl Plugin for ToolsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<SpawnFlareEvent>().add_systems(
-            Update,
-            (
-                voxel_interact_system,
-                throw_flare_system,
-                spawn_flare_entities_system,
-                update_flares_system,
-                move_beacon_system,
-            )
-                .chain(),
-        );
+        app.add_message::<SpawnFlareEvent>()
+            .add_systems(Startup, setup_flare_assets)
+            .add_systems(
+                Update,
+                (
+                    voxel_interact_system,
+                    throw_flare_system,
+                    spawn_flare_entities_system,
+                    update_flares_system,
+                    move_beacon_system,
+                )
+                    .chain(),
+            );
     }
+}
+
+fn setup_flare_assets(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.insert_resource(FlareAssets {
+        mesh: meshes.add(Sphere::new(0.08)),
+        material: materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.35, 0.12),
+            emissive: LinearRgba::new(12.0, 3.2, 0.8, 1.0),
+            ..default()
+        }),
+    });
 }
 
 /// Left click: Break `CrackedRock` or `AcousticFoam` (breaching shortcuts / opening sound paths!).
@@ -55,7 +78,7 @@ fn voxel_interact_system(
     menu_open: Res<CoopMenuOpen>,
     cursor_q: Query<&CursorOptions, With<PrimaryWindow>>,
     player_q: Query<(&PlayerController, &Transform)>,
-    mut world_res: ResMut<WorldResource>,
+    world_res: Res<WorldResource>,
     mut coop: ResMut<CoopState>,
     mut sound_writer: MessageWriter<PlaySpatialSoundEvent>,
 ) {
@@ -77,14 +100,18 @@ fn voxel_interact_system(
 
     let origin = cam_tf.translation;
     let dir = cam_tf.forward().as_vec3();
-    let Some(hit) = raycast_solid(&world_res.0, origin, dir, 5.2) else {
+    let hit = {
+        let world = world_res.read();
+        raycast_solid(&world, origin, dir, 5.2)
+    };
+    let Some(hit) = hit else {
         return;
     };
 
     if break_pressed {
         match hit.material.def().destructibility {
             Destructibility::BreakableCracked | Destructibility::PlaceableTool => {
-                world_res.0.set(hit.voxel, VoxelId::Air);
+                world_res.write().set(hit.voxel, VoxelId::Air);
                 coop.send_voxel_delta(hit.voxel, VoxelId::Air);
                 sound_writer.write(PlaySpatialSoundEvent {
                     pos_m: hit.point_m,
@@ -118,9 +145,14 @@ fn voxel_interact_system(
     } else if place_pressed {
         let target = hit.previous_voxel;
         // Prevent placing foam directly inside the player's own body
-        let v_center = world_res.0.config().voxel_to_world_center(target);
-        let player_mid = pc.feet_pos_m + Vec3::Y * 0.9;
-        if v_center.distance(player_mid) > 0.78 && world_res.0.set(target, VoxelId::AcousticFoam) {
+        let (v_center, placed) = {
+            let mut world = world_res.write();
+            let vc = world.config().voxel_to_world_center(target);
+            let player_mid = pc.feet_pos_m + Vec3::Y * 0.9;
+            let ok = vc.distance(player_mid) > 0.78 && world.set(target, VoxelId::AcousticFoam);
+            (vc, ok)
+        };
+        if placed {
             coop.send_voxel_delta(target, VoxelId::AcousticFoam);
             sound_writer.write(PlaySpatialSoundEvent {
                 pos_m: v_center,
@@ -166,22 +198,18 @@ fn throw_flare_system(
 
 fn spawn_flare_entities_system(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    flare_assets: Res<FlareAssets>,
     mut events: MessageReader<SpawnFlareEvent>,
     mut sound_writer: MessageWriter<PlaySpatialSoundEvent>,
 ) {
     for ev in events.read() {
         // Put PointLight on a dedicated child entity (with NO Mesh3d!) so Bevy culls the light
         // using its full 18m range sphere rather than the tiny 0.08m flare mesh AABB!
+        // Reuses cached FlareAssets mesh & material handles (zero GPU asset leak!).
         commands
             .spawn((
-                Mesh3d(meshes.add(Sphere::new(0.08))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::srgb(1.0, 0.35, 0.12),
-                    emissive: LinearRgba::new(12.0, 3.2, 0.8, 1.0),
-                    ..default()
-                })),
+                Mesh3d(flare_assets.mesh.clone()),
+                MeshMaterial3d(flare_assets.material.clone()),
                 Transform::from_translation(ev.origin_m),
                 ThrownFlare {
                     velocity_m: ev.velocity_m,
@@ -228,6 +256,7 @@ fn update_flares_system(
 ) {
     let dt = time.delta_secs().min(0.05);
     let r = Vec3::splat(0.10);
+    let world = world_res.read();
 
     for (ent, mut tf, mut flare, children) in &mut flares_q {
         flare.life_remaining_s -= dt;
@@ -257,7 +286,7 @@ fn update_flares_system(
         for axis in 0..3 {
             let mut next = pos;
             next[axis] += flare.velocity_m[axis] * dt;
-            if aabb_intersects_world(&world_res.0, next - r, next + r) {
+            if aabb_intersects_world(&world, next - r, next + r) {
                 flare.velocity_m[axis] *= -0.42;
                 flare.velocity_m *= 0.78;
                 bounced = true;

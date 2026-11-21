@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -8,8 +9,18 @@ use bevy::{
 use glam::IVec3;
 use voxel_core::{ChunkMeshData, GeneratedLevelInfo, VoxelWorld, mesh_chunk};
 
-#[derive(Resource)]
-pub struct WorldResource(pub VoxelWorld);
+#[derive(Resource, Clone)]
+pub struct WorldResource(pub Arc<RwLock<VoxelWorld>>);
+
+impl WorldResource {
+    pub fn read(&self) -> RwLockReadGuard<'_, VoxelWorld> {
+        self.0.read().expect("voxel world rwlock poisoned")
+    }
+
+    pub fn write(&self) -> RwLockWriteGuard<'_, VoxelWorld> {
+        self.0.write().expect("voxel world rwlock poisoned")
+    }
+}
 
 #[derive(Resource)]
 pub struct LevelInfoResource(pub GeneratedLevelInfo);
@@ -48,16 +59,17 @@ fn setup_voxel_material(
 
 fn sync_dirty_chunks(
     mut commands: Commands,
-    mut world_res: ResMut<WorldResource>,
+    world_res: Res<WorldResource>,
     mut chunk_entities: ResMut<ChunkEntities>,
     mut meshes: ResMut<Assets<Mesh>>,
     mat_handle: Res<VoxelMaterialHandle>,
 ) {
-    let dirty = world_res.0.take_dirty_chunks();
+    let dirty = world_res.write().take_dirty_chunks();
     if dirty.is_empty() {
         return;
     }
 
+    let world = world_res.read();
     for cc in dirty {
         // Despawn old chunk mesh and crystal lights
         if let Some(old_ent) = chunk_entities.meshes.remove(&cc) {
@@ -69,7 +81,7 @@ fn sync_dirty_chunks(
             }
         }
 
-        let mesh_data = mesh_chunk(&world_res.0, cc);
+        let mesh_data = mesh_chunk(&world, cc);
         if mesh_data.indices.is_empty() {
             continue;
         }
