@@ -9,6 +9,7 @@ use voxel_core::VoxelId;
 
 use crate::{
     audio_bridge::PlaySpatialSoundEvent,
+    net_bridge::CoopMenuOpen,
     physics::{
         PLAYER_EYE_CROUCH_M, PLAYER_EYE_STAND_M, PLAYER_HEIGHT_CROUCH_M, PLAYER_HEIGHT_STAND_M,
         move_and_slide,
@@ -94,11 +95,31 @@ fn spawn_player(mut commands: Commands, level_info: Res<LevelInfoResource>) {
 fn cursor_grab_system(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    mut menu_open: ResMut<CoopMenuOpen>,
     mut cursor_q: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     let Ok(mut cursor) = cursor_q.single_mut() else {
         return;
     };
+
+    if keys.just_pressed(KeyCode::Tab) {
+        menu_open.0 = !menu_open.0;
+        if menu_open.0 {
+            cursor.grab_mode = CursorGrabMode::None;
+            cursor.visible = true;
+        } else {
+            cursor.grab_mode = CursorGrabMode::Locked;
+            cursor.visible = false;
+        }
+        return;
+    }
+
+    if menu_open.0 {
+        if keys.just_pressed(KeyCode::Escape) {
+            menu_open.0 = false;
+        }
+        return;
+    }
 
     if mouse_buttons.just_pressed(MouseButton::Left) && cursor.grab_mode == CursorGrabMode::None {
         cursor.grab_mode = CursorGrabMode::Locked;
@@ -112,13 +133,14 @@ fn cursor_grab_system(
 
 fn player_look_system(
     mut motion_reader: MessageReader<MouseMotion>,
+    menu_open: Res<CoopMenuOpen>,
     cursor_q: Query<&CursorOptions, With<PrimaryWindow>>,
     mut player_q: Query<(&mut PlayerController, &mut Transform)>,
 ) {
     let Ok(cursor) = cursor_q.single() else {
         return;
     };
-    if cursor.grab_mode == CursorGrabMode::None {
+    if menu_open.0 || cursor.grab_mode == CursorGrabMode::None {
         motion_reader.clear();
         return;
     }
@@ -142,6 +164,7 @@ fn player_look_system(
 fn player_move_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    menu_open: Res<CoopMenuOpen>,
     world_res: Res<WorldResource>,
     mut player_q: Query<(&mut PlayerController, &mut Transform)>,
     mut sound_writer: MessageWriter<PlaySpatialSoundEvent>,
@@ -151,24 +174,28 @@ fn player_move_system(
         return;
     };
 
-    pc.crouching = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::KeyC);
-    let sprinting = keys.pressed(KeyCode::ShiftLeft) && !pc.crouching;
+    let controls_active = !menu_open.0;
+    pc.crouching =
+        controls_active && (keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::KeyC));
+    let sprinting = controls_active && keys.pressed(KeyCode::ShiftLeft) && !pc.crouching;
 
     let forward = Vec3::new(-pc.yaw.sin(), 0.0, -pc.yaw.cos()).normalize_or_zero();
     let right = Vec3::new(pc.yaw.cos(), 0.0, -pc.yaw.sin()).normalize_or_zero();
 
     let mut wish = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) {
-        wish += forward;
-    }
-    if keys.pressed(KeyCode::KeyS) {
-        wish -= forward;
-    }
-    if keys.pressed(KeyCode::KeyD) {
-        wish += right;
-    }
-    if keys.pressed(KeyCode::KeyA) {
-        wish -= right;
+    if controls_active {
+        if keys.pressed(KeyCode::KeyW) {
+            wish += forward;
+        }
+        if keys.pressed(KeyCode::KeyS) {
+            wish -= forward;
+        }
+        if keys.pressed(KeyCode::KeyD) {
+            wish += right;
+        }
+        if keys.pressed(KeyCode::KeyA) {
+            wish -= right;
+        }
     }
     wish = wish.normalize_or_zero();
 
@@ -185,7 +212,7 @@ fn player_move_system(
 
     // Gravity + Jump
     pc.velocity_m.y -= 18.0 * dt;
-    if pc.grounded && keys.just_pressed(KeyCode::Space) {
+    if controls_active && pc.grounded && keys.just_pressed(KeyCode::Space) {
         pc.velocity_m.y = 7.4;
         pc.grounded = false;
     }

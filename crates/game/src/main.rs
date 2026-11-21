@@ -1,5 +1,6 @@
 mod audio_bridge;
 mod hud;
+mod net_bridge;
 mod physics;
 mod player;
 mod tools;
@@ -11,6 +12,7 @@ use voxel_core::{VoxelConfig, generate_world};
 use crate::{
     audio_bridge::AudioBridgePlugin,
     hud::HudPlugin,
+    net_bridge::{DEFAULT_LEVEL_SEED, NetBridgePlugin},
     player::PlayerPlugin,
     tools::ToolsPlugin,
     voxel_render::{LevelInfoResource, VoxelRenderPlugin, WorldResource},
@@ -18,12 +20,12 @@ use crate::{
 
 fn main() {
     let config = VoxelConfig::default();
-    let (world, level_info) = generate_world(1337, config);
+    let (world, level_info) = generate_world(DEFAULT_LEVEL_SEED, config);
 
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Echoes Below — Week 1 Voxel Acoustic Prototype".into(),
+                title: "Echoes Below — Week 2 Co-op & Proximity Voice".into(),
                 resolution: (1280, 720).into(),
                 ..default()
             }),
@@ -39,6 +41,7 @@ fn main() {
         .insert_resource(LevelInfoResource(level_info))
         .add_plugins((
             VoxelRenderPlugin,
+            NetBridgePlugin,
             PlayerPlugin,
             ToolsPlugin,
             AudioBridgePlugin,

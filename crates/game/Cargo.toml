@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+fast-dev = ["bevy/dynamic_linking"]
+
 [dependencies]
 bevy.workspace = true
 glam.workspace = true
