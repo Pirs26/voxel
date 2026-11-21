@@ -11,7 +11,7 @@ use bytes::Bytes;
 use glam::{IVec3, Vec3};
 use iroh::endpoint::{Connection, Endpoint, VarInt, presets};
 use iroh::EndpointAddr;
-use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
+use tokio::sync::{RwLock, mpsc, watch};
 use voxel_core::VoxelId;
 
 use crate::protocol::{
@@ -317,6 +317,15 @@ impl HostState {
         self.voxel_edits.iter().map(|(&k, &v)| (k, v)).collect()
     }
 
+    fn mutates_state(msg: &ReliableMessage) -> bool {
+        matches!(
+            msg,
+            ReliableMessage::VoxelDelta { .. }
+                | ReliableMessage::BeaconMoved { .. }
+                | ReliableMessage::StartDescent { .. }
+        )
+    }
+
     fn apply_state_mutation(&mut self, msg: &ReliableMessage) {
         match msg {
             ReliableMessage::VoxelDelta { coord, material } => {
@@ -441,7 +450,7 @@ async fn run_host_task(
         },
     );
 
-    let state = Arc::new(AsyncMutex::new(HostState {
+    let state = Arc::new(RwLock::new(HostState {
         level_seed,
         beacon_pos_m,
         voxel_edits,
@@ -458,15 +467,20 @@ async fn run_host_task(
             maybe_cmd = cmd_rx.recv() => {
                 match maybe_cmd {
                     Some(SessionCommand::SendReliable(msg)) => {
-                        let mut guard = state.lock().await;
-                        guard.apply_state_mutation(&msg);
-                        guard.broadcast_reliable(&msg, None);
+                        if HostState::mutates_state(&msg) {
+                            let mut guard = state.write().await;
+                            guard.apply_state_mutation(&msg);
+                            guard.broadcast_reliable(&msg, None);
+                        } else {
+                            let guard = state.read().await;
+                            guard.broadcast_reliable(&msg, None);
+                        }
                     }
                     Some(SessionCommand::SendDatagram(dgram)) => {
                         match encode_datagram(&dgram) {
                             Ok(raw) => {
                                 let bytes = Bytes::from(raw);
-                                let guard = state.lock().await;
+                                let guard = state.read().await;
                                 guard.broadcast_datagram_bytes(&bytes, None);
                             }
                             Err(e) => {
@@ -495,7 +509,7 @@ async fn run_host_task(
 
     // Close all peer connections and the endpoint cleanly.
     {
-        let mut guard = state.lock().await;
+        let mut guard = state.write().await;
         for (_, peer) in guard.peers.drain() {
             peer.conn.close(VarInt::from_u32(0), b"host shutdown");
         }
@@ -505,7 +519,7 @@ async fn run_host_task(
 
 async fn handle_incoming_guest(
     incoming: iroh::endpoint::Incoming,
-    state: Arc<AsyncMutex<HostState>>,
+    state: Arc<RwLock<HostState>>,
     events: EventQueue,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
@@ -572,7 +586,7 @@ async fn handle_incoming_guest(
     let (reliable_tx, mut reliable_rx) = mpsc::unbounded_channel::<ReliableMessage>();
 
     let (player_id, player_info, welcome_msg) = {
-        let mut guard = state.lock().await;
+        let mut guard = state.write().await;
         let player_id = guard.next_player_id;
         guard.next_player_id = guard.next_player_id.saturating_add(1);
 
@@ -633,10 +647,14 @@ async fn handle_incoming_guest(
     let done_tx_rel = done_tx.clone();
     let reader_handle = tokio::spawn(async move {
         while let Ok(Some(msg)) = read_reliable_frame(&mut recv_stream).await {
-            let mut guard = state_rel.lock().await;
-            guard.apply_state_mutation(&msg);
-            guard.broadcast_reliable(&msg, Some(player_id));
-            drop(guard);
+            if HostState::mutates_state(&msg) {
+                let mut guard = state_rel.write().await;
+                guard.apply_state_mutation(&msg);
+                guard.broadcast_reliable(&msg, Some(player_id));
+            } else {
+                let guard = state_rel.read().await;
+                guard.broadcast_reliable(&msg, Some(player_id));
+            }
 
             emit_reliable_event(&events_rel, msg);
         }
@@ -653,7 +671,7 @@ async fn handle_incoming_guest(
             match decode_datagram(&raw) {
                 Ok(dgram) => {
                     {
-                        let guard = state_dgram.lock().await;
+                        let guard = state_dgram.read().await;
                         guard.broadcast_datagram_bytes(&raw, Some(player_id));
                     }
                     emit_datagram_event(&events_dgram, dgram);
@@ -686,14 +704,14 @@ async fn handle_incoming_guest(
 
 async fn cleanup_peer(
     player_id: PlayerId,
-    state: &Arc<AsyncMutex<HostState>>,
+    state: &Arc<RwLock<HostState>>,
     events: &EventQueue,
     conn: &Connection,
 ) {
     conn.close(VarInt::from_u32(0), b"peer disconnected");
 
     let removed = {
-        let mut guard = state.lock().await;
+        let mut guard = state.write().await;
         guard.peers.remove(&player_id);
         let existed = guard.players.remove(&player_id).is_some();
         if existed {
