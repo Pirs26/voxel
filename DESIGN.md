@@ -293,7 +293,9 @@ stateDiagram-v2
 - **Consumable Stacks & Physical Acoustics:**
   - Stackable consumables per belt slot: Flares/Torches (`3–4`), Acoustic Foam Canister (`6–8` voxel charges), Noise Decoys (`2`), Aid Kit (`1`), Small Side-Loot (`1` per slot for greedy risk/reward tension).
   - Dropping any item (`Q`) spawns it physically and emits a real voxel-echoing impact sound; a heavily stuffed pack slightly increases sprint/jump noise.
-  - **Shed Storage Rack:** Gear left in the Base Shed stays safe if the team wipes underground.
+  - **Persistent Base Shed & Campaign Saves (Never Reset Between Dives):**
+    - Only the underground cave regenerates per dive—the Surface Shed persists across rounds so players can physically leave tools, flares, charging batteries, and trophies on **Shed shelves, racks, and benches** wherever they want.
+    - **Host-Authoritative Save Files (`saves/<slot>.json`):** Auto-saves upon returning to the Shed (plus manual save). Stores shared credits, unlocked depth tiers, Shed upgrades, every physical item placed in the Shed (`pos_m`, `rot`, `charge/uses`), and per-player inventories/gear keyed by **Player Name** (requiring a simple local Player Name entry before Hosting/Joining so friends automatically restore their exact belt, battery pouch, passive upgrades, and visor/skin whenever they reconnect).
 
 ---
 
