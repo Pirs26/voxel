@@ -192,7 +192,7 @@ impl CaptureProcessor {
     }
 
     #[inline]
-    fn process_mono(&mut self, mono: f32, threshold_db: f32, muted: bool) {
+    fn process_mono(&mut self, mono: f32, threshold_linear_sq: f32, muted: bool) {
         let mono = if mono.is_finite() {
             mono.clamp(-4.0, 4.0)
         } else {
@@ -214,12 +214,9 @@ impl CaptureProcessor {
             let coeff = if sq > *rms_sq { ATTACK } else { RELEASE };
             *rms_sq += (sq - *rms_sq) * coeff;
 
-            let rms = rms_sq.max(0.0).sqrt();
-            let db = linear_rms_to_dbfs(rms);
-
             if muted {
                 *hang_remaining = 0;
-            } else if db >= threshold_db {
+            } else if *rms_sq >= threshold_linear_sq {
                 *hang_remaining = GATE_HANG_SAMPLES;
             } else if *hang_remaining > 0 {
                 *hang_remaining -= 1;
@@ -231,6 +228,7 @@ impl CaptureProcessor {
 
     fn process_interleaved_f32(&mut self, data: &[f32]) {
         let threshold_db = f32::from_bits(self.shared.threshold_db_bits.load(Ordering::Relaxed));
+        let threshold_linear_sq = threshold_db_to_linear_sq(threshold_db);
         let muted = self.shared.muted.load(Ordering::Relaxed);
         let ch = self.channels;
         let inv_ch = 1.0 / ch as f32;
@@ -240,13 +238,14 @@ impl CaptureProcessor {
             for &s in frame {
                 sum += s;
             }
-            self.process_mono(sum * inv_ch, threshold_db, muted);
+            self.process_mono(sum * inv_ch, threshold_linear_sq, muted);
         }
         self.publish_telemetry(muted);
     }
 
     fn process_interleaved_i16(&mut self, data: &[i16]) {
         let threshold_db = f32::from_bits(self.shared.threshold_db_bits.load(Ordering::Relaxed));
+        let threshold_linear_sq = threshold_db_to_linear_sq(threshold_db);
         let muted = self.shared.muted.load(Ordering::Relaxed);
         let ch = self.channels;
         let inv_ch = 1.0 / (ch as f32 * 32768.0);
@@ -256,13 +255,14 @@ impl CaptureProcessor {
             for &s in frame {
                 sum += s as f32;
             }
-            self.process_mono(sum * inv_ch, threshold_db, muted);
+            self.process_mono(sum * inv_ch, threshold_linear_sq, muted);
         }
         self.publish_telemetry(muted);
     }
 
     fn process_interleaved_u16(&mut self, data: &[u16]) {
         let threshold_db = f32::from_bits(self.shared.threshold_db_bits.load(Ordering::Relaxed));
+        let threshold_linear_sq = threshold_db_to_linear_sq(threshold_db);
         let muted = self.shared.muted.load(Ordering::Relaxed);
         let ch = self.channels;
         let inv_ch = 1.0 / ch as f32;
@@ -272,13 +272,14 @@ impl CaptureProcessor {
             for &s in frame {
                 sum += (s as f32 / 32768.0) - 1.0;
             }
-            self.process_mono(sum * inv_ch, threshold_db, muted);
+            self.process_mono(sum * inv_ch, threshold_linear_sq, muted);
         }
         self.publish_telemetry(muted);
     }
 
     fn process_interleaved_i32(&mut self, data: &[i32]) {
         let threshold_db = f32::from_bits(self.shared.threshold_db_bits.load(Ordering::Relaxed));
+        let threshold_linear_sq = threshold_db_to_linear_sq(threshold_db);
         let muted = self.shared.muted.load(Ordering::Relaxed);
         let ch = self.channels;
         let inv_ch = 1.0 / ch as f64;
@@ -288,13 +289,14 @@ impl CaptureProcessor {
             for &s in frame {
                 sum += s as f64 / 2_147_483_648.0;
             }
-            self.process_mono((sum * inv_ch) as f32, threshold_db, muted);
+            self.process_mono((sum * inv_ch) as f32, threshold_linear_sq, muted);
         }
         self.publish_telemetry(muted);
     }
 
     fn process_interleaved_f64(&mut self, data: &[f64]) {
         let threshold_db = f32::from_bits(self.shared.threshold_db_bits.load(Ordering::Relaxed));
+        let threshold_linear_sq = threshold_db_to_linear_sq(threshold_db);
         let muted = self.shared.muted.load(Ordering::Relaxed);
         let ch = self.channels;
         let inv_ch = 1.0 / ch as f64;
@@ -304,7 +306,7 @@ impl CaptureProcessor {
             for &s in frame {
                 sum += s;
             }
-            self.process_mono((sum * inv_ch) as f32, threshold_db, muted);
+            self.process_mono((sum * inv_ch) as f32, threshold_linear_sq, muted);
         }
         self.publish_telemetry(muted);
     }
@@ -319,6 +321,11 @@ impl CaptureProcessor {
             .gate_open
             .store(!muted && self.hang_remaining > 0, Ordering::Relaxed);
     }
+}
+
+#[inline]
+fn threshold_db_to_linear_sq(threshold_db: f32) -> f32 {
+    10.0f32.powf(threshold_db.clamp(-90.0, 0.0) / 10.0)
 }
 
 #[inline]
@@ -431,6 +438,7 @@ impl MicCapture {
 
         let mut packets = Vec::new();
         let threshold_db = self.gate_threshold_db();
+        let threshold_linear_sq = threshold_db_to_linear_sq(threshold_db);
         let muted = self.is_muted();
         let mut consumed = 0usize;
 
@@ -439,12 +447,11 @@ impl MicCapture {
             consumed += VOICE_FRAME_SAMPLES;
 
             let energy = frame.iter().map(|s| s * s).sum::<f32>() / VOICE_FRAME_SAMPLES as f32;
-            let frame_rms_db = linear_rms_to_dbfs(energy.sqrt());
 
             let should_emit = if muted {
                 self.hang_frames = 0;
                 false
-            } else if frame_rms_db >= threshold_db {
+            } else if energy >= threshold_linear_sq {
                 self.hang_frames = GATE_HANG_FRAMES;
                 true
             } else if self.hang_frames > 0 {
@@ -458,14 +465,13 @@ impl MicCapture {
                 continue;
             }
 
-            if let Some(ref mut codec) = self.codec {
-                if let Ok(len) = codec.encode_frame(frame, &mut self.encode_buf) {
-                    if len > 0 {
-                        let seq = self.seq;
-                        self.seq = self.seq.wrapping_add(1);
-                        packets.push((seq, self.encode_buf[..len].to_vec()));
-                    }
-                }
+            if let Some(ref mut codec) = self.codec
+                && let Ok(len) = codec.encode_frame(frame, &mut self.encode_buf)
+                && len > 0
+            {
+                let seq = self.seq;
+                self.seq = self.seq.wrapping_add(1);
+                packets.push((seq, self.encode_buf[..len].to_vec()));
             }
         }
 
@@ -716,5 +722,35 @@ mod tests {
         let out2 = pool.decode_packet(LOCAL_LOOPBACK_SPEAKER_ID, 12, &pkt[..len2]);
         assert!((1750..=1780).contains(&out2.len()), "out2 len={}", out2.len());
         assert!(out2.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn capture_processor_gate_linear_sq_matches_db_threshold() {
+        let (tx, _rx) = RingBuffer::<f32>::new(MIC_RING_CAPACITY);
+        let shared = Arc::new(MicSharedState::new(-30.0));
+        let mut proc = CaptureProcessor::new(VOICE_SAMPLE_RATE as f32, 1, tx, Arc::clone(&shared));
+
+        // Quiet tone (~-60 dBFS): gate must stay closed
+        let quiet: Vec<f32> = (0..1024)
+            .map(|i| (TAU * 440.0 * i as f32 / VOICE_SAMPLE_RATE as f32).sin() * 0.001)
+            .collect();
+        proc.process_interleaved_f32(&quiet);
+        assert!(!shared.gate_open.load(Ordering::Relaxed));
+        let quiet_db = f32::from_bits(shared.rms_db_bits.load(Ordering::Relaxed));
+        assert!(quiet_db < -45.0, "expected quiet rms_db < -45, got {quiet_db}");
+
+        // Loud speech-band tone (~-15 dBFS): gate must open and telemetry rms_db must rise above -30 dB
+        let loud: Vec<f32> = (0..2048)
+            .map(|i| (TAU * 440.0 * i as f32 / VOICE_SAMPLE_RATE as f32).sin() * 0.25)
+            .collect();
+        proc.process_interleaved_f32(&loud);
+        assert!(shared.gate_open.load(Ordering::Relaxed));
+        let loud_db = f32::from_bits(shared.rms_db_bits.load(Ordering::Relaxed));
+        assert!(loud_db > -25.0 && loud_db < -5.0, "unexpected loud rms_db: {loud_db}");
+
+        // Muting closes the gate immediately on the next callback
+        shared.muted.store(true, Ordering::Relaxed);
+        proc.process_interleaved_f32(&loud[..256]);
+        assert!(!shared.gate_open.load(Ordering::Relaxed));
     }
 }

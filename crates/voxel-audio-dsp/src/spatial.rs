@@ -27,6 +27,58 @@ impl EarlyReflectionLine {
         }
     }
 
+    /// Precomputes packed `(gain_l, gain_r, delay_samples)` for all active early reflection taps,
+    /// returning the number of active entries written to `out`.
+    #[inline]
+    pub fn prepare_cached_taps(
+        &self,
+        taps: &[EarlyTap; MAX_EARLY_TAPS],
+        listener_right: Vec3,
+        out: &mut [(f32, f32, usize); MAX_EARLY_TAPS],
+    ) -> usize {
+        let max_delay = self.buf.len() - 2;
+        let mut count = 0usize;
+        for tap in taps {
+            if !tap.active {
+                continue;
+            }
+            let delay_samps = ((tap.delay_sec * self.sample_rate) as usize).clamp(1, max_delay);
+            let gain = tap.gain.mean().clamp(0.0, 1.2);
+            let (gl, gr) = stereo_pan_gains(tap.direction, listener_right);
+            out[count] = (gain * gl, gain * gr, delay_samps);
+            count += 1;
+        }
+        count
+    }
+
+    /// Ultra-lean per-sample early reflection step using precomputed `(gain_l, gain_r, delay_samples)`
+    /// tuples from `prepare_cached_taps` — zero trigonometry, zero `sqrt()`, zero integer division.
+    #[inline]
+    pub fn process_cached(
+        &mut self,
+        dry_mono: f32,
+        cached_taps: &[(f32, f32, usize)],
+    ) -> (f32, f32) {
+        let len = self.buf.len();
+        let w = self.write_idx;
+        self.buf[w] = dry_mono;
+
+        let mut out_l = 0.0f32;
+        let mut out_r = 0.0f32;
+
+        for &(gain_l, gain_r, delay_samps) in cached_taps {
+            let d = delay_samps.min(len - 1);
+            let r_idx = if w >= d { w - d } else { w + len - d };
+            let sample = self.buf[r_idx];
+            out_l += sample * gain_l;
+            out_r += sample * gain_r;
+        }
+
+        let next_w = w + 1;
+        self.write_idx = if next_w < len { next_w } else { 0 };
+        (out_l, out_r)
+    }
+
     #[inline]
     pub fn process(
         &mut self,
@@ -34,28 +86,9 @@ impl EarlyReflectionLine {
         taps: &[EarlyTap; MAX_EARLY_TAPS],
         listener_right: Vec3,
     ) -> (f32, f32) {
-        let len = self.buf.len();
-        self.buf[self.write_idx] = dry_mono;
-
-        let mut out_l = 0.0f32;
-        let mut out_r = 0.0f32;
-
-        for tap in taps {
-            if !tap.active {
-                continue;
-            }
-            let delay_samps = ((tap.delay_sec * self.sample_rate) as usize).clamp(1, len - 2);
-            let r_idx = (self.write_idx + len - delay_samps) % len;
-            let sample = self.buf[r_idx];
-            // Average 3-band gain for early tap energy
-            let gain = tap.gain.mean().clamp(0.0, 1.2);
-            let (gl, gr) = stereo_pan_gains(tap.direction, listener_right);
-            out_l += sample * gain * gl;
-            out_r += sample * gain * gr;
-        }
-
-        self.write_idx = (self.write_idx + 1) % len;
-        (out_l, out_r)
+        let mut cached = [(0.0f32, 0.0f32, 1usize); MAX_EARLY_TAPS];
+        let count = self.prepare_cached_taps(taps, listener_right, &mut cached);
+        self.process_cached(dry_mono, &cached[..count])
     }
 
     pub fn reset(&mut self) {

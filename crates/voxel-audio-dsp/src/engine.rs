@@ -65,7 +65,11 @@ struct Voice {
     looping: bool,
     pos_m: Vec3,
     direct_gain: Bands3,
+    direct_gl: f32,
+    direct_gr: f32,
     early_taps: [EarlyTap; MAX_EARLY_TAPS],
+    early_gains: [(f32, f32, usize); MAX_EARLY_TAPS],
+    active_tap_count: usize,
     reverb_send: f32,
     filter: ThreeBandFilter,
     early_line: EarlyReflectionLine,
@@ -83,11 +87,27 @@ impl Voice {
             looping: false,
             pos_m: Vec3::ZERO,
             direct_gain: Bands3::ONE,
+            direct_gl: std::f32::consts::FRAC_1_SQRT_2,
+            direct_gr: std::f32::consts::FRAC_1_SQRT_2,
             early_taps: [EarlyTap::default(); MAX_EARLY_TAPS],
+            early_gains: [(0.0, 0.0, 1); MAX_EARLY_TAPS],
+            active_tap_count: 0,
             reverb_send: 0.25,
             filter: ThreeBandFilter::new(sample_rate),
             early_line: EarlyReflectionLine::new(sample_rate),
         }
+    }
+
+    #[inline]
+    fn update_spatial_cache(&mut self, listener_pos_m: Vec3, listener_right: Vec3) {
+        let (gl, gr) = stereo_pan_gains(self.pos_m - listener_pos_m, listener_right);
+        self.direct_gl = gl;
+        self.direct_gr = gr;
+        self.active_tap_count = self.early_line.prepare_cached_taps(
+            &self.early_taps,
+            listener_right,
+            &mut self.early_gains,
+        );
     }
 }
 
@@ -99,7 +119,11 @@ struct VoiceChannel {
     last_sample: f32,
     pos_m: Vec3,
     direct_gain: Bands3,
+    direct_gl: f32,
+    direct_gr: f32,
     early_taps: [EarlyTap; MAX_EARLY_TAPS],
+    early_gains: [(f32, f32, usize); MAX_EARLY_TAPS],
+    active_tap_count: usize,
     reverb_send: f32,
     filter: ThreeBandFilter,
     early_line: EarlyReflectionLine,
@@ -113,11 +137,27 @@ impl VoiceChannel {
             last_sample: 0.0,
             pos_m: Vec3::ZERO,
             direct_gain: Bands3::ONE,
+            direct_gl: std::f32::consts::FRAC_1_SQRT_2,
+            direct_gr: std::f32::consts::FRAC_1_SQRT_2,
             early_taps: [EarlyTap::default(); MAX_EARLY_TAPS],
+            early_gains: [(0.0, 0.0, 1); MAX_EARLY_TAPS],
+            active_tap_count: 0,
             reverb_send: 0.25,
             filter: ThreeBandFilter::new(sample_rate),
             early_line: EarlyReflectionLine::new(sample_rate),
         }
+    }
+
+    #[inline]
+    fn update_spatial_cache(&mut self, listener_pos_m: Vec3, listener_right: Vec3) {
+        let (gl, gr) = stereo_pan_gains(self.pos_m - listener_pos_m, listener_right);
+        self.direct_gl = gl;
+        self.direct_gr = gr;
+        self.active_tap_count = self.early_line.prepare_cached_taps(
+            &self.early_taps,
+            listener_right,
+            &mut self.early_gains,
+        );
     }
 }
 
@@ -132,6 +172,13 @@ struct MixerState {
 }
 
 impl MixerState {
+    #[inline]
+    fn prepare_block(&mut self, block_frames: usize) {
+        if block_frames > 0 {
+            self.fdn.prepare_block(self.reverb, block_frames);
+        }
+    }
+
     fn apply_command(&mut self, cmd: AudioCommand) {
         match cmd {
             AudioCommand::PlayClip {
@@ -148,6 +195,8 @@ impl MixerState {
                     .iter()
                     .position(|v| !v.active)
                     .unwrap_or(0);
+                let listener_pos_m = self.listener_pos_m;
+                let listener_right = self.listener_right;
                 let v = &mut self.voices[slot];
                 v.active = true;
                 v.source_id = source_id;
@@ -162,6 +211,7 @@ impl MixerState {
                 v.reverb_send = initial_params.reverb_send;
                 v.filter.reset();
                 v.early_line.reset();
+                v.update_spatial_cache(listener_pos_m, listener_right);
             }
             AudioCommand::UpdateListener {
                 pos_m,
@@ -171,14 +221,29 @@ impl MixerState {
                 self.listener_pos_m = pos_m;
                 self.listener_right = right.normalize_or_zero();
                 self.reverb = reverb;
+                let listener_pos_m = self.listener_pos_m;
+                let listener_right = self.listener_right;
+                for v in &mut self.voices {
+                    if v.active {
+                        v.update_spatial_cache(listener_pos_m, listener_right);
+                    }
+                }
+                for vc in &mut self.voice_channels {
+                    if vc.active {
+                        vc.update_spatial_cache(listener_pos_m, listener_right);
+                    }
+                }
             }
             AudioCommand::UpdateSource(params) => {
+                let listener_pos_m = self.listener_pos_m;
+                let listener_right = self.listener_right;
                 for v in &mut self.voices {
                     if v.active && v.source_id == params.id {
                         v.pos_m = params.pos_m;
                         v.direct_gain = params.direct_gain;
                         v.early_taps = params.early_taps;
                         v.reverb_send = params.reverb_send;
+                        v.update_spatial_cache(listener_pos_m, listener_right);
                     }
                 }
             }
@@ -190,6 +255,8 @@ impl MixerState {
                 }
             }
             AudioCommand::UpdateVoiceChannel { slot, params } => {
+                let listener_pos_m = self.listener_pos_m;
+                let listener_right = self.listener_right;
                 if let Some(vc) = self.voice_channels.get_mut(slot) {
                     if !vc.active {
                         vc.active = true;
@@ -201,12 +268,14 @@ impl MixerState {
                     vc.direct_gain = params.direct_gain;
                     vc.early_taps = params.early_taps;
                     vc.reverb_send = params.reverb_send;
+                    vc.update_spatial_cache(listener_pos_m, listener_right);
                 }
             }
             AudioCommand::ClearVoiceChannel { slot } => {
                 if let Some(vc) = self.voice_channels.get_mut(slot) {
                     vc.active = false;
                     vc.last_sample = 0.0;
+                    vc.active_tap_count = 0;
                     vc.filter.reset();
                     vc.early_line.reset();
                     while vc.rx.pop().is_ok() {}
@@ -244,15 +313,17 @@ impl MixerState {
             let raw = (s0 + (s1 - s0) * frac) * v.volume;
             v.cursor += v.pitch;
 
-            // 1. Direct path: 3-band voxel density muffling filter + stereo panning
+            // 1. Direct path: 3-band voxel density muffling filter + cached stereo panning
             let muffled = v.filter.process(raw, v.direct_gain);
-            let dir = (v.pos_m - self.listener_pos_m).normalize_or_zero();
-            let (gl, gr) = stereo_pan_gains(dir, self.listener_right);
+            let gl = v.direct_gl;
+            let gr = v.direct_gr;
             dry_l += muffled * gl;
             dry_r += muffled * gr;
 
-            // 2. Early reflections: path-traced directional echo taps
-            let (el, er) = v.early_line.process(raw, &v.early_taps, self.listener_right);
+            // 2. Early reflections: precomputed directional echo taps
+            let (el, er) = v
+                .early_line
+                .process_cached(raw, &v.early_gains[..v.active_tap_count]);
             dry_l += el;
             dry_r += er;
 
@@ -288,15 +359,17 @@ impl MixerState {
                 }
             };
 
-            // 2. Direct path: 3-band voxel density muffling filter + stereo equal-power panning
+            // 2. Direct path: 3-band voxel density muffling filter + cached stereo equal-power panning
             let muffled = vc.filter.process(raw, vc.direct_gain);
-            let dir = (vc.pos_m - self.listener_pos_m).normalize_or_zero();
-            let (gl, gr) = stereo_pan_gains(dir, self.listener_right);
+            let gl = vc.direct_gl;
+            let gr = vc.direct_gr;
             dry_l += muffled * gl;
             dry_r += muffled * gr;
 
-            // 3. Early reflections: path-traced directional echo taps
-            let (el, er) = vc.early_line.process(raw, &vc.early_taps, self.listener_right);
+            // 3. Early reflections: precomputed directional echo taps
+            let (el, er) = vc
+                .early_line
+                .process_cached(raw, &vc.early_gains[..vc.active_tap_count]);
             dry_l += el;
             dry_r += er;
 
@@ -306,7 +379,7 @@ impl MixerState {
             rev_in_r += (raw * gr * 0.7 + er * 0.3) * send;
         }
 
-        let (wet_l, wet_r) = self.fdn.process_stereo(rev_in_l, rev_in_r, self.reverb);
+        let (wet_l, wet_r) = self.fdn.process_stereo_sample(rev_in_l, rev_in_r);
         // Soft limiter to guarantee zero harsh digital clipping
         let out_l = (dry_l + wet_l).tanh();
         let out_r = (dry_r + wet_r).tanh();
@@ -326,8 +399,7 @@ fn create_voice_ring_pairs(
     }
     let tx_arr: [Producer<f32>; MAX_VOICE_CHANNELS] = txs
         .try_into()
-        .ok()
-        .expect("exact MAX_VOICE_CHANNELS voice ring producers");
+        .unwrap_or_else(|_| panic!("exact MAX_VOICE_CHANNELS voice ring producers"));
     (tx_arr, rxs)
 }
 
@@ -403,9 +475,11 @@ impl AudioEngine {
                 config,
                 move |data: &mut [f32], _| {
                     drain_commands(&mut rx, &mut mixer);
-                    for frame in data.chunks_mut(channels) {
+                    let ch = channels.max(1);
+                    mixer.prepare_block(data.len() / ch);
+                    for frame in data.chunks_mut(ch) {
                         let (l, r) = mixer.render_frame();
-                        if channels == 1 {
+                        if ch == 1 {
                             frame[0] = (l + r) * 0.5;
                         } else {
                             frame[0] = l;
@@ -573,6 +647,9 @@ mod tests {
         let mut tail_energy = 0.0f32;
 
         for i in 0..(n_voice * 3) {
+            if i % 256 == 0 {
+                mixer.prepare_block(256);
+            }
             let (l, r) = mixer.render_frame();
             assert!(
                 l.is_finite() && r.is_finite(),
@@ -597,6 +674,30 @@ mod tests {
         assert!(
             tail_energy > 0.01,
             "expected audible early reflection + FDN reverb tail: {tail_energy}"
+        );
+
+        // Rotating the listener 180 degrees (-X right) must recompute cached pan gains so left dominates
+        mixer.apply_command(AudioCommand::UpdateListener {
+            pos_m: Vec3::ZERO,
+            right: Vec3::NEG_X,
+            reverb: mixer.reverb,
+        });
+        for i in 0..512 {
+            let t = i as f32 / sample_rate;
+            let s = (TAU * 400.0 * t).sin() * 0.5;
+            voice_txs[0].push(s).expect("push voice sample after turn");
+        }
+        mixer.prepare_block(512);
+        let mut turned_l = 0.0f32;
+        let mut turned_r = 0.0f32;
+        for _ in 0..512 {
+            let (l, r) = mixer.render_frame();
+            turned_l += l * l;
+            turned_r += r * r;
+        }
+        assert!(
+            turned_l > turned_r,
+            "expected left-panned voice after listener turn: L={turned_l}, R={turned_r}"
         );
     }
 }

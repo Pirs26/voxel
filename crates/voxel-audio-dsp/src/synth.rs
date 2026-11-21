@@ -66,18 +66,17 @@ pub fn load_or_generate_clip(clip: SynthClip, sample_rate: f32) -> Vec<f32> {
                 .join("../../assets/sfx")
                 .join(file),
         ];
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                candidates.insert(0, dir.join("assets/sfx").join(file));
-            }
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            candidates.insert(0, dir.join("assets/sfx").join(file));
         }
         for path in candidates {
-            if path.exists() {
-                if let Ok(samples) = load_wav_mono(&path, sample_rate) {
-                    if !samples.is_empty() {
-                        return samples;
-                    }
-                }
+            if path.exists()
+                && let Ok(samples) = load_wav_mono(&path, sample_rate)
+                && !samples.is_empty()
+            {
+                return samples;
             }
         }
     }
