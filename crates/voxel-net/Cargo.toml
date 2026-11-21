@@ -1,0 +1,15 @@
+[package]
+name = "voxel-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes.workspace = true
+data-encoding.workspace = true
+glam.workspace = true
+iroh.workspace = true
+postcard.workspace = true
+serde.workspace = true
+tokio.workspace = true
+voxel-core.workspace = true
