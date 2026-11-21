@@ -1,0 +1,13 @@
+[package]
+name = "game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bevy.workspace = true
+glam.workspace = true
+voxel-core.workspace = true
+voxel-acoustics.workspace = true
+voxel-audio-dsp.workspace = true
+voxel-net.workspace = true

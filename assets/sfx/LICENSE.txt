@@ -1,0 +1,13 @@
+Placeholder Sound Effects License
+=================================
+
+footstep_stone.wav
+footstep_dirt.wav
+footstep_wood1.wav
+footstep_wood2.wav
+footstep_wood3.wav
+
+Source: "Different steps on wood, stone, leaves, gravel and mud" by TinyWorlds
+URL: https://opengameart.org/content/different-steps-on-wood-stone-leaves-gravel-and-mud
+License: CC0 1.0 Universal (Public Domain)
+Converted to 48 kHz mono 16-bit PCM WAV for real-time DSP processing.

@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/voxel-core",
+    "crates/voxel-acoustics",
+    "crates/voxel-audio-dsp",
+    "crates/voxel-net",
+    "crates/game",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+glam = { version = "0.33.2", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+rand = "0.10"
+noise = "0.9"
+cpal = "0.18"
+rtrb = "0.4"
+postcard = { version = "1.2", features = ["alloc"] }
+iroh = "1.5"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+bytes = "1"
+data-encoding = "2"
+rusty-opus = "1.2"
+bevy = "0.20"
+
+# Internal workspace crates
+voxel-core = { path = "crates/voxel-core" }
+voxel-acoustics = { path = "crates/voxel-acoustics" }
+voxel-audio-dsp = { path = "crates/voxel-audio-dsp" }
+voxel-net = { path = "crates/voxel-net" }
+
+# Fast runtime performance in dev builds (essential for Bevy + voxel raytracing)
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

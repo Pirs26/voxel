@@ -1,0 +1,11 @@
+[package]
+name = "voxel-acoustics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+rand.workspace = true
+serde.workspace = true
+voxel-core.workspace = true
