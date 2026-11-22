@@ -27,8 +27,8 @@ use crate::{
         stalker_hit_aabb_for, step_stalker_ai,
     },
     audio_bridge::{
-        AcousticBeaconState, AcousticTelemetry, PlaySpatialSoundEvent, RemoveVoiceSpeakerEvent,
-        VoiceSettings,
+        AcousticBeaconState, AcousticTelemetry, IncomingVoiceFrame, PlaySpatialSoundEvent,
+        RemoveVoiceSpeakerEvent, VoiceSettings,
     },
     decibel_wall::{spawn_decibel_wall, update_decibel_wall_system},
     elevator::{
@@ -36,7 +36,7 @@ use crate::{
         ELEVATOR_WINCH_DURATION_S, ELEVATOR_WINCH_OVERDRIVE_DURATION_S, ElevatorArrivedCaveEvent,
         ElevatorBulbLight, ElevatorCageRoot, ElevatorDoorVisual, ElevatorReturnedShedEvent,
         ElevatorState, TriggerElevatorLeverEvent, compute_ambient_brightness_for_depth,
-        spawn_elevator_cage, step_elevator_state,
+        spawn_elevator_cage, step_elevator_state_with_boarding,
     },
     health::{
         LocalHealthPhase, MonsterHitLocalPlayerEvent, PlayerHealthState, RESCUE_RANGE_M,
@@ -46,7 +46,7 @@ use crate::{
         BeltItem, CarryHandState, PlayerInventory, ShopCatalogItem, dynamic_shop_cost,
         purchase_crew_upgrade, purchase_shop_item,
     },
-    net_bridge::{CoopMenuOpen, CoopState, clear_remote_players},
+    net_bridge::{CoopMenuOpen, CoopState, clear_remote_players, remote_player_head_pos},
     parkour_board::{spawn_parkour_billboard, update_parkour_billboard_system},
     physics::{aabb_intersects_world, ray_aabb_intersect},
     player::PlayerController,
@@ -109,6 +109,8 @@ impl GameplayToast {
 #[derive(Resource)]
 struct GameplayTimers {
     voice_ai_timer_s: f32,
+    remote_voice_cooldown_s: f32,
+    remote_voice_speakers: HashSet<u16>,
     monster_net_timer_s: f32,
     item_net_timer_s: f32,
     carry_net_timer_s: f32,
@@ -120,6 +122,8 @@ impl Default for GameplayTimers {
     fn default() -> Self {
         Self {
             voice_ai_timer_s: 0.0,
+            remote_voice_cooldown_s: 0.0,
+            remote_voice_speakers: HashSet::new(),
             monster_net_timer_s: 0.0,
             item_net_timer_s: 0.0,
             carry_net_timer_s: 0.0,
@@ -274,7 +278,7 @@ fn toast_tick_system(time: Res<Time>, mut toast: ResMut<GameplayToast>) {
 }
 
 /// Counts how many living players (Healthy or Downed, excluding Dead) are currently
-/// outside the elevator cage. Both descending and starting the extraction winch require `0`.
+/// outside the elevator cage. Both descending and starting/completing the extraction winch require `0`.
 pub fn count_living_players_outside_cage(
     elevator: &ElevatorState,
     local_feet_m: Vec3,
@@ -283,12 +287,14 @@ pub fn count_living_players_outside_cage(
     remote_health: &RemoteHealthMap,
 ) -> usize {
     let mut outside = 0usize;
-    if local_alive && !elevator.is_pos_inside_cage(local_feet_m) {
+    if local_alive && !elevator.is_player_inside_cage(local_feet_m) {
         outside += 1;
     }
     for (&pid, rp) in &coop.remote_players {
         let is_dead = matches!(remote_health.0.get(&pid), Some(LocalHealthPhase::Dead));
-        if !is_dead && !elevator.is_pos_inside_cage(rp.current_feet_m) {
+        let remote_inside = elevator.is_player_inside_cage(rp.current_feet_m)
+            && elevator.is_player_inside_cage(rp.target_feet_m);
+        if !is_dead && !remote_inside {
             outside += 1;
         }
     }
@@ -1821,20 +1827,20 @@ fn elevator_runtime_system(
         lever_triggered = true;
     }
 
-    if lever_triggered && coop.is_host_or_solo() {
-        let missing_outside = player_q
-            .single()
-            .map(|pc| {
-                count_living_players_outside_cage(
-                    elevator,
-                    pc.feet_pos_m,
-                    health.is_alive(),
-                    coop,
-                    remote_health,
-                )
-            })
-            .unwrap_or(0);
+    let missing_outside = player_q
+        .single()
+        .map(|pc| {
+            count_living_players_outside_cage(
+                elevator,
+                pc.feet_pos_m,
+                health.is_alive(),
+                coop,
+                remote_health,
+            )
+        })
+        .unwrap_or(0);
 
+    if lever_triggered && coop.is_host_or_solo() {
         if missing_outside > 0 {
             toast.show(
                 format!(
@@ -1919,7 +1925,7 @@ fn elevator_runtime_system(
     let prev_y = elevator.platform_y_m;
     let gen_ready = !elevator.is_gen_pending();
     let step_out = if coop.is_host_or_solo() {
-        step_elevator_state(elevator, dt, gen_ready)
+        step_elevator_state_with_boarding(elevator, dt, gen_ready, missing_outside == 0)
     } else {
         Default::default()
     };
@@ -2634,6 +2640,7 @@ fn blind_stalker_ai_system(
         MessageReader<PlaySpatialSoundEvent>,
         MessageWriter<PlaySpatialSoundEvent>,
     )>,
+    mut incoming_voice: MessageReader<IncomingVoiceFrame>,
     mut strike_events: MessageReader<StrikeStalkerEvent>,
     mut hit_writer: MessageWriter<MonsterHitLocalPlayerEvent>,
     mut spawn_item_writer: MessageWriter<SpawnWorldItemEvent>,
@@ -2660,6 +2667,7 @@ fn blind_stalker_ai_system(
 
     if **screen != AppScreen::InGame {
         sound_io.p0().clear();
+        incoming_voice.clear();
         strike_events.clear();
         return;
     }
@@ -2725,6 +2733,7 @@ fn blind_stalker_ai_system(
     // Collect player stun/kill strikes (guests forward to Host; Host applies authoritatively)
     let incoming_strikes: Vec<StrikeStalkerEvent> = strike_events.read().copied().collect();
     if !coop.is_host_or_solo() {
+        incoming_voice.clear();
         let mut sound_writer = sound_io.p1();
         for (pos_m, clip, volume, pitch) in guest_monster_sounds {
             sound_writer.write(PlaySpatialSoundEvent {
@@ -2744,6 +2753,29 @@ fn blind_stalker_ai_system(
             }
         }
         return;
+    }
+
+    // Track remote co-op speakers whose gated VoIP frames arrived this frame, and emit throttled
+    // `VoiceSpeech` acoustic events from each remote speaker's head position so Blind Predators
+    // hunt talking co-op teammates through the exact same 3D voxel acoustics as the host!
+    for frame in incoming_voice.read() {
+        if !frame.opus_payload.is_empty() && coop.remote_players.contains_key(&frame.speaker_id) {
+            timers.remote_voice_speakers.insert(frame.speaker_id);
+        }
+    }
+    timers.remote_voice_cooldown_s = (timers.remote_voice_cooldown_s - dt).max(0.0);
+    if !timers.remote_voice_speakers.is_empty() && timers.remote_voice_cooldown_s <= 0.0 {
+        timers.remote_voice_cooldown_s = 0.25;
+        for speaker_id in timers.remote_voice_speakers.drain() {
+            if let Some(rp) = coop.remote_players.get(&speaker_id) {
+                ai_events.push(AcousticEvent {
+                    pos_m: remote_player_head_pos(rp),
+                    energy: Bands3::new(0.65, 1.30, 1.50),
+                    sharpness: 0.55,
+                    kind: AcousticEventKind::VoiceSpeech,
+                });
+            }
+        }
     }
 
     // Emit periodic VoiceSpeech AcousticEvent whenever player mic exceeds whisper-safe curve!
@@ -3174,11 +3206,15 @@ fn health_and_wipe_system(
         inv.apply_team_wipe_penalty();
         health.reset_for_shed();
         timers.last_synced_health = LocalHealthPhase::Healthy;
+        coop.send_player_health(PlayerHealthStatus::Healthy);
         timers.spawned_bodies.clear();
         for status in remote_health.0.values_mut() {
             *status = LocalHealthPhase::Healthy;
         }
         elevator.reset_to_shed_idle();
+        if coop.is_host_or_solo() {
+            coop.send_elevator_sync(elevator);
+        }
 
         if let Ok(mut pc) = player_q.single_mut() {
             pc.feet_pos_m = level_info.0.spawn_pos_m;
@@ -3414,6 +3450,79 @@ mod tests {
         remote_health.0.insert(2, LocalHealthPhase::Dead);
         assert_eq!(
             count_living_players_outside_cage(&elev, inside, true, &coop, &remote_health),
+            0
+        );
+    }
+
+    #[test]
+    fn elevator_all_aboard_checks_both_current_and_target_feet_in_cave() {
+        let cfg = VoxelConfig::half_player_scale(UVec3::splat(3));
+        let (_, info) = generate_world_with_tier(777, 1, cfg);
+        let mut elev = ElevatorState::from_level_info(&info, 777);
+        elev.phase = ElevatorPhase::CaveIdle;
+        elev.platform_y_m = info.cave_floor_y_m;
+        elev.prev_platform_y_m = info.cave_floor_y_m;
+
+        let inside_cave = Vec3::new(
+            elev.center_xz_m.x,
+            info.cave_floor_y_m + 0.02,
+            elev.center_xz_m.y,
+        );
+        // Right outside on the +X threshold lip (`3.05 m > 3.00 m` player boarding half-extent)
+        let threshold_lip = Vec3::new(
+            elev.center_xz_m.x + 3.05,
+            info.cave_floor_y_m + 0.02,
+            elev.center_xz_m.y,
+        );
+
+        let mut coop = CoopState::default();
+        let mut remote_health = RemoteHealthMap::default();
+        remote_health.0.insert(2, LocalHealthPhase::Healthy);
+
+        // 1. Local player standing on the +X threshold lip counts as outside.
+        assert_eq!(
+            count_living_players_outside_cage(&elev, threshold_lip, true, &coop, &remote_health),
+            1
+        );
+
+        // 2. Remote player whose interpolated `current_feet_m` is still inside the cage,
+        //    but whose latest network `target_feet_m` has stepped outside onto the threshold lip,
+        //    MUST count as outside so the lever cannot be pulled early due to interpolation lag!
+        let mut rp = RemotePlayerData::dummy_for_test(
+            PlayerInfo {
+                id: 2,
+                name: "P2".into(),
+                visor_rgb: [1.0, 1.0, 1.0],
+            },
+            inside_cave,
+        );
+        rp.current_feet_m = inside_cave;
+        rp.target_feet_m = threshold_lip;
+        coop.remote_players.insert(2, rp);
+
+        assert_eq!(
+            count_living_players_outside_cage(&elev, inside_cave, true, &coop, &remote_health),
+            1
+        );
+
+        // 3. Conversely, if `target_feet_m` is inside while `current_feet_m` hasn't finished walking
+        //    across the threshold lip yet, also block until they are fully aboard.
+        if let Some(rp) = coop.remote_players.get_mut(&2) {
+            rp.current_feet_m = threshold_lip;
+            rp.target_feet_m = inside_cave;
+        }
+        assert_eq!(
+            count_living_players_outside_cage(&elev, inside_cave, true, &coop, &remote_health),
+            1
+        );
+
+        // 4. Once both `current_feet_m` and `target_feet_m` are inside the strict boarding envelope, 0 outside.
+        if let Some(rp) = coop.remote_players.get_mut(&2) {
+            rp.current_feet_m = inside_cave;
+            rp.target_feet_m = inside_cave;
+        }
+        assert_eq!(
+            count_living_players_outside_cage(&elev, inside_cave, true, &coop, &remote_health),
             0
         );
     }

@@ -80,6 +80,7 @@ pub struct ElevatorState {
     pub cave_seed: u64,
     pub doors_closed: bool,
     pub cable_shudder_active: bool,
+    pub winch_holding_for_players: bool,
     pub creak_timer_s: f32,
     pub winch_pulse_timer_s: f32,
     pub sync_timer_s: f32,
@@ -101,6 +102,7 @@ impl ElevatorState {
             cave_seed: seed,
             doors_closed: false,
             cable_shudder_active: false,
+            winch_holding_for_players: false,
             creak_timer_s: 0.0,
             winch_pulse_timer_s: 0.0,
             sync_timer_s: 0.0,
@@ -137,6 +139,20 @@ impl ElevatorState {
             && dz <= ELEVATOR_CAGE_HALF_EXTENT_M + EPS
             && pos_m.y >= self.platform_y_m - 0.8 - EPS
             && pos_m.y <= self.platform_y_m + 3.2 + EPS
+    }
+
+    /// Returns `true` if a player's feet (`feet_pos_m`) lie within the stricter boarding envelope
+    /// inside the elevator cage (`3.00 m` half-extent instead of `3.12 m`, so standing right outside
+    /// the open `+X` shaft lip never false-positives as aboard).
+    #[inline]
+    pub fn is_player_inside_cage(&self, feet_pos_m: Vec3) -> bool {
+        let player_half = ELEVATOR_CAGE_HALF_EXTENT_M - 0.12;
+        let dx = (feet_pos_m.x - self.center_xz_m.x).abs();
+        let dz = (feet_pos_m.z - self.center_xz_m.y).abs();
+        dx <= player_half
+            && dz <= player_half
+            && feet_pos_m.y >= self.platform_y_m - 0.55
+            && feet_pos_m.y <= self.platform_y_m + 2.85
     }
 
     /// Resolves collision between a dynamic dropped item or throwable (`prev_pos -> pos`,
@@ -250,6 +266,7 @@ impl ElevatorState {
         self.phase = ElevatorPhase::Descending;
         self.doors_closed = true;
         self.cable_shudder_active = false;
+        self.winch_holding_for_players = false;
         self.phase_timer_s = ELEVATOR_DESCENT_DURATION_S;
         self.creak_timer_s = 0.0;
         self.prev_platform_y_m = self.platform_y_m;
@@ -292,6 +309,7 @@ impl ElevatorState {
         };
         self.winch_pulse_timer_s = 0.0;
         self.cable_shudder_active = false;
+        self.winch_holding_for_players = false;
         self.doors_closed = false;
     }
 
@@ -320,6 +338,11 @@ impl ElevatorState {
         if phase != ElevatorPhase::Descending {
             self.cable_shudder_active = false;
         }
+        if phase != ElevatorPhase::WinchActive {
+            self.winch_holding_for_players = false;
+        } else if self.phase_timer_s <= 0.0 {
+            self.winch_holding_for_players = true;
+        }
     }
 
     /// Immediately docks the elevator back at the Base Shed (e.g., following a team wipe).
@@ -330,6 +353,7 @@ impl ElevatorState {
         self.phase_timer_s = 0.0;
         self.doors_closed = false;
         self.cable_shudder_active = false;
+        self.winch_holding_for_players = false;
         self.creak_timer_s = 0.0;
         self.winch_pulse_timer_s = 0.0;
         self.pending_gen = None;
@@ -379,10 +403,16 @@ impl ElevatorState {
                 }
             }
             ElevatorPhase::CaveIdle => "CAVE ACTIVE — Pull Winch to Extract".to_string(),
-            ElevatorPhase::WinchActive => format!(
-                "WINCH ACTIVE — HOLD OUT ({:.0}s)!",
-                self.phase_timer_s.max(0.0).ceil()
-            ),
+            ElevatorPhase::WinchActive => {
+                if self.winch_holding_for_players {
+                    "WINCH READY — ALL PLAYERS MUST BOARD!".to_string()
+                } else {
+                    format!(
+                        "WINCH ACTIVE — HOLD OUT ({:.0}s)!",
+                        self.phase_timer_s.max(0.0).ceil()
+                    )
+                }
+            }
             ElevatorPhase::Ascending => format!(
                 "ASCENDING TO SHED ({:.1}s)",
                 self.phase_timer_s.max(0.0)
@@ -401,15 +431,30 @@ pub struct ElevatorStepOutput {
     pub emit_sound: Option<(SynthClip, f32, f32, Option<AcousticEvent>)>,
 }
 
+/// Advances [`ElevatorState`] deterministically by `dt` seconds assuming all living players are aboard.
+#[allow(dead_code)]
+pub fn step_elevator_state(
+    state: &mut ElevatorState,
+    dt: f32,
+    gen_ready: bool,
+) -> ElevatorStepOutput {
+    step_elevator_state_with_boarding(state, dt, gen_ready, true)
+}
+
 /// Advances [`ElevatorState`] deterministically by `dt` seconds.
 ///
 /// `gen_ready` indicates whether the underground cave meshes/voxels for the current descent
 /// are ready to be entered; if `false` when the descent timer expires, the cage seamlessly
 /// enters a brief cable-shudder hold beat until `gen_ready` becomes `true`.
-pub fn step_elevator_state(
+///
+/// `all_aboard` indicates whether all living players are inside the elevator cage; if `false`
+/// when the `WinchActive` countdown reaches `0.0`, the cage holds open at the bottom landing
+/// and continues pulsing loud winch machinery until all living players board.
+pub fn step_elevator_state_with_boarding(
     state: &mut ElevatorState,
     dt: f32,
     gen_ready: bool,
+    all_aboard: bool,
 ) -> ElevatorStepOutput {
     let dt = dt.max(0.0);
     state.prev_platform_y_m = state.platform_y_m;
@@ -461,7 +506,8 @@ pub fn step_elevator_state(
             state.platform_y_m = state.bottom_y_m;
             state.phase_timer_s = (state.phase_timer_s - dt).max(0.0);
 
-            if state.phase_timer_s <= 0.0 {
+            if state.phase_timer_s <= 0.0 && all_aboard {
+                state.winch_holding_for_players = false;
                 state.doors_closed = true;
                 state.phase = ElevatorPhase::Ascending;
                 state.phase_timer_s = ELEVATOR_ASCENT_DURATION_S;
@@ -480,6 +526,12 @@ pub fn step_elevator_state(
                     }),
                 ));
             } else {
+                if state.phase_timer_s <= 0.0 {
+                    state.phase_timer_s = 0.0;
+                    state.winch_holding_for_players = true;
+                } else {
+                    state.winch_holding_for_players = false;
+                }
                 state.winch_pulse_timer_s -= dt;
                 if state.winch_pulse_timer_s <= 0.0 {
                     state.winch_pulse_timer_s += WINCH_PULSE_INTERVAL_S;
@@ -1116,5 +1168,54 @@ mod tests {
         state.start_winch_with_overdrive(true);
         assert_eq!(state.phase, ElevatorPhase::WinchActive);
         assert!((state.phase_timer_s - 11.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn winch_holds_at_zero_until_all_players_aboard_then_ascends() {
+        let (_world_arc, info, mut state) = sample_world_and_state();
+        state.phase = ElevatorPhase::CaveIdle;
+        state.platform_y_m = info.cave_floor_y_m;
+        state.start_winch_with_overdrive(true);
+        assert_eq!(state.phase, ElevatorPhase::WinchActive);
+        assert!(!state.winch_holding_for_players);
+
+        // Expire the winch timer while a living teammate is still outside (`all_aboard = false`).
+        let mut saw_winch_pulse_while_holding = false;
+        for _ in 0..140 {
+            let out = step_elevator_state_with_boarding(&mut state, 0.1, true, false);
+            assert!(
+                !out.started_ascent,
+                "elevator must NEVER slam doors or ascend while living players are outside"
+            );
+            if state.phase_timer_s <= 0.0
+                && let Some((SynthClip::ElevatorWinch, _, _, Some(ai_ev))) = out.emit_sound
+            {
+                assert_eq!(ai_ev.kind, AcousticEventKind::ElevatorMachinery);
+                saw_winch_pulse_while_holding = true;
+            }
+        }
+        assert_eq!(state.phase, ElevatorPhase::WinchActive);
+        assert_eq!(state.phase_timer_s, 0.0);
+        assert!(!state.doors_closed);
+        assert!(state.winch_holding_for_players);
+        assert_eq!(
+            state.hud_status(),
+            "WINCH READY — ALL PLAYERS MUST BOARD!"
+        );
+        assert!(
+            saw_winch_pulse_while_holding,
+            "winch must keep pulsing loud machinery acoustics while holding for players"
+        );
+
+        // As soon as all living players board (`all_aboard = true`), doors slam and ascent begins!
+        let liftoff = step_elevator_state_with_boarding(&mut state, 0.1, true, true);
+        assert!(liftoff.started_ascent);
+        assert_eq!(state.phase, ElevatorPhase::Ascending);
+        assert!(state.doors_closed);
+        assert!(!state.winch_holding_for_players);
+        match liftoff.emit_sound {
+            Some((SynthClip::DoorSlam, _, _, _)) => {}
+            other => panic!("expected DoorSlam on winch liftoff, got {other:?}"),
+        }
     }
 }
