@@ -13,6 +13,7 @@ mod save;
 mod settings;
 mod shed;
 mod tools;
+mod updater_bridge;
 mod viewmodel;
 mod voxel_render;
 
@@ -29,6 +30,7 @@ use crate::{
     player::PlayerPlugin,
     settings::SettingsPlugin,
     tools::ToolsPlugin,
+    updater_bridge::UpdaterPlugin,
     viewmodel::ViewmodelPlugin,
     voxel_render::{LevelInfoResource, VoxelRenderPlugin, WorldResource},
 };
@@ -65,6 +67,7 @@ fn main() {
         .add_systems(Startup, configure_gpu_clustering)
         .add_plugins((
             SettingsPlugin,
+            UpdaterPlugin,
             VoxelRenderPlugin,
             NetBridgePlugin,
             PlayerPlugin,
@@ -103,6 +106,7 @@ mod tests {
             .insert_resource(LevelInfoResource(level_info))
             .add_plugins((
                 SettingsPlugin,
+                UpdaterPlugin,
                 VoxelRenderPlugin,
                 NetBridgePlugin,
                 PlayerPlugin,

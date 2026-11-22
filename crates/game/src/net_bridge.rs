@@ -395,6 +395,7 @@ impl CoopState {
         match NetSession::start_host(
             self.local_name.clone(),
             self.visor_rgb(),
+            voxel_updater::APP_VERSION.to_string(),
             self.level_seed,
             beacon_pos_m,
             edits_snapshot,
@@ -422,7 +423,12 @@ impl CoopState {
         self.join_code = None;
         self.pending_disconnect_s = None;
         self.last_synced_inv_json.clear();
-        match NetSession::start_client(trimmed, self.local_name.clone(), self.visor_rgb()) {
+        match NetSession::start_client(
+            trimmed,
+            self.local_name.clone(),
+            self.visor_rgb(),
+            voxel_updater::APP_VERSION.to_string(),
+        ) {
             Ok(session) => {
                 self.session = Some(session);
                 self.status_text = "Connecting to host via Iroh P2P...".into();
@@ -1656,7 +1662,7 @@ fn send_local_pose_system(
     };
     let flashlight_on = fl_q
         .single()
-        .map(|f| f.on && f.battery > 0.0)
+        .map(|f| f.active_beam)
         .unwrap_or(false);
     let held_item = if inv.is_hands_occupied() {
         HeldItemNetKind::TwoHandedCarry

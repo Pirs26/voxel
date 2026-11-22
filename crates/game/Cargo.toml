@@ -17,3 +17,4 @@ voxel-core.workspace = true
 voxel-acoustics.workspace = true
 voxel-audio-dsp.workspace = true
 voxel-net.workspace = true
+voxel-updater.workspace = true

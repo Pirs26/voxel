@@ -28,6 +28,10 @@ pub enum AppScreen {
 #[derive(Resource, Default, Clone, Copy, Debug)]
 pub struct SettingsMenuOpen(pub bool);
 
+fn default_include_prereleases() -> bool {
+    true
+}
+
 /// Local player preferences persisted to `saves/settings.json`.
 #[derive(Resource, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UserSettings {
@@ -41,6 +45,9 @@ pub struct UserSettings {
     pub gate_threshold_db: f32,
     pub output_device: Option<String>,
     pub input_device: Option<String>,
+    /// Whether the auto-updater includes GitHub pre-releases (`v0.1.x` drops).
+    #[serde(default = "default_include_prereleases")]
+    pub include_prereleases: bool,
 }
 
 impl Default for UserSettings {
@@ -56,6 +63,7 @@ impl Default for UserSettings {
             gate_threshold_db: -45.0,
             output_device: None,
             input_device: None,
+            include_prereleases: default_include_prereleases(),
         }
     }
 }
@@ -189,6 +197,7 @@ mod tests {
             gate_threshold_db: 5.0,
             output_device: Some("Headphones".into()),
             input_device: Some("USB Mic".into()),
+            include_prereleases: false,
         };
         s.sanitize();
         assert_eq!(s.player_name, "Miner");

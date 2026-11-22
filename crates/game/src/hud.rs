@@ -10,6 +10,7 @@ use bevy::{
 };
 use voxel_acoustics::linear_to_db;
 use voxel_net::ElevatorPhase;
+use voxel_updater::APP_VERSION;
 
 use crate::{
     audio_bridge::{
@@ -34,9 +35,10 @@ use crate::{
     save::{CampaignState, SaveSlotBrowser},
     settings::{AppScreen, FOV_MAX_DEG, FOV_MIN_DEG, SettingsMenuOpen, UserSettings},
     shed::{CrosshairTargetState, ShopOverlayOpen, TargetAccent},
+    updater_bridge::{UpdaterCommand, UpdaterState, UpdaterUiStatus},
 };
 
-const SLIDER_SEGMENTS: usize = 12;
+const SLIDER_HIT_STEPS: usize = 20;
 const MIC_LED_BARS: usize = 10;
 
 // ---- Color Palette (Subterranean Tactical Dive UI) ----
@@ -63,6 +65,7 @@ struct DiagnosticsDrawerOpen(bool);
 enum UiPanelKind {
     MainMenu,
     Settings,
+    UpdatePopup,
     InGameHud,
     CoopMenu,
     ShopOverlay,
@@ -115,6 +118,7 @@ enum ToggleKind {
     Mute,
     SelfEcho,
     Fullscreen,
+    IncludePrereleases,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -125,6 +129,30 @@ struct ToggleButtonPill {
 
 #[derive(Component, Clone, Copy)]
 struct ToggleButtonLabel(ToggleKind);
+
+#[derive(Component)]
+struct SettingsUpdaterStatusText;
+
+#[derive(Component)]
+struct UpdatePopupTitleText;
+
+#[derive(Component)]
+struct UpdatePopupBadgeText;
+
+#[derive(Component)]
+struct UpdatePopupNotesText;
+
+#[derive(Component)]
+struct UpdatePopupStatusText;
+
+#[derive(Component)]
+struct UpdatePopupProgressFill;
+
+#[derive(Component)]
+struct UpdatePopupInstallLabel;
+
+#[derive(Component)]
+struct UpdatePopupDismissLabel;
 
 #[derive(Component)]
 struct OutputDeviceLabel;
@@ -228,6 +256,9 @@ struct WearableBadge {
     is_headlamp: bool,
 }
 
+#[derive(Component)]
+struct HeadlampBadgeText;
+
 #[derive(Component, Clone, Copy)]
 struct TrayCellCard(usize);
 
@@ -252,10 +283,7 @@ enum SliderKind {
 struct SliderValueText(SliderKind);
 
 #[derive(Component, Clone, Copy)]
-struct SliderSegment {
-    kind: SliderKind,
-    idx: usize,
-}
+struct SliderFillBar(SliderKind);
 
 #[derive(Component, Clone, Copy, Debug)]
 enum UiAction {
@@ -275,12 +303,17 @@ enum UiAction {
 
     CopyJoinCode,
     DisconnectToMenu,
+    QuitNoSave,
     CycleVisor,
     ToggleMute,
     ToggleSelfEcho,
     ResumeGame,
 
     ToggleFullscreen,
+    ToggleIncludePrereleases,
+    CheckForUpdates,
+    UpdateInstall,
+    UpdateDismiss,
     PrevOutputDevice,
     NextOutputDevice,
     PrevInputDevice,
@@ -318,6 +351,7 @@ impl Plugin for HudPlugin {
                     update_hotbar_and_pouch_system,
                     update_battery_tray_system,
                     update_settings_widgets_system,
+                    update_updater_popup_system,
                     update_diagnostics_drawer_system,
                 )
                     .chain(),
@@ -585,25 +619,62 @@ fn spawn_slider_row(parent: &mut ChildSpawnerCommands, title: &str, kind: Slider
             .with_children(|ctrl| {
                 spawn_std_btn(ctrl, "-", UiAction::SliderStep(kind, -1.0));
 
-                for idx in 0..SLIDER_SEGMENTS {
-                    let frac = idx as f32 / (SLIDER_SEGMENTS - 1) as f32;
-                    ctrl.spawn((
+                // Smooth continuous slider track (updates proportionally on EVERY single click!)
+                ctrl.spawn((
+                    Node {
+                        width: Val::Px(230.0),
+                        height: Val::Px(18.0),
+                        border: UiRect::all(Val::Px(1.0)),
+                        border_radius: BorderRadius::all(Val::Px(4.0)),
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.11, 0.16, 0.22, 0.96)),
+                    BorderColor::all(COL_BORDER_DIM),
+                ))
+                .with_children(|track| {
+                    // Continuous cyan fill bar driven directly by exact normalized fraction
+                    track.spawn((
                         Node {
-                            width: Val::Px(17.0),
-                            height: Val::Px(18.0),
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(0.0),
+                            top: Val::Px(0.0),
+                            width: Val::Percent(50.0),
+                            height: Val::Percent(100.0),
                             border_radius: BorderRadius::all(Val::Px(3.0)),
                             ..default()
                         },
-                        BackgroundColor(Color::srgba(0.14, 0.19, 0.25, 0.95)),
-                        SliderSegment { kind, idx },
-                    ))
-                    .observe(
-                        move |_click: On<PointerClick>,
-                              mut writer: MessageWriter<TriggerUiAction>| {
-                            writer.write(TriggerUiAction(UiAction::SliderSetFrac(kind, frac)));
-                        },
-                    );
-                }
+                        BackgroundColor(COL_ACCENT_CYAN),
+                        Pickable::IGNORE,
+                        SliderFillBar(kind),
+                    ));
+                    // 20 fine transparent click zones overlaying the track so clicking anywhere sets exact value
+                    track
+                        .spawn(Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Percent(100.0),
+                            flex_direction: FlexDirection::Row,
+                            ..default()
+                        })
+                        .with_children(|hits| {
+                            for idx in 0..SLIDER_HIT_STEPS {
+                                let frac = idx as f32 / (SLIDER_HIT_STEPS - 1) as f32;
+                                hits.spawn(Node {
+                                    flex_grow: 1.0,
+                                    height: Val::Percent(100.0),
+                                    ..default()
+                                })
+                                .observe(
+                                    move |_click: On<PointerClick>,
+                                          mut writer: MessageWriter<TriggerUiAction>| {
+                                        writer.write(TriggerUiAction(UiAction::SliderSetFrac(
+                                            kind, frac,
+                                        )));
+                                    },
+                                );
+                            }
+                        });
+                });
 
                 spawn_std_btn(ctrl, "+", UiAction::SliderStep(kind, 1.0));
             });
@@ -635,6 +706,7 @@ fn shop_item_visual_accent(item: ShopCatalogItem) -> (Color, &'static str) {
         ShopCatalogItem::ToolBeltUpgrade => (Color::srgb(0.55, 0.72, 1.0), "BLT"),
         ShopCatalogItem::BatteryPouchUpgrade => (Color::srgb(0.32, 0.84, 1.0), "PCH"),
         ShopCatalogItem::Headlamp => (Color::srgb(1.0, 0.92, 0.48), "HLP"),
+        ShopCatalogItem::HeadlampCellMk2 => (Color::srgb(1.0, 0.80, 0.24), "HL2"),
         ShopCatalogItem::StealthBoots => (Color::srgb(0.56, 0.42, 0.98), "BTS"),
     }
 }
@@ -734,7 +806,7 @@ fn setup_hud(mut commands: Commands) {
                         ))
                         .with_children(|pill| {
                             pill.spawn((
-                                Text::new("P2P • ACOUSTIC CO-OP"),
+                                Text::new(format!("P2P • ACOUSTIC CO-OP • {APP_VERSION}")),
                                 TextFont {
                                     font_size: FontSize::Px(11.5),
                                     ..default()
@@ -1280,6 +1352,48 @@ fn setup_hud(mut commands: Commands) {
                                 },
                                 TextColor(COL_ACCENT_CYAN),
                                 SettingsMicBadgeText,
+                            ));
+                        });
+
+                    // Auto-Updater row inside Settings (Pre-release toggle + Check for Updates)
+                    panel
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::SpaceBetween,
+                            width: Val::Percent(100.0),
+                            column_gap: Val::Px(8.0),
+                            margin: UiRect::top(Val::Px(2.0)),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            row.spawn(Node {
+                                flex_direction: FlexDirection::Row,
+                                align_items: AlignItems::Center,
+                                column_gap: Val::Px(6.0),
+                                ..default()
+                            })
+                            .with_children(|left| {
+                                spawn_toggle_btn(
+                                    left,
+                                    "Pre-releases: ON",
+                                    UiAction::ToggleIncludePrereleases,
+                                    ToggleKind::IncludePrereleases,
+                                );
+                                spawn_std_btn(
+                                    left,
+                                    "Check for Updates",
+                                    UiAction::CheckForUpdates,
+                                );
+                            });
+                            row.spawn((
+                                Text::new(format!("Installed: {APP_VERSION}")),
+                                TextFont {
+                                    font_size: FontSize::Px(12.0),
+                                    ..default()
+                                },
+                                TextColor(COL_TEXT_MUTED),
+                                SettingsUpdaterStatusText,
                             ));
                         });
 
@@ -2173,8 +2287,9 @@ fn setup_hud(mut commands: Commands) {
                                 for (tag, is_headlamp) in [("HL", true), ("SB", false)] {
                                     wear.spawn((
                                         Node {
-                                            width: Val::Px(23.0),
+                                            min_width: Val::Px(if is_headlamp { 48.0 } else { 24.0 }),
                                             height: Val::Px(18.0),
+                                            padding: UiRect::axes(Val::Px(4.0), Val::Px(0.0)),
                                             border: UiRect::all(Val::Px(1.0)),
                                             border_radius: BorderRadius::all(Val::Px(4.0)),
                                             justify_content: JustifyContent::Center,
@@ -2186,14 +2301,19 @@ fn setup_hud(mut commands: Commands) {
                                         WearableBadge { is_headlamp },
                                     ))
                                     .with_children(|b| {
-                                        b.spawn((
-                                            Text::new(tag),
-                                            TextFont {
-                                                font_size: FontSize::Px(9.5),
-                                                ..default()
-                                            },
-                                            TextColor(COL_TEXT_BRIGHT),
-                                        ));
+                                        let txt = b
+                                            .spawn((
+                                                Text::new(tag),
+                                                TextFont {
+                                                    font_size: FontSize::Px(9.5),
+                                                    ..default()
+                                                },
+                                                TextColor(COL_TEXT_BRIGHT),
+                                            ))
+                                            .id();
+                                        if is_headlamp {
+                                            b.commands().entity(txt).insert(HeadlampBadgeText);
+                                        }
                                     });
                                 }
                             });
@@ -2318,7 +2438,8 @@ fn setup_hud(mut commands: Commands) {
                             })
                             .with_children(|left| {
                                 spawn_std_btn(left, "Settings", UiAction::OpenSettings);
-                                spawn_danger_btn(left, "Save & Main Menu", UiAction::DisconnectToMenu);
+                                spawn_std_btn(left, "Save & Menu", UiAction::DisconnectToMenu);
+                                spawn_danger_btn(left, "Quit (No Save)", UiAction::QuitNoSave);
                             });
                             spawn_accent_btn(row, "Resume", UiAction::ResumeGame);
                         });
@@ -2621,6 +2742,194 @@ fn setup_hud(mut commands: Commands) {
                         });
                 });
         });
+
+    // =========================================================================
+    // 6. MAIN MENU AUTO-UPDATE POPUP MODAL (GlobalZIndex(60))
+    // =========================================================================
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                display: Display::None,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.01, 0.02, 0.035, 0.82)),
+            GlobalZIndex(60),
+            Visibility::Hidden,
+            UiPanelKind::UpdatePopup,
+        ))
+        .with_children(|backdrop| {
+            backdrop
+                .spawn((
+                    Node {
+                        width: Val::Px(560.0),
+                        padding: UiRect::all(Val::Px(22.0)),
+                        border: UiRect {
+                            top: Val::Px(3.0),
+                            left: Val::Px(1.5),
+                            right: Val::Px(1.5),
+                            bottom: Val::Px(1.5),
+                        },
+                        border_radius: BorderRadius::all(Val::Px(12.0)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(12.0),
+                        ..default()
+                    },
+                    BackgroundColor(COL_PANEL_BG),
+                    BorderColor {
+                        top: COL_ACCENT_CYAN,
+                        left: COL_BORDER_DIM,
+                        right: COL_BORDER_DIM,
+                        bottom: COL_BORDER_DIM,
+                    },
+                ))
+                .with_children(|modal| {
+                    // Header: Title + Release Tag Badge
+                    modal
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            justify_content: JustifyContent::SpaceBetween,
+                            align_items: AlignItems::Center,
+                            width: Val::Percent(100.0),
+                            ..default()
+                        })
+                        .with_children(|hdr| {
+                            hdr.spawn((
+                                Text::new("Update Available"),
+                                TextFont {
+                                    font_size: FontSize::Px(20.0),
+                                    ..default()
+                                },
+                                TextColor(COL_ACCENT_CYAN),
+                                UpdatePopupTitleText,
+                            ));
+                            hdr.spawn((
+                                Node {
+                                    padding: UiRect::axes(Val::Px(9.0), Val::Px(4.0)),
+                                    border: UiRect::all(Val::Px(1.0)),
+                                    border_radius: BorderRadius::all(Val::Px(10.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.14, 0.11, 0.04, 0.95)),
+                                BorderColor::all(COL_ACCENT_AMBER),
+                            ))
+                            .with_children(|b| {
+                                b.spawn((
+                                    Text::new("PRE-RELEASE"),
+                                    TextFont {
+                                        font_size: FontSize::Px(11.0),
+                                        ..default()
+                                    },
+                                    TextColor(COL_ACCENT_AMBER),
+                                    UpdatePopupBadgeText,
+                                ));
+                            });
+                        });
+
+                    // Truncated Release Notes Card
+                    modal
+                        .spawn((
+                            Node {
+                                width: Val::Percent(100.0),
+                                max_height: Val::Px(210.0),
+                                padding: UiRect::all(Val::Px(12.0)),
+                                border: UiRect::all(Val::Px(1.0)),
+                                border_radius: BorderRadius::all(Val::Px(8.0)),
+                                overflow: Overflow::clip(),
+                                ..default()
+                            },
+                            BackgroundColor(COL_CARD_BG),
+                            BorderColor::all(COL_BORDER_DIM),
+                        ))
+                        .with_children(|notes_box| {
+                            notes_box.spawn((
+                                Text::new(""),
+                                TextFont {
+                                    font_size: FontSize::Px(12.5),
+                                    ..default()
+                                },
+                                TextColor(COL_TEXT_BRIGHT),
+                                UpdatePopupNotesText,
+                            ));
+                        });
+
+                    // Live Progress Bar + Status Text
+                    modal
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: Val::Px(6.0),
+                            width: Val::Percent(100.0),
+                            ..default()
+                        })
+                        .with_children(|prog| {
+                            prog.spawn((
+                                Node {
+                                    width: Val::Percent(100.0),
+                                    height: Val::Px(8.0),
+                                    border_radius: BorderRadius::all(Val::Px(4.0)),
+                                    overflow: Overflow::clip(),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.11, 0.16, 0.22, 0.95)),
+                            ))
+                            .with_children(|track| {
+                                track.spawn((
+                                    Node {
+                                        width: Val::Percent(0.0),
+                                        height: Val::Percent(100.0),
+                                        border_radius: BorderRadius::all(Val::Px(4.0)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(COL_ACCENT_CYAN),
+                                    UpdatePopupProgressFill,
+                                ));
+                            });
+
+                            prog.spawn((
+                                Text::new(""),
+                                TextFont {
+                                    font_size: FontSize::Px(12.5),
+                                    ..default()
+                                },
+                                TextColor(COL_TEXT_MUTED),
+                                UpdatePopupStatusText,
+                            ));
+                        });
+
+                    // Action Buttons: [Update & Restart] + [Later / Stay on vX.Y.Z]
+                    modal
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            justify_content: JustifyContent::SpaceBetween,
+                            width: Val::Percent(100.0),
+                            margin: UiRect::top(Val::Px(4.0)),
+                            ..default()
+                        })
+                        .with_children(|btns| {
+                            let dismiss_txt = spawn_std_btn(
+                                btns,
+                                &format!("Later / Stay on {APP_VERSION}"),
+                                UiAction::UpdateDismiss,
+                            );
+                            btns.commands()
+                                .entity(dismiss_txt)
+                                .insert(UpdatePopupDismissLabel);
+
+                            let install_txt = spawn_accent_btn(
+                                btns,
+                                "Update & Restart",
+                                UiAction::UpdateInstall,
+                            );
+                            btns.commands()
+                                .entity(install_txt)
+                                .insert(UpdatePopupInstallLabel);
+                        });
+                });
+        });
 }
 
 // =============================================================================
@@ -2778,6 +3087,7 @@ fn handle_ui_actions_system(
     mut res: ActionResources,
     mut lifecycle_writer: MessageWriter<SessionLifecycleEvent>,
     mut shop_writer: MessageWriter<ShopActionEvent>,
+    mut updater_writer: MessageWriter<UpdaterCommand>,
     mut remove_voice: MessageWriter<RemoveVoiceSpeakerEvent>,
     mut exit_writer: MessageWriter<AppExit>,
 ) {
@@ -2885,6 +3195,13 @@ fn handle_ui_actions_system(
             UiAction::DisconnectToMenu => {
                 lifecycle_writer.write(SessionLifecycleEvent::DisconnectToMenu);
             }
+            UiAction::QuitNoSave => {
+                clear_remote_players(&mut commands, coop, &mut remove_voice);
+                coop.session = None;
+                coop.join_code = None;
+                coop.pending_disconnect_s = None;
+                exit_writer.write(AppExit::Success);
+            }
             UiAction::CycleVisor => {
                 let next = (coop.visor_idx + 1) % VISOR_PALETTE.len();
                 coop.visor_idx = next;
@@ -2902,6 +3219,19 @@ fn handle_ui_actions_system(
                 settings_open.0 = false;
             }
             UiAction::ToggleFullscreen => user_settings.fullscreen = !user_settings.fullscreen,
+            UiAction::ToggleIncludePrereleases => {
+                user_settings.include_prereleases = !user_settings.include_prereleases;
+                let _ = user_settings.save_default();
+            }
+            UiAction::CheckForUpdates => {
+                updater_writer.write(UpdaterCommand::CheckNow);
+            }
+            UiAction::UpdateInstall => {
+                updater_writer.write(UpdaterCommand::StartInstall);
+            }
+            UiAction::UpdateDismiss => {
+                updater_writer.write(UpdaterCommand::DismissPopup);
+            }
             UiAction::PrevOutputDevice => {
                 user_settings.output_device =
                     cycle_device(&user_settings.output_device, &device_catalog.output_devices, -1);
@@ -2948,6 +3278,7 @@ fn update_panel_visibility_system(
     shop_open: Res<ShopOverlayOpen>,
     settings_open: Res<SettingsMenuOpen>,
     diag_open: Res<DiagnosticsDrawerOpen>,
+    updater: Res<UpdaterState>,
     inv: Res<PlayerInventory>,
     target: Res<CrosshairTargetState>,
     toast: Res<GameplayToast>,
@@ -2960,6 +3291,7 @@ fn update_panel_visibility_system(
         let show = match kind {
             UiPanelKind::MainMenu => !in_game && !settings_open.0,
             UiPanelKind::Settings => settings_open.0,
+            UiPanelKind::UpdatePopup => !in_game && updater.popup_open,
             UiPanelKind::InGameHud => in_game,
             UiPanelKind::CoopMenu => in_game && menu_open.0 && !settings_open.0,
             UiPanelKind::ShopOverlay => in_game && shop_open.0 && !settings_open.0,
@@ -2978,6 +3310,7 @@ fn update_panel_visibility_system(
             kind,
             UiPanelKind::MainMenu
                 | UiPanelKind::Settings
+                | UiPanelKind::UpdatePopup
                 | UiPanelKind::CoopMenu
                 | UiPanelKind::ShopOverlay
         ) {
@@ -3264,10 +3597,10 @@ fn update_ingame_bars_system(
         t.0 = toast.text.clone();
     }
 
-    // Flashlight Battery Cell Graphic
+    // Flashlight / Headlamp Battery Cell Graphic
     let (bat_frac, fl_on) = fl_q
         .single()
-        .map(|f| (f.battery.clamp(0.0, 1.0), f.on))
+        .map(|f| (f.battery.clamp(0.0, 1.0), f.active_beam))
         .unwrap_or((0.0, false));
     let bat_col = if bat_frac > 0.45 {
         COL_ACCENT_CYAN
@@ -3440,6 +3773,7 @@ fn update_hotbar_and_pouch_system(
     mut texts: ParamSet<(
         Query<(&HotbarCountText, &mut Text)>,
         Query<&mut Text, With<HotbarActiveNameText>>,
+        Query<&mut Text, With<HeadlampBadgeText>>,
     )>,
 ) {
     let loaded_bat = inv.loaded_battery_charge().clamp(0.0, 1.0);
@@ -3548,7 +3882,14 @@ fn update_hotbar_and_pouch_system(
         }
     }
 
-    // Passive Wearable Badges
+    // Passive Wearable Badges (with live Headlamp sealed-battery % readout!)
+    if let Ok(mut hl_txt) = texts.p2().single_mut() {
+        hl_txt.0 = if inv.passive.headlamp {
+            format!("[F] {}%", inv.headlamp_charge_pct())
+        } else {
+            "HL".to_string()
+        };
+    }
     for (wb, mut border, mut bg) in &mut visuals.p5() {
         let owned = if wb.is_headlamp {
             inv.passive.headlamp
@@ -3557,7 +3898,13 @@ fn update_hotbar_and_pouch_system(
         };
         if owned {
             let col = if wb.is_headlamp {
-                COL_ACCENT_AMBER
+                if inv.headlamp_charge <= 0.01 {
+                    COL_ACCENT_RED
+                } else if inv.headlamp_charge <= 0.25 {
+                    COL_ACCENT_AMBER
+                } else {
+                    COL_ACCENT_CYAN
+                }
             } else {
                 Color::srgb(0.60, 0.46, 1.0)
             };
@@ -3641,8 +3988,9 @@ fn update_settings_widgets_system(
     user_settings: Res<UserSettings>,
     voice_settings: Res<VoiceSettings>,
     telemetry: Res<AcousticTelemetry>,
+    updater: Res<UpdaterState>,
+    mut slider_bars_q: Query<(&SliderFillBar, &mut Node)>,
     mut bg_set: ParamSet<(
-        Query<(&SliderSegment, &mut BackgroundColor)>,
         Query<(&SettingsMicLed, &mut BackgroundColor)>,
         Query<(&ToggleButtonPill, &mut BackgroundColor, &mut BorderColor)>,
     )>,
@@ -3652,16 +4000,12 @@ fn update_settings_widgets_system(
         Query<&mut Text, With<InputDeviceLabel>>,
         Query<(&ToggleButtonLabel, &mut Text)>,
         Query<&mut Text, With<SettingsMicBadgeText>>,
+        Query<&mut Text, With<SettingsUpdaterStatusText>>,
     )>,
 ) {
-    for (seg, mut bg) in &mut bg_set.p0() {
-        let frac = slider_current_frac(&user_settings, seg.kind);
-        let filled_count = (frac * SLIDER_SEGMENTS as f32).round() as usize;
-        *bg = if seg.idx < filled_count {
-            BackgroundColor(COL_ACCENT_CYAN)
-        } else {
-            BackgroundColor(Color::srgba(0.14, 0.19, 0.25, 0.92))
-        };
+    for (bar, mut node) in &mut slider_bars_q {
+        let frac = slider_current_frac(&user_settings, bar.0);
+        node.width = Val::Percent((frac * 100.0).clamp(0.0, 100.0));
     }
 
     let mic = telemetry.mic;
@@ -3671,7 +4015,7 @@ fn update_settings_widgets_system(
     } else {
         (norm_mic * MIC_LED_BARS as f32).round() as usize
     };
-    for (led, mut bg) in &mut bg_set.p1() {
+    for (led, mut bg) in &mut bg_set.p0() {
         *bg = if led.0 < lit {
             if led.0 >= 7 {
                 BackgroundColor(COL_ACCENT_RED)
@@ -3685,7 +4029,7 @@ fn update_settings_widgets_system(
         };
     }
 
-    for (pill, mut bg, mut border) in &mut bg_set.p2() {
+    for (pill, mut bg, mut border) in &mut bg_set.p1() {
         let (base_col, hover_col, border_col) = match pill.kind {
             ToggleKind::Mute => {
                 if voice_settings.muted {
@@ -3719,6 +4063,21 @@ fn update_settings_widgets_system(
             }
             ToggleKind::Fullscreen => {
                 if user_settings.fullscreen {
+                    (
+                        Color::srgba(0.09, 0.30, 0.34, 0.98),
+                        Color::srgba(0.14, 0.43, 0.47, 0.98),
+                        COL_ACCENT_CYAN,
+                    )
+                } else {
+                    (
+                        Color::srgba(0.11, 0.16, 0.22, 0.96),
+                        Color::srgba(0.18, 0.28, 0.36, 0.98),
+                        COL_BORDER_DIM,
+                    )
+                }
+            }
+            ToggleKind::IncludePrereleases => {
+                if user_settings.include_prereleases {
                     (
                         Color::srgba(0.09, 0.30, 0.34, 0.98),
                         Color::srgba(0.14, 0.43, 0.47, 0.98),
@@ -3776,6 +4135,13 @@ fn update_settings_widgets_system(
                     "Windowed".to_string()
                 }
             }
+            ToggleKind::IncludePrereleases => {
+                if user_settings.include_prereleases {
+                    "Pre-releases: ON".to_string()
+                } else {
+                    "Pre-releases: OFF".to_string()
+                }
+            }
         };
     }
     if let Ok(mut t) = text_set.p4().single_mut() {
@@ -3798,6 +4164,84 @@ fn update_settings_widgets_system(
             ""
         };
         t.0 = format!("{state} ({:.0} dB){echo}", mic.rms_db);
+    }
+    if let Ok(mut t) = text_set.p5().single_mut() {
+        t.0 = updater.settings_status_text.clone();
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn update_updater_popup_system(
+    updater: Res<UpdaterState>,
+    mut texts: ParamSet<(
+        Query<&mut Text, With<UpdatePopupTitleText>>,
+        Query<&mut Text, With<UpdatePopupBadgeText>>,
+        Query<&mut Text, With<UpdatePopupNotesText>>,
+        Query<(&mut Text, &mut TextColor), With<UpdatePopupStatusText>>,
+        Query<&mut Text, With<UpdatePopupInstallLabel>>,
+        Query<&mut Text, With<UpdatePopupDismissLabel>>,
+    )>,
+    mut fill_q: Query<(&mut Node, &mut BackgroundColor), With<UpdatePopupProgressFill>>,
+) {
+    if !updater.popup_open {
+        return;
+    }
+
+    if let Some(info) = updater.active_update_info() {
+        if let Ok(mut t) = texts.p0().single_mut() {
+            t.0 = format!("Update Available: {APP_VERSION} → {}", info.version_tag);
+        }
+        if let Ok(mut t) = texts.p1().single_mut() {
+            t.0 = if info.prerelease {
+                "PRE-RELEASE".to_string()
+            } else {
+                "RELEASE".to_string()
+            };
+        }
+    }
+    if let Ok(mut t) = texts.p2().single_mut() {
+        t.0 = updater.notes_preview();
+    }
+
+    let (status_line, is_err) = updater.popup_status_line();
+    if let Ok((mut t, mut col)) = texts.p3().single_mut() {
+        t.0 = status_line;
+        *col = TextColor(if is_err {
+            COL_ACCENT_RED
+        } else {
+            COL_ACCENT_CYAN
+        });
+    }
+
+    if let Ok((mut node, mut bg)) = fill_q.single_mut() {
+        let frac = updater.progress_fraction();
+        node.width = Val::Percent((frac * 100.0).clamp(0.0, 100.0));
+        *bg = BackgroundColor(if is_err {
+            COL_ACCENT_RED
+        } else if matches!(updater.status, UpdaterUiStatus::Restarting(_)) {
+            COL_ACCENT_GREEN
+        } else {
+            COL_ACCENT_CYAN
+        });
+    }
+
+    if let Ok(mut t) = texts.p4().single_mut() {
+        t.0 = match updater.status {
+            UpdaterUiStatus::Downloading { .. }
+            | UpdaterUiStatus::Verifying(_)
+            | UpdaterUiStatus::Extracting(_)
+            | UpdaterUiStatus::Installing(_)
+            | UpdaterUiStatus::Restarting(_) => "Updating…".to_string(),
+            UpdaterUiStatus::Failed { .. } => "Retry Update".to_string(),
+            _ => "Update & Restart".to_string(),
+        };
+    }
+    if let Ok(mut t) = texts.p5().single_mut() {
+        t.0 = if matches!(updater.status, UpdaterUiStatus::Failed { .. }) {
+            "Dismiss".to_string()
+        } else {
+            format!("Later / Stay on {APP_VERSION}")
+        };
     }
 }
 
