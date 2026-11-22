@@ -62,9 +62,9 @@ use crate::{
     settings::{AppScreen, SettingsMenuOpen},
     shed::{
         CrosshairTargetState, INTERACT_RAY_MAX_DIST_M, LookTargetKind, ParkourTimerState,
-        ShedStation, ShedStationState, ShopOverlayOpen, TargetAccent, format_parkour_time_ms,
-        is_pos_in_parkour_room, is_pos_in_parkour_start_gate, raycast_shed_station,
-        spawn_shed_landmarks,
+        ShedLandmarkVisual, ShedStation, ShedStationState, ShopOverlayOpen, TargetAccent,
+        format_parkour_time_ms, is_pos_in_parkour_room, is_pos_in_parkour_start_gate,
+        raycast_shed_station, spawn_shed_landmarks,
     },
     tools::StrikeStalkerEvent,
     voxel_render::{LevelInfoResource, WorldResource},
@@ -166,6 +166,7 @@ impl Plugin for GameplayPlugin {
                     world_items_runtime_system,
                     blind_stalker_ai_system,
                     health_and_wipe_system,
+                    sync_shed_props_streaming_system,
                 )
                     .chain(),
             );
@@ -3055,6 +3056,33 @@ pub fn upsert_remote_stalker(
         target_yaw: yaw,
         state: st,
     });
+}
+
+#[allow(clippy::type_complexity)]
+fn sync_shed_props_streaming_system(
+    elevator: Option<Res<ElevatorState>>,
+    mut landmarks_q: Query<&mut Visibility, With<ShedLandmarkVisual>>,
+    mut shed_items_q: Query<(&WorldItemEntity, &mut Visibility), Without<ShedLandmarkVisual>>,
+) {
+    let show_shed = elevator
+        .as_deref()
+        .is_none_or(|e| !matches!(e.phase, ElevatorPhase::CaveIdle | ElevatorPhase::WinchActive));
+    let target_vis = if show_shed {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+
+    for mut vis in &mut landmarks_q {
+        if *vis != target_vis {
+            *vis = target_vis;
+        }
+    }
+    for (item, mut vis) in &mut shed_items_q {
+        if item.in_shed && item.carried_by.is_empty() && *vis != target_vis {
+            *vis = target_vis;
+        }
+    }
 }
 
 #[cfg(test)]
