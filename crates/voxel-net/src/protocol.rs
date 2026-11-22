@@ -183,6 +183,13 @@ pub enum ReliableMessage {
         monster_id: u16,
         pos_m: Vec3,
     },
+    ParkourRecordSubmit {
+        player_name: String,
+        time_ms: u32,
+    },
+    ParkourLeaderboardSync {
+        records: Vec<(String, u32)>,
+    },
 }
 
 /// Compact third-person held tool / two-handed carry indicator synced in `PlayerPose`.

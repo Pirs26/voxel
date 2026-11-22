@@ -39,6 +39,10 @@ pub struct GeneratedLevelInfo {
     pub charger_bench_pos_m: Vec3,
     /// Wooden workbench counter top inside the Shed for starter spare items.
     pub shed_workbench_pos_m: Vec3,
+    /// Start Gate floor center in front of the Parkour Room's Stage 1 launch steps.
+    pub parkour_start_pos_m: Vec3,
+    /// Minimum X coordinate (in meters) separating the main Shed from the attached Parkour Room.
+    pub parkour_room_min_x_m: f32,
     /// Summit trophy bell position atop the Base Shed Parkour Room victory platform.
     pub parkour_bell_pos_m: Vec3,
     /// Interior AABB minimum corner of the Base Shed (including Parkour Room) in world meters.
@@ -1017,6 +1021,13 @@ fn build_level_info(
         (shed_floor_y + 2) as f32 * vs + 0.05,
         ((cz + 7) as f32 + 0.5) * vs,
     );
+    // Start Gate arch centered right in front of Stage 1 start steps (P1 at x=14..=15, z=5..=6)
+    let parkour_start_pos_m = Vec3::new(
+        ((cx + 14) as f32 + 1.0) * vs,
+        shed_floor_y_m,
+        ((cz + 3) as f32 + 0.5) * vs,
+    );
+    let parkour_room_min_x_m = (cx + SHED_HALF_MAX_X) as f32 * vs;
     // Top center of the 3x3 suspended steel Victory Platform in the Parkour Room
     let parkour_bell_pos_m = Vec3::new(
         ((cx + 18) as f32 + 0.5) * vs,
@@ -1053,6 +1064,8 @@ fn build_level_info(
         shop_terminal_pos_m,
         charger_bench_pos_m,
         shed_workbench_pos_m,
+        parkour_start_pos_m,
+        parkour_room_min_x_m,
         parkour_bell_pos_m,
         shed_bounds_min_m,
         shed_bounds_max_m,
@@ -1784,7 +1797,9 @@ mod tests {
             );
         }
 
-        // 3. Summit bell sits cleanly inside the Base Shed bounds (so dropped items persist too).
+        // 3. Start gate & Summit bell sit cleanly inside the Parkour Room & Base Shed bounds.
+        assert!(info.parkour_start_pos_m.x > info.parkour_room_min_x_m);
+        assert!(info.parkour_bell_pos_m.x > info.parkour_room_min_x_m);
         assert!(info.parkour_bell_pos_m.x >= info.shed_bounds_min_m.x);
         assert!(info.parkour_bell_pos_m.x <= info.shed_bounds_max_m.x);
         assert!(info.parkour_bell_pos_m.y >= info.shed_bounds_min_m.y);

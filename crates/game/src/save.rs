@@ -17,6 +17,14 @@ pub const STARTER_CREDITS: i32 = 100;
 pub const UNRECOVERED_COMPANION_FINE: i32 = 50;
 pub const DEFAULT_SAVE_SLOT: &str = "default";
 pub const MAX_SAVE_SLOT_NAME_LEN: usize = 28;
+pub const MAX_PARKOUR_LEADERBOARD: usize = 8;
+
+/// A single completed official Parkour Room run persisted in the campaign save.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkourRecord {
+    pub player_name: String,
+    pub time_ms: u32,
+}
 
 /// Physical items persisted inside the Base Shed across dives and sessions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -59,6 +67,8 @@ pub struct CampaignSave {
     pub shed_initialized: bool,
     pub shed_items: Vec<SavedWorldItem>,
     pub players: HashMap<String, SavedPlayerProfile>,
+    #[serde(default)]
+    pub parkour_leaderboard: Vec<ParkourRecord>,
 }
 
 impl Default for CampaignSave {
@@ -128,6 +138,35 @@ impl CampaignSave {
             shed_initialized: false,
             shed_items: Vec::new(),
             players: HashMap::new(),
+            parkour_leaderboard: Vec::new(),
+        }
+    }
+
+    /// Inserts an official timed Parkour Room run into the sorted leaderboard (fastest first,
+    /// capped at [`MAX_PARKOUR_LEADERBOARD`]). Returns the 1-based rank if the run placed.
+    pub fn record_parkour_run(&mut self, player_name: &str, time_ms: u32) -> Option<usize> {
+        let trimmed = player_name.trim();
+        let display_name = if trimmed.is_empty() {
+            "Miner".to_string()
+        } else {
+            trimmed.chars().take(20).collect()
+        };
+        let clamped_ms = time_ms.max(100);
+        let entry = ParkourRecord {
+            player_name: display_name,
+            time_ms: clamped_ms,
+        };
+        let insert_idx = self
+            .parkour_leaderboard
+            .iter()
+            .position(|r| clamped_ms < r.time_ms)
+            .unwrap_or(self.parkour_leaderboard.len());
+        self.parkour_leaderboard.insert(insert_idx, entry);
+        self.parkour_leaderboard.truncate(MAX_PARKOUR_LEADERBOARD);
+        if insert_idx < MAX_PARKOUR_LEADERBOARD {
+            Some(insert_idx + 1)
+        } else {
+            None
         }
     }
 
@@ -712,5 +751,23 @@ mod tests {
         assert_eq!(reloaded.dives_completed, 4);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parkour_leaderboard_sorts_fastest_first_and_caps_top_entries() {
+        let mut save = CampaignSave::default_new();
+        assert_eq!(save.record_parkour_run("Bob", 18_500), Some(1));
+        assert_eq!(save.record_parkour_run("Alice", 12_340), Some(1));
+        assert_eq!(save.record_parkour_run("Charlie", 15_000), Some(2));
+        for i in 0..8 {
+            save.record_parkour_run("Runner", 20_000 + i * 500);
+        }
+        assert_eq!(save.parkour_leaderboard.len(), MAX_PARKOUR_LEADERBOARD);
+        assert_eq!(save.parkour_leaderboard[0].player_name, "Alice");
+        assert_eq!(save.parkour_leaderboard[0].time_ms, 12_340);
+        assert_eq!(save.parkour_leaderboard[1].player_name, "Charlie");
+        assert_eq!(save.parkour_leaderboard[2].player_name, "Bob");
+        // Slower run beyond top 8 returns None
+        assert_eq!(save.record_parkour_run("Slow", 99_999), None);
     }
 }

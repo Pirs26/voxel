@@ -88,6 +88,57 @@ pub struct ShedStationState {
 #[derive(Component)]
 pub struct ShedLandmarkVisual;
 
+/// Live client-side stopwatch state for the Base Shed Parkour Room course.
+#[derive(Resource, Default, Clone, Debug)]
+pub struct ParkourTimerState {
+    pub in_room: bool,
+    pub running: bool,
+    pub elapsed_s: f32,
+    pub in_gate_prev: bool,
+    pub last_finish_ms: Option<u32>,
+    pub last_finish_rank: Option<usize>,
+    pub finish_banner_s: f32,
+}
+
+impl ParkourTimerState {
+    pub fn cancel(&mut self) {
+        self.running = false;
+        self.elapsed_s = 0.0;
+        self.in_gate_prev = false;
+    }
+}
+
+/// Returns `true` if `feet_pos_m` is inside the Base Shed's attached Parkour Room wing.
+pub fn is_pos_in_parkour_room(feet_pos_m: Vec3, info: &GeneratedLevelInfo) -> bool {
+    feet_pos_m.x >= info.parkour_room_min_x_m - 0.15
+        && feet_pos_m.x <= info.shed_bounds_max_m.x + 0.25
+        && feet_pos_m.y >= info.shed_bounds_min_m.y - 0.5
+        && feet_pos_m.y <= info.shed_bounds_max_m.y + 0.5
+        && feet_pos_m.z >= info.shed_bounds_min_m.z - 0.25
+        && feet_pos_m.z <= info.shed_bounds_max_m.z + 0.25
+}
+
+/// Returns `true` when the player's feet pass through the glowing Parkour Start Gate arch.
+pub fn is_pos_in_parkour_start_gate(feet_pos_m: Vec3, info: &GeneratedLevelInfo) -> bool {
+    let g = info.parkour_start_pos_m;
+    (feet_pos_m.x - g.x).abs() <= 1.25
+        && (feet_pos_m.z - g.z).abs() <= 0.65
+        && feet_pos_m.y >= g.y - 0.35
+        && feet_pos_m.y <= g.y + 1.85
+}
+
+/// Formats a millisecond parkour run duration cleanly (`12.34s` or `1:04.25`).
+pub fn format_parkour_time_ms(time_ms: u32) -> String {
+    let mins = time_ms / 60_000;
+    let secs = (time_ms % 60_000) / 1_000;
+    let hundredths = (time_ms % 1_000) / 10;
+    if mins > 0 {
+        format!("{mins}:{secs:02}.{hundredths:02}")
+    } else {
+        format!("{secs}.{hundredths:02}s")
+    }
+}
+
 /// Casts the center-of-screen camera ray `(origin_m, dir)` up to `max_dist_m` against the
 /// physical AABBs of the interior Elevator Lever, Shed Shop Terminal, and Battery Charger Bench.
 ///
@@ -196,7 +247,7 @@ pub fn raycast_shed_station(
         bell_min,
         bell_max,
         "Parkour Summit Bell".to_string(),
-        "Ring to celebrate!".to_string(),
+        "Stop clock & log run".to_string(),
         false,
     );
 
@@ -385,6 +436,69 @@ pub fn spawn_shed_landmarks(
                 Transform::from_xyz(-3.2, -3.2, 2.2),
             ));
         });
+
+    // 4. Parkour Room Start Gate Arch (glowing emerald/cyan laser gate in front of Stage 1!)
+    let post_mesh = meshes.add(Cuboid::new(0.18, 2.35, 0.18));
+    let header_bar_mesh = meshes.add(Cuboid::new(2.36, 0.16, 0.18));
+    let laser_strip_mesh = meshes.add(Cuboid::new(2.04, 0.08, 0.08));
+    let floor_strip_mesh = meshes.add(Cuboid::new(2.10, 0.03, 0.22));
+    let gate_steel_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.22, 0.25, 0.29),
+        metallic: 0.78,
+        perceptual_roughness: 0.44,
+        ..default()
+    });
+    let gate_glow_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.14, 0.96, 0.62),
+        emissive: LinearRgba::new(0.45, 5.2, 2.8, 1.0),
+        perceptual_roughness: 0.20,
+        ..default()
+    });
+
+    commands
+        .spawn((
+            Transform::from_translation(info.parkour_start_pos_m),
+            Visibility::default(),
+            ShedLandmarkVisual,
+        ))
+        .with_children(|parent| {
+            // Left & right steel stanchions spaced 2.18m apart along X
+            for sx in [-1.09_f32, 1.09_f32] {
+                parent.spawn((
+                    Mesh3d(post_mesh.clone()),
+                    MeshMaterial3d(gate_steel_mat.clone()),
+                    Transform::from_xyz(sx, 1.175, 0.0),
+                ));
+            }
+            // Top arch beam + glowing emerald start laser bar
+            parent.spawn((
+                Mesh3d(header_bar_mesh),
+                MeshMaterial3d(gate_steel_mat),
+                Transform::from_xyz(0.0, 2.40, 0.0),
+            ));
+            parent.spawn((
+                Mesh3d(laser_strip_mesh),
+                MeshMaterial3d(gate_glow_mat.clone()),
+                Transform::from_xyz(0.0, 2.26, 0.0),
+            ));
+            // Glowing threshold strip across the timber floor
+            parent.spawn((
+                Mesh3d(floor_strip_mesh),
+                MeshMaterial3d(gate_glow_mat),
+                Transform::from_xyz(0.0, 0.015, 0.0),
+            ));
+            // Dedicated child PointLight illuminating the Start Gate (NO Mesh3d)
+            parent.spawn((
+                PointLight {
+                    color: Color::srgb(0.22, 1.0, 0.65),
+                    intensity: 26_000.0,
+                    range: 10.0,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::from_xyz(0.0, 1.85, 0.0),
+            ));
+        });
 }
 
 #[cfg(test)]
@@ -517,16 +631,28 @@ mod tests {
         world.flush();
 
         let mut shed_q = world.query::<&ShedLandmarkVisual>();
-        assert_eq!(shed_q.iter(&world).count(), 3);
+        assert_eq!(shed_q.iter(&world).count(), 4);
 
         let mut light_q = world.query::<(&PointLight, Option<&Mesh3d>)>();
         let lights: Vec<_> = light_q.iter(&world).collect();
-        assert_eq!(lights.len(), 4);
+        assert_eq!(lights.len(), 5);
         for (_, mesh) in lights {
             assert!(
                 mesh.is_none(),
                 "Shed landmark PointLight must live on a dedicated child entity with no Mesh3d"
             );
         }
+    }
+
+    #[test]
+    fn parkour_room_start_gate_and_time_formatting() {
+        let info = sample_level();
+        assert!(!is_pos_in_parkour_room(info.spawn_pos_m, &info));
+        assert!(is_pos_in_parkour_room(info.parkour_start_pos_m, &info));
+        assert!(is_pos_in_parkour_room(info.parkour_bell_pos_m, &info));
+        assert!(is_pos_in_parkour_start_gate(info.parkour_start_pos_m, &info));
+        assert!(!is_pos_in_parkour_start_gate(info.spawn_pos_m, &info));
+        assert_eq!(format_parkour_time_ms(12_340), "12.34s");
+        assert_eq!(format_parkour_time_ms(64_250), "1:04.25");
     }
 }

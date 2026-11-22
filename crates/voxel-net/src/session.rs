@@ -123,6 +123,13 @@ pub enum NetEvent {
         monster_id: u16,
         pos_m: Vec3,
     },
+    ParkourRecordSubmit {
+        player_name: String,
+        time_ms: u32,
+    },
+    ParkourLeaderboardSync {
+        records: Vec<(String, u32)>,
+    },
     PlayerPose {
         player_id: PlayerId,
         tick: u32,
@@ -1335,6 +1342,19 @@ fn emit_reliable_event(events: &EventQueue, msg: ReliableMessage) {
         ),
         ReliableMessage::MonsterKilled { monster_id, pos_m } => {
             push_event(events, NetEvent::MonsterKilled { monster_id, pos_m })
+        }
+        ReliableMessage::ParkourRecordSubmit {
+            player_name,
+            time_ms,
+        } => push_event(
+            events,
+            NetEvent::ParkourRecordSubmit {
+                player_name,
+                time_ms,
+            },
+        ),
+        ReliableMessage::ParkourLeaderboardSync { records } => {
+            push_event(events, NetEvent::ParkourLeaderboardSync { records })
         }
         ReliableMessage::Handshake { .. }
         | ReliableMessage::HandshakeRejected { .. }

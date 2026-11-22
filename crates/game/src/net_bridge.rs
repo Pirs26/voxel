@@ -271,6 +271,25 @@ impl CoopState {
         }
     }
 
+    pub fn send_parkour_record_submit(&self, player_name: String, time_ms: u32) {
+        if let Some(ref s) = self.session {
+            s.send_reliable(ReliableMessage::ParkourRecordSubmit {
+                player_name,
+                time_ms,
+            });
+        }
+    }
+
+    pub fn send_parkour_leaderboard_sync(&self, records: &[crate::save::ParkourRecord]) {
+        if let Some(ref s) = self.session {
+            let wire = records
+                .iter()
+                .map(|r| (r.player_name.clone(), r.time_ms))
+                .collect();
+            s.send_reliable(ReliableMessage::ParkourLeaderboardSync { records: wire });
+        }
+    }
+
     pub fn send_player_carry_sync(
         &self,
         carrier_id: PlayerId,
@@ -1176,6 +1195,7 @@ fn poll_network_events_system(
                         info.visor_rgb,
                         inv_json,
                     );
+                    coop.send_parkour_leaderboard_sync(&campaign.save.parkour_leaderboard);
                 }
             }
             NetEvent::PlayerLeft(id) => {
@@ -1477,6 +1497,36 @@ fn poll_network_events_system(
                         ai_event: None,
                     });
                     toast.show("Stalker eliminated!", 2.6);
+                }
+            }
+            NetEvent::ParkourRecordSubmit {
+                player_name,
+                time_ms,
+            } => {
+                if coop.is_host_or_solo() {
+                    let rank = campaign.save.record_parkour_run(&player_name, time_ms);
+                    let _ = campaign.save_now();
+                    coop.send_parkour_leaderboard_sync(&campaign.save.parkour_leaderboard);
+                    let pretty = crate::shed::format_parkour_time_ms(time_ms);
+                    if rank == Some(1) {
+                        toast.show(
+                            format!("{player_name} set a NEW PARKOUR RECORD: {pretty}!"),
+                            4.0,
+                        );
+                    } else {
+                        toast.show(format!("{player_name} finished Parkour in {pretty}!"), 3.0);
+                    }
+                }
+            }
+            NetEvent::ParkourLeaderboardSync { records } => {
+                if !coop.is_host_or_solo() {
+                    campaign.save.parkour_leaderboard = records
+                        .into_iter()
+                        .map(|(player_name, time_ms)| crate::save::ParkourRecord {
+                            player_name,
+                            time_ms,
+                        })
+                        .collect();
                 }
             }
             NetEvent::VoxelDelta { coord, material } => {

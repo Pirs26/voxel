@@ -58,8 +58,9 @@ use crate::{
     },
     settings::{AppScreen, SettingsMenuOpen},
     shed::{
-        CrosshairTargetState, INTERACT_RAY_MAX_DIST_M, LookTargetKind, ShedStation,
-        ShedStationState, ShopOverlayOpen, TargetAccent, raycast_shed_station,
+        CrosshairTargetState, INTERACT_RAY_MAX_DIST_M, LookTargetKind, ParkourTimerState,
+        ShedStation, ShedStationState, ShopOverlayOpen, TargetAccent, format_parkour_time_ms,
+        is_pos_in_parkour_room, is_pos_in_parkour_start_gate, raycast_shed_station,
         spawn_shed_landmarks,
     },
     tools::StrikeStalkerEvent,
@@ -141,6 +142,7 @@ impl Plugin for GameplayPlugin {
             .init_resource::<WorldItemRegistry>()
             .init_resource::<ShedStationState>()
             .init_resource::<CrosshairTargetState>()
+            .init_resource::<ParkourTimerState>()
             .init_resource::<ShopOverlayOpen>()
             .init_resource::<SaveSlotBrowser>()
             .init_resource::<GameplayToast>()
@@ -153,6 +155,7 @@ impl Plugin for GameplayPlugin {
                     handle_session_lifecycle_system,
                     handle_shop_actions_system,
                     inventory_input_system,
+                    parkour_timer_system,
                     station_and_item_interact_system,
                     elevator_runtime_system,
                     world_items_runtime_system,
@@ -859,6 +862,78 @@ fn inventory_input_system(
     }
 }
 
+/// Tracks whether the player is inside the Base Shed Parkour Room, starts/restarts the official
+/// run clock when passing through the glowing Start Gate, and cancels the timer if they leave.
+#[allow(clippy::too_many_arguments)]
+fn parkour_timer_system(
+    time: Res<Time>,
+    screen: Res<AppScreen>,
+    level_info: Res<LevelInfoResource>,
+    elevator: Option<Res<ElevatorState>>,
+    player_q: Query<&PlayerController>,
+    mut parkour: ResMut<ParkourTimerState>,
+    mut toast: ResMut<GameplayToast>,
+    mut sound_writer: MessageWriter<PlaySpatialSoundEvent>,
+) {
+    let dt = time.delta_secs().min(0.1);
+    if parkour.finish_banner_s > 0.0 {
+        parkour.finish_banner_s = (parkour.finish_banner_s - dt).max(0.0);
+    }
+
+    let in_shed_idle = *screen == AppScreen::InGame
+        && elevator
+            .as_deref()
+            .is_some_and(|e| e.phase == ElevatorPhase::ShedIdle);
+    if !in_shed_idle {
+        parkour.in_room = false;
+        parkour.cancel();
+        return;
+    }
+
+    let Ok(pc) = player_q.single() else {
+        parkour.in_room = false;
+        parkour.cancel();
+        return;
+    };
+
+    let in_room = is_pos_in_parkour_room(pc.feet_pos_m, &level_info.0);
+    parkour.in_room = in_room;
+    if !in_room {
+        parkour.cancel();
+        return;
+    }
+
+    let in_gate = is_pos_in_parkour_start_gate(pc.feet_pos_m, &level_info.0);
+    if in_gate && !parkour.in_gate_prev {
+        let was_running = parkour.running;
+        parkour.running = true;
+        parkour.elapsed_s = 0.0;
+        parkour.last_finish_ms = None;
+        parkour.last_finish_rank = None;
+        parkour.finish_banner_s = 0.0;
+        sound_writer.write(PlaySpatialSoundEvent {
+            pos_m: level_info.0.parkour_start_pos_m + Vec3::Y * 1.4,
+            clip: SynthClip::BatteryClick,
+            volume: 0.72,
+            pitch: 1.50,
+            ai_event: None,
+        });
+        toast.show(
+            if was_running {
+                "PARKOUR TIMER RESTARTED! Race to the Summit Bell!"
+            } else {
+                "PARKOUR TIMER STARTED! Climb to the Summit Bell!"
+            },
+            2.4,
+        );
+    }
+    parkour.in_gate_prev = in_gate;
+
+    if parkour.running {
+        parkour.elapsed_s = (parkour.elapsed_s + dt).min(3599.99);
+    }
+}
+
 #[derive(SystemParam)]
 struct InteractMenus<'w> {
     screen: Res<'w, AppScreen>,
@@ -872,13 +947,14 @@ struct InteractState<'w> {
     world_res: Res<'w, WorldResource>,
     level_info: Res<'w, LevelInfoResource>,
     elevator: Res<'w, ElevatorState>,
-    campaign: Res<'w, CampaignState>,
+    campaign: ResMut<'w, CampaignState>,
     coop: Res<'w, CoopState>,
     inv: ResMut<'w, PlayerInventory>,
     health: ResMut<'w, PlayerHealthState>,
     remote_health: ResMut<'w, RemoteHealthMap>,
     station_state: ResMut<'w, ShedStationState>,
     crosshair_target: ResMut<'w, CrosshairTargetState>,
+    parkour_timer: ResMut<'w, ParkourTimerState>,
     item_reg: ResMut<'w, WorldItemRegistry>,
     toast: ResMut<'w, GameplayToast>,
 }
@@ -901,7 +977,6 @@ fn station_and_item_interact_system(
     mut remove_item_writer: MessageWriter<RemoveWorldItemEvent>,
     mut revive_writer: MessageWriter<ReviveCompletedEvent>,
     mut sound_writer: MessageWriter<PlaySpatialSoundEvent>,
-    mut parkour_clears: Local<u32>,
 ) {
     let screen = &menus.screen;
     let menu_open = &menus.menu_open;
@@ -910,13 +985,14 @@ fn station_and_item_interact_system(
     let world_res = &st.world_res;
     let level_info = &st.level_info;
     let elevator = &st.elevator;
-    let campaign = &st.campaign;
+    let campaign = &mut st.campaign;
     let coop = &st.coop;
     let inv = &mut st.inv;
     let health = &mut st.health;
     let remote_health = &mut st.remote_health;
     let station_state = &mut st.station_state;
     let crosshair_target = &mut st.crosshair_target;
+    let parkour_timer = &mut st.parkour_timer;
     let item_reg = &mut st.item_reg;
     let toast = &mut st.toast;
     if **screen != AppScreen::InGame || menu_open.0 || settings_open.0 {
@@ -1369,19 +1445,49 @@ fn station_and_item_interact_system(
                 });
             }
             ShedStation::ParkourBell => {
-                *parkour_clears = parkour_clears.saturating_add(1);
-                let count = *parkour_clears;
-                toast.show(
-                    format!("PARKOUR COMPLETE! Rang the Summit Bell ({count} clear(s))"),
-                    3.2,
-                );
-                sound_writer.write(PlaySpatialSoundEvent {
-                    pos_m: level_info.0.parkour_bell_pos_m + Vec3::Y * 0.9,
-                    clip: SynthClip::BeaconPing,
-                    volume: 0.92,
-                    pitch: 1.35,
-                    ai_event: None,
-                });
+                if parkour_timer.running {
+                    let time_ms = (parkour_timer.elapsed_s * 1000.0).round().max(100.0) as u32;
+                    parkour_timer.running = false;
+                    parkour_timer.last_finish_ms = Some(time_ms);
+                    parkour_timer.finish_banner_s = 5.0;
+
+                    let rank = campaign.save.record_parkour_run(&coop.local_name, time_ms);
+                    parkour_timer.last_finish_rank = rank;
+
+                    if coop.is_host_or_solo() {
+                        let _ = campaign.save_now();
+                        coop.send_parkour_leaderboard_sync(&campaign.save.parkour_leaderboard);
+                    } else {
+                        coop.send_parkour_record_submit(coop.local_name.clone(), time_ms);
+                    }
+
+                    let pretty = format_parkour_time_ms(time_ms);
+                    let msg = match rank {
+                        Some(1) => format!("NEW RECORD! Finished in {pretty} — #1 on the Leaderboard!"),
+                        Some(r) => format!("PARKOUR FINISHED in {pretty}! (Leaderboard #{r})"),
+                        None => format!("PARKOUR FINISHED in {pretty}!"),
+                    };
+                    toast.show(msg, 4.2);
+                    sound_writer.write(PlaySpatialSoundEvent {
+                        pos_m: level_info.0.parkour_bell_pos_m + Vec3::Y * 0.9,
+                        clip: SynthClip::BeaconPing,
+                        volume: 0.95,
+                        pitch: 1.38,
+                        ai_event: None,
+                    });
+                } else {
+                    toast.show(
+                        "Pass through the glowing START GATE first to start an official timed run!",
+                        3.2,
+                    );
+                    sound_writer.write(PlaySpatialSoundEvent {
+                        pos_m: level_info.0.parkour_bell_pos_m + Vec3::Y * 0.9,
+                        clip: SynthClip::BeaconPing,
+                        volume: 0.55,
+                        pitch: 1.05,
+                        ai_event: None,
+                    });
+                }
             }
         },
         LookTargetKind::DownedPlayer { player_id, name } => {
