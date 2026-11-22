@@ -92,6 +92,10 @@ pub enum ReliableMessage {
     Handshake {
         player_name: String,
         visor_rgb: [f32; 3],
+        game_version: String,
+    },
+    HandshakeRejected {
+        reason: String,
     },
     Welcome {
         assigned_id: PlayerId,

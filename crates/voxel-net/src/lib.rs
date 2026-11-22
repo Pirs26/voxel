@@ -62,6 +62,10 @@ mod tests {
             ReliableMessage::Handshake {
                 player_name: "Scout".to_string(),
                 visor_rgb: [0.1, 0.9, 0.5],
+                game_version: "v0.1.5".to_string(),
+            },
+            ReliableMessage::HandshakeRejected {
+                reason: "Version mismatch: host is on v0.1.5, you are on v0.1.4".to_string(),
             },
             ReliableMessage::Welcome {
                 assigned_id: 2,
@@ -265,6 +269,7 @@ mod tests {
         let host = NetSession::start_host(
             "HostDiver".to_string(),
             [0.2, 0.8, 1.0],
+            "v0.1.5".to_string(),
             seed,
             initial_beacon,
             initial_edits.clone(),
@@ -316,9 +321,10 @@ mod tests {
 
         // 2. Start client with the host's join code.
         let client = NetSession::start_client(
-            join_code,
+            join_code.clone(),
             "GuestScout".to_string(),
             [1.0, 0.4, 0.2],
+            "v0.1.5".to_string(),
         )
         .expect("start client");
         assert!(!client.is_host());
@@ -497,6 +503,34 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(host_saw_left, "host did not receive PlayerLeft(1) after client dropped");
+
+        // 6. Verify version mismatch rejection gives a clear user-facing error.
+        let mismatched = NetSession::start_client(
+            join_code,
+            "OldClient".to_string(),
+            [0.5, 0.5, 0.5],
+            "v0.1.3".to_string(),
+        )
+        .expect("start mismatched client");
+        let mut got_version_error = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !got_version_error {
+            for ev in mismatched.poll_events() {
+                if let NetEvent::Disconnected(msg) | NetEvent::Error(msg) = ev
+                    && msg.contains("Version mismatch")
+                    && msg.contains("v0.1.5")
+                    && msg.contains("v0.1.3")
+                {
+                    got_version_error = true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            got_version_error,
+            "mismatched client should receive clear Version mismatch rejection"
+        );
+        drop(mismatched);
 
         drop(host);
     }

@@ -190,6 +190,7 @@ impl NetSession {
     pub fn start_host(
         player_name: String,
         visor_rgb: [f32; 3],
+        game_version: String,
         level_seed: u64,
         beacon_pos_m: Vec3,
         initial_edits: Vec<(IVec3, VoxelId)>,
@@ -224,6 +225,7 @@ impl NetSession {
                 rt.block_on(run_host_task(
                     player_name,
                     visor_rgb,
+                    game_version,
                     level_seed,
                     beacon_pos_m,
                     initial_edits,
@@ -256,6 +258,7 @@ impl NetSession {
         join_code: String,
         player_name: String,
         visor_rgb: [f32; 3],
+        game_version: String,
     ) -> Result<Self, String> {
         let host_addr = decode_join_code(&join_code)?;
         let normalized_code = encode_join_code(&host_addr).unwrap_or(join_code);
@@ -291,6 +294,7 @@ impl NetSession {
                     host_addr,
                     player_name,
                     visor_rgb,
+                    game_version,
                     local_id_bg,
                     events_bg,
                     cmd_rx,
@@ -375,6 +379,7 @@ struct PeerHandle {
 }
 
 struct HostState {
+    game_version: String,
     level_seed: u64,
     depth_tier: u8,
     elevator_phase: ElevatorPhase,
@@ -517,10 +522,22 @@ fn build_host_endpoint_addr(endpoint: &Endpoint) -> EndpointAddr {
     addr
 }
 
+fn normalize_handshake_version(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix('V') {
+        format!("v{rest}")
+    } else if trimmed.starts_with('v') || trimmed.is_empty() {
+        trimmed.to_string()
+    } else {
+        format!("v{trimmed}")
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_host_task(
     player_name: String,
     visor_rgb: [f32; 3],
+    game_version: String,
     level_seed: u64,
     beacon_pos_m: Vec3,
     initial_edits: Vec<(IVec3, VoxelId)>,
@@ -585,6 +602,7 @@ async fn run_host_task(
     );
 
     let state = Arc::new(RwLock::new(HostState {
+        game_version: normalize_handshake_version(&game_version),
         level_seed,
         depth_tier: 1,
         elevator_phase: ElevatorPhase::ShedIdle,
@@ -711,16 +729,49 @@ async fn handle_incoming_guest(
             }
         };
 
-    let (player_name, visor_rgb) = match first_msg {
+    let (player_name, visor_rgb, client_version) = match first_msg {
         ReliableMessage::Handshake {
             player_name,
             visor_rgb,
-        } => (player_name, visor_rgb),
+            game_version,
+        } => (
+            player_name,
+            visor_rgb,
+            normalize_handshake_version(&game_version),
+        ),
         _ => {
             conn.close(VarInt::from_u32(1), b"expected handshake");
             return;
         }
     };
+
+    let host_version = {
+        let guard = state.read().await;
+        guard.game_version.clone()
+    };
+    if host_version != client_version {
+        let reason = format!(
+            "Version mismatch: host is on {host_version}, you are on {client_version}"
+        );
+        let _ = write_reliable_frame(
+            &mut send_stream,
+            &ReliableMessage::HandshakeRejected {
+                reason: reason.clone(),
+            },
+        )
+        .await;
+        let _ = send_stream.finish();
+        // Give the peer a brief moment to read the rejection frame before closing
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        conn.close(VarInt::from_u32(2), b"version mismatch");
+        push_event(
+            &events,
+            NetEvent::Error(format!(
+                "Rejected {player_name}: {reason}"
+            )),
+        );
+        return;
+    }
 
     let (reliable_tx, mut reliable_rx) = mpsc::unbounded_channel::<ReliableMessage>();
 
@@ -879,10 +930,12 @@ async fn cleanup_peer(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_client_task(
     host_addr: EndpointAddr,
     player_name: String,
     visor_rgb: [f32; 3],
+    game_version: String,
     local_player_id: Arc<Mutex<Option<PlayerId>>>,
     events: EventQueue,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
@@ -937,6 +990,7 @@ async fn run_client_task(
     let handshake = ReliableMessage::Handshake {
         player_name,
         visor_rgb,
+        game_version: normalize_handshake_version(&game_version),
     };
     if let Err(e) = write_reliable_frame(&mut send_stream, &handshake).await {
         let msg = format!("failed to send handshake: {e}");
@@ -1011,6 +1065,13 @@ async fn run_client_task(
                     beacon_pos_m,
                 },
             );
+        }
+        ReliableMessage::HandshakeRejected { reason } => {
+            push_event(&events, NetEvent::Error(reason.clone()));
+            push_event(&events, NetEvent::Disconnected(reason));
+            conn.close(VarInt::from_u32(2), b"handshake rejected");
+            let _ = tokio::time::timeout(Duration::from_millis(500), endpoint.close()).await;
+            return;
         }
         other => {
             let msg = format!("unexpected initial message from host: {other:?}");
@@ -1275,7 +1336,9 @@ fn emit_reliable_event(events: &EventQueue, msg: ReliableMessage) {
         ReliableMessage::MonsterKilled { monster_id, pos_m } => {
             push_event(events, NetEvent::MonsterKilled { monster_id, pos_m })
         }
-        ReliableMessage::Handshake { .. } | ReliableMessage::Welcome { .. } => {}
+        ReliableMessage::Handshake { .. }
+        | ReliableMessage::HandshakeRejected { .. }
+        | ReliableMessage::Welcome { .. } => {}
     }
 }
 
