@@ -18,13 +18,13 @@ use crate::{
     },
     elevator::{
         ELEVATOR_ASCENT_DURATION_S, ELEVATOR_DESCENT_DURATION_S, ELEVATOR_WINCH_DURATION_S,
-        ElevatorState,
+        ELEVATOR_WINCH_OVERDRIVE_DURATION_S, ElevatorState,
     },
     gameplay::{GameplayToast, SessionLifecycleEvent, ShopActionEvent},
     health::{BLEEDOUT_DURATION_S, LocalHealthPhase, PlayerHealthState},
     inventory::{
-        BeltItem, CarryHandState, MAX_BELT_CAPACITY, MAX_POUCH_CAPACITY, PlayerInventory,
-        SHOP_CATALOG, ShopCatalogItem,
+        BeltItem, CarryHandState, MAX_BELT_CAPACITY, MAX_HEADLAMP_TIER, MAX_POUCH_CAPACITY,
+        PlayerInventory, SHOP_CATALOG, ShopCatalogItem, dynamic_shop_cost, shop_item_info,
     },
     net_bridge::{
         CoopMenuOpen, CoopState, VISOR_PALETTE, clear_remote_players, copy_to_clipboard,
@@ -208,6 +208,12 @@ struct ShopSaveTagText;
 
 #[derive(Component, Clone, Copy)]
 struct ShopTierTab(u8);
+
+#[derive(Component, Clone, Copy)]
+enum ShopDynamicText {
+    Title(ShopCatalogItem),
+    Price(ShopCatalogItem),
+}
 
 // ---- Settings & Dynamic Toggle Button Markers ----
 
@@ -1035,6 +1041,7 @@ fn spawn_audio_dropdown_row(
 fn shop_item_visual_accent(item: ShopCatalogItem) -> (Color, &'static str) {
     match item {
         ShopCatalogItem::BatteryCell => (Color::srgb(0.20, 0.92, 0.96), "BAT"),
+        ShopCatalogItem::HiCapBatteryCell => (Color::srgb(0.18, 1.0, 0.78), "HCB"),
         ShopCatalogItem::FlarePack => (Color::srgb(1.0, 0.42, 0.18), "FLR"),
         ShopCatalogItem::FoamCanister => (Color::srgb(0.32, 0.88, 0.72), "FOM"),
         ShopCatalogItem::NoiseDecoys => (Color::srgb(1.0, 0.78, 0.22), "DCY"),
@@ -1044,6 +1051,10 @@ fn shop_item_visual_accent(item: ShopCatalogItem) -> (Color, &'static str) {
         ShopCatalogItem::Headlamp => (Color::srgb(1.0, 0.92, 0.48), "HLP"),
         ShopCatalogItem::HeadlampCellMk2 => (Color::srgb(1.0, 0.80, 0.24), "HL2"),
         ShopCatalogItem::StealthBoots => (Color::srgb(0.56, 0.42, 0.98), "BTS"),
+        ShopCatalogItem::ReinforcedPickaxe => (Color::srgb(0.95, 0.58, 0.24), "PKX"),
+        ShopCatalogItem::DepthTierPermit => (Color::srgb(1.0, 0.84, 0.28), "DPT"),
+        ShopCatalogItem::WinchOverdrive => (Color::srgb(0.98, 0.38, 0.26), "WCH"),
+        ShopCatalogItem::FastChargerArray => (Color::srgb(0.28, 0.96, 0.62), "CHG"),
     }
 }
 
@@ -2950,8 +2961,8 @@ fn setup_hud(mut commands: Commands) {
             backdrop
                 .spawn((
                     Node {
-                        width: Val::Px(720.0),
-                        padding: UiRect::all(Val::Px(20.0)),
+                        width: Val::Px(740.0),
+                        padding: UiRect::all(Val::Px(16.0)),
                         border: UiRect {
                             top: Val::Px(3.0),
                             left: Val::Px(1.5),
@@ -2960,7 +2971,7 @@ fn setup_hud(mut commands: Commands) {
                         },
                         border_radius: BorderRadius::all(Val::Px(12.0)),
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(12.0),
+                        row_gap: Val::Px(8.0),
                         ..default()
                     },
                     BackgroundColor(COL_PANEL_BG),
@@ -2991,7 +3002,7 @@ fn setup_hud(mut commands: Commands) {
                                 l.spawn((
                                     Text::new("SUPPLY TERMINAL"),
                                     TextFont {
-                                        font_size: FontSize::Px(20.0),
+                                        font_size: FontSize::Px(19.0),
                                         ..default()
                                     },
                                     TextColor(COL_ACCENT_GREEN),
@@ -2999,7 +3010,7 @@ fn setup_hud(mut commands: Commands) {
                                 l.spawn((
                                     Text::new("Save: default"),
                                     TextFont {
-                                        font_size: FontSize::Px(11.5),
+                                        font_size: FontSize::Px(11.0),
                                         ..default()
                                     },
                                     TextColor(COL_TEXT_MUTED),
@@ -3009,7 +3020,7 @@ fn setup_hud(mut commands: Commands) {
 
                             hdr.spawn((
                                 Node {
-                                    padding: UiRect::axes(Val::Px(14.0), Val::Px(7.0)),
+                                    padding: UiRect::axes(Val::Px(14.0), Val::Px(6.0)),
                                     border: UiRect::all(Val::Px(1.5)),
                                     border_radius: BorderRadius::all(Val::Px(8.0)),
                                     ..default()
@@ -3019,9 +3030,9 @@ fn setup_hud(mut commands: Commands) {
                             ))
                             .with_children(|cr| {
                                 cr.spawn((
-                                    Text::new("100 cr"),
+                                    Text::new("60 cr"),
                                     TextFont {
-                                        font_size: FontSize::Px(17.0),
+                                        font_size: FontSize::Px(16.0),
                                         ..default()
                                     },
                                     TextColor(COL_ACCENT_AMBER),
@@ -3044,7 +3055,7 @@ fn setup_hud(mut commands: Commands) {
                                 tabs.spawn((
                                     Node {
                                         flex_grow: 1.0,
-                                        padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
+                                        padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
                                         border: UiRect::all(Val::Px(1.5)),
                                         border_radius: BorderRadius::all(Val::Px(7.0)),
                                         justify_content: JustifyContent::Center,
@@ -3065,7 +3076,7 @@ fn setup_hud(mut commands: Commands) {
                                     t.spawn((
                                         Text::new(label),
                                         TextFont {
-                                            font_size: FontSize::Px(12.5),
+                                            font_size: FontSize::Px(12.0),
                                             ..default()
                                         },
                                         TextColor(COL_TEXT_BRIGHT),
@@ -3074,13 +3085,13 @@ fn setup_hud(mut commands: Commands) {
                             }
                         });
 
-                    // 2-Column Graphical Gear Card Grid
+                    // 2-Column Graphical Gear Card Grid (15 items -> 8 compact rows fit 720p/1080p!)
                     panel
                         .spawn(Node {
                             flex_direction: FlexDirection::Row,
                             flex_wrap: FlexWrap::Wrap,
                             column_gap: Val::Px(10.0),
-                            row_gap: Val::Px(8.0),
+                            row_gap: Val::Px(5.0),
                             width: Val::Percent(100.0),
                             ..default()
                         })
@@ -3092,14 +3103,14 @@ fn setup_hud(mut commands: Commands) {
                                 let hover_bg = Color::srgba(0.13, 0.19, 0.27, 0.98);
                                 grid.spawn((
                                     Node {
-                                        width: Val::Px(332.0),
-                                        padding: UiRect::axes(Val::Px(10.0), Val::Px(9.0)),
+                                        width: Val::Px(345.0),
+                                        padding: UiRect::axes(Val::Px(9.0), Val::Px(5.5)),
                                         border: UiRect::all(Val::Px(1.5)),
-                                        border_radius: BorderRadius::all(Val::Px(8.0)),
+                                        border_radius: BorderRadius::all(Val::Px(7.0)),
                                         flex_direction: FlexDirection::Row,
                                         align_items: AlignItems::Center,
                                         justify_content: JustifyContent::SpaceBetween,
-                                        column_gap: Val::Px(10.0),
+                                        column_gap: Val::Px(8.0),
                                         ..default()
                                     },
                                     BackgroundColor(base_bg),
@@ -3132,17 +3143,17 @@ fn setup_hud(mut commands: Commands) {
                                     card.spawn(Node {
                                         flex_direction: FlexDirection::Row,
                                         align_items: AlignItems::Center,
-                                        column_gap: Val::Px(10.0),
+                                        column_gap: Val::Px(8.0),
                                         ..default()
                                     })
                                     .with_children(|left| {
                                         // Color-coded visual icon badge
                                         left.spawn((
                                             Node {
-                                                width: Val::Px(36.0),
-                                                height: Val::Px(36.0),
+                                                width: Val::Px(31.0),
+                                                height: Val::Px(31.0),
                                                 border: UiRect::all(Val::Px(1.5)),
-                                                border_radius: BorderRadius::all(Val::Px(7.0)),
+                                                border_radius: BorderRadius::all(Val::Px(6.0)),
                                                 justify_content: JustifyContent::Center,
                                                 align_items: AlignItems::Center,
                                                 ..default()
@@ -3154,7 +3165,7 @@ fn setup_hud(mut commands: Commands) {
                                             ic.spawn((
                                                 Text::new(code),
                                                 TextFont {
-                                                    font_size: FontSize::Px(11.0),
+                                                    font_size: FontSize::Px(10.0),
                                                     ..default()
                                                 },
                                                 TextColor(accent),
@@ -3163,22 +3174,23 @@ fn setup_hud(mut commands: Commands) {
 
                                         left.spawn(Node {
                                             flex_direction: FlexDirection::Column,
-                                            row_gap: Val::Px(2.0),
+                                            row_gap: Val::Px(1.0),
                                             ..default()
                                         })
                                         .with_children(|txt| {
                                             txt.spawn((
                                                 Text::new(entry.name),
                                                 TextFont {
-                                                    font_size: FontSize::Px(13.5),
+                                                    font_size: FontSize::Px(12.5),
                                                     ..default()
                                                 },
                                                 TextColor(COL_TEXT_BRIGHT),
+                                                ShopDynamicText::Title(entry.item),
                                             ));
                                             txt.spawn((
                                                 Text::new(entry.description),
                                                 TextFont {
-                                                    font_size: FontSize::Px(10.5),
+                                                    font_size: FontSize::Px(9.8),
                                                     ..default()
                                                 },
                                                 TextColor(COL_TEXT_MUTED),
@@ -3186,10 +3198,10 @@ fn setup_hud(mut commands: Commands) {
                                         });
                                     });
 
-                                    // Right-aligned golden price pill
+                                    // Right-aligned golden price / status pill
                                     card.spawn((
                                         Node {
-                                            padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                                            padding: UiRect::axes(Val::Px(7.0), Val::Px(3.5)),
                                             border_radius: BorderRadius::all(Val::Px(5.0)),
                                             ..default()
                                         },
@@ -3199,10 +3211,11 @@ fn setup_hud(mut commands: Commands) {
                                         pr.spawn((
                                             Text::new(format!("{} cr", entry.cost)),
                                             TextFont {
-                                                font_size: FontSize::Px(12.0),
+                                                font_size: FontSize::Px(11.5),
                                                 ..default()
                                             },
                                             TextColor(COL_ACCENT_AMBER),
+                                            ShopDynamicText::Price(entry.item),
                                         ));
                                     });
                                 });
@@ -4186,6 +4199,7 @@ struct MenuShopRead<'w> {
     name_focused: Res<'w, NameInputFocused>,
     campaign: Res<'w, CampaignState>,
     save_browser: Res<'w, SaveSlotBrowser>,
+    inv: Res<'w, PlayerInventory>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -4200,6 +4214,7 @@ fn update_menu_and_shop_system(
         Query<&mut Text, With<CoopPanelStatusText>>,
         Query<(&mut Text, &mut TextColor), With<ShopCreditsText>>,
         Query<&mut Text, With<ShopSaveTagText>>,
+        Query<(&ShopDynamicText, &mut Text, &mut TextColor)>,
     )>,
     mut borders: ParamSet<(
         Query<(&mut BorderColor, &mut BackgroundColor), With<MainMenuNameBox>>,
@@ -4213,6 +4228,7 @@ fn update_menu_and_shop_system(
     let name_focused = &st.name_focused;
     let campaign = &st.campaign;
     let save_browser = &st.save_browser;
+    let inv = &st.inv;
 
     let blink_on = ((time.elapsed_secs() / 0.50).floor() as u64).is_multiple_of(2);
 
@@ -4314,6 +4330,73 @@ fn update_menu_and_shop_system(
             campaign.save.unlocked_depth_tier,
             debt_note
         );
+    }
+
+    let unlocked_tier = campaign.save.unlocked_depth_tier;
+    for (dyn_tag, mut t, mut col) in &mut texts.p7() {
+        match *dyn_tag {
+            ShopDynamicText::Title(item) => {
+                t.0 = match item {
+                    ShopCatalogItem::DepthTierPermit => match unlocked_tier {
+                        0..=1 => "Depth Tier 2 Permit".to_string(),
+                        2 => "Depth Tier 3 Permit".to_string(),
+                        _ => "All Depths Unlocked".to_string(),
+                    },
+                    ShopCatalogItem::ToolBeltUpgrade => {
+                        format!("Tool Belt (+1) [{}/{}]", inv.belt_capacity, MAX_BELT_CAPACITY)
+                    }
+                    ShopCatalogItem::BatteryPouchUpgrade => {
+                        format!(
+                            "Battery Pouch (+2) [{}/{}]",
+                            inv.battery_pouch_capacity, MAX_POUCH_CAPACITY
+                        )
+                    }
+                    other => shop_item_info(other).name.to_string(),
+                };
+            }
+            ShopDynamicText::Price(item) => {
+                let status_badge = match item {
+                    ShopCatalogItem::Headlamp if inv.passive.headlamp => Some("OWNED"),
+                    ShopCatalogItem::HeadlampCellMk2 if inv.headlamp_tier >= MAX_HEADLAMP_TIER => {
+                        Some("OWNED")
+                    }
+                    ShopCatalogItem::StealthBoots if inv.passive.stealth_boots => Some("OWNED"),
+                    ShopCatalogItem::ReinforcedPickaxe if inv.passive.reinforced_pickaxe => {
+                        Some("OWNED")
+                    }
+                    ShopCatalogItem::WinchOverdrive if campaign.save.winch_overdrive => {
+                        Some("OWNED")
+                    }
+                    ShopCatalogItem::FastChargerArray if campaign.save.fast_charger => {
+                        Some("OWNED")
+                    }
+                    ShopCatalogItem::ToolBeltUpgrade if inv.belt_capacity >= MAX_BELT_CAPACITY => {
+                        Some("MAX")
+                    }
+                    ShopCatalogItem::BatteryPouchUpgrade
+                        if inv.battery_pouch_capacity >= MAX_POUCH_CAPACITY =>
+                    {
+                        Some("MAX")
+                    }
+                    ShopCatalogItem::DepthTierPermit if unlocked_tier >= 3 => Some("MAX"),
+                    _ => None,
+                };
+                if let Some(badge) = status_badge {
+                    t.0 = badge.to_string();
+                    *col = TextColor(COL_ACCENT_GREEN);
+                } else {
+                    let cost = dynamic_shop_cost(item, inv, unlocked_tier);
+                    t.0 = format!("{cost} cr");
+                    let affordable =
+                        campaign.save.credits > 0 && campaign.save.credits >= cost as i32;
+                    *col = TextColor(if affordable {
+                        COL_ACCENT_AMBER
+                    } else {
+                        COL_TEXT_MUTED
+                    });
+                }
+            }
+        }
     }
 
     if let Ok((mut b, mut bg)) = borders.p0().single_mut() {
@@ -4689,10 +4772,15 @@ fn update_ingame_bars_system(
         ),
         ElevatorPhase::CaveIdle => ("CAVE".to_string(), 0.0, COL_TEXT_MUTED),
         ElevatorPhase::WinchActive => {
-            let rem = (ELEVATOR_WINCH_DURATION_S - elevator.phase_timer_s).max(0.0);
+            let total_s = if campaign.save.winch_overdrive {
+                ELEVATOR_WINCH_OVERDRIVE_DURATION_S
+            } else {
+                ELEVATOR_WINCH_DURATION_S
+            };
+            let rem = (total_s - elevator.phase_timer_s).max(0.0);
             (
                 format!("WINCH {:.0}s", rem.ceil()),
-                (elevator.phase_timer_s / ELEVATOR_WINCH_DURATION_S).clamp(0.0, 1.0),
+                (elevator.phase_timer_s / total_s).clamp(0.0, 1.0),
                 COL_ACCENT_RED,
             )
         }

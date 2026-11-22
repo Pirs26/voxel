@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::inventory::PlayerInventory;
 
 pub const SAVE_VERSION: u32 = 1;
-pub const STARTER_CREDITS: i32 = 100;
-pub const UNRECOVERED_COMPANION_FINE: i32 = 50;
+pub const STARTER_CREDITS: i32 = 60;
+pub const UNRECOVERED_COMPANION_FINE: i32 = 120;
 pub const DEFAULT_SAVE_SLOT: &str = "default";
 pub const MAX_SAVE_SLOT_NAME_LEN: usize = 28;
 pub const MAX_PARKOUR_LEADERBOARD: usize = 8;
@@ -77,6 +77,10 @@ pub struct CampaignSave {
     pub dives_completed: u32,
     #[serde(default)]
     pub shed_initialized: bool,
+    #[serde(default)]
+    pub winch_overdrive: bool,
+    #[serde(default)]
+    pub fast_charger: bool,
     pub shed_items: Vec<SavedWorldItem>,
     pub players: HashMap<String, SavedPlayerProfile>,
     #[serde(default)]
@@ -148,6 +152,8 @@ impl CampaignSave {
             selected_depth_tier: 1,
             dives_completed: 0,
             shed_initialized: false,
+            winch_overdrive: false,
+            fast_charger: false,
             shed_items: Vec::new(),
             players: HashMap::new(),
             parkour_leaderboard: Vec::new(),
@@ -651,9 +657,11 @@ mod tests {
     fn get_or_create_and_upsert_player_profiles() {
         let mut save = CampaignSave::default_new();
         assert_eq!(save.version, 1);
-        assert_eq!(save.credits, 100);
+        assert_eq!(save.credits, 60);
         assert_eq!(save.unlocked_depth_tier, 1);
         assert_eq!(save.selected_depth_tier, 1);
+        assert!(!save.winch_overdrive);
+        assert!(!save.fast_charger);
 
         let mut p1 = save.get_or_create_player("  Valkyrie ", 2);
         assert_eq!(p1.player_name, "Valkyrie");
@@ -909,5 +917,46 @@ mod tests {
         assert!(browser.delete_selected_slot_in_dir(dir).is_err());
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn campaign_save_deserializes_legacy_json_without_new_upgrade_fields() {
+        let legacy_json = r#"{
+            "version": 1,
+            "credits": 240,
+            "unlocked_depth_tier": 2,
+            "selected_depth_tier": 2,
+            "dives_completed": 3,
+            "shed_initialized": true,
+            "shed_items": [],
+            "players": {
+                "miner": {
+                    "player_name": "Miner",
+                    "visor_idx": 0,
+                    "inventory": {
+                        "belt_capacity": 2,
+                        "belt": ["Flashlight", {"Flares": {"count": 3}}],
+                        "active_slot": 0,
+                        "battery_pouch_capacity": 2,
+                        "battery_pouch": [{"charge": 1.0, "capacity_scale": 1.0}],
+                        "loaded_battery": {"charge": 1.0, "capacity_scale": 1.0},
+                        "passive": {
+                            "headlamp": true,
+                            "stealth_boots": false
+                        }
+                    }
+                }
+            }
+        }"#;
+
+        let parsed: CampaignSave =
+            serde_json::from_str(legacy_json).expect("legacy save JSON must deserialize cleanly");
+        assert_eq!(parsed.credits, 240);
+        assert_eq!(parsed.unlocked_depth_tier, 2);
+        assert!(!parsed.winch_overdrive);
+        assert!(!parsed.fast_charger);
+        let miner = parsed.players.get("miner").expect("miner profile");
+        assert!(miner.inventory.passive.headlamp);
+        assert!(!miner.inventory.passive.reinforced_pickaxe);
     }
 }

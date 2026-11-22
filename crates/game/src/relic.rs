@@ -323,9 +323,17 @@ pub fn create_cave_relic_states(
     info: &GeneratedLevelInfo,
     next_id: &mut u32,
 ) -> Vec<WorldItemNetState> {
-    let tier = u32::from(info.depth_tier.max(1));
-    let relic_value = 220 + tier * 90;
-    let bonus_value = 65 + tier * 35;
+    let tier = info.depth_tier.max(1);
+    let relic_value = match tier {
+        1 => 140,
+        2 => 230,
+        _ => 340,
+    };
+    let bonus_value = match tier {
+        1 => 35,
+        2 => 55,
+        _ => 85,
+    };
 
     let mut items =
         Vec::with_capacity(info.relic_spawns_m.len() + info.bonus_loot_spawns_m.len());
@@ -1068,7 +1076,31 @@ mod tests {
             }
             ref other => panic!("expected HeavyRelic, got {other:?}"),
         };
-        assert_eq!(t1_relic_val, 220 + 90);
+        assert_eq!(t1_relic_val, 140);
+        let t1_bonus_val = items1
+            .iter()
+            .find_map(|i| match i.kind {
+                WorldItemKind::BonusLoot { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected Tier 1 bonus loot");
+        assert_eq!(t1_bonus_val, 35);
+
+        let (_w2, info2) = generate_world_with_tier(101, 2, cfg);
+        let items2 = create_cave_relic_states(&info2, &mut reg.next_id);
+        let t2_relic_val = match items2[0].kind {
+            WorldItemKind::HeavyRelic { value, .. } => value,
+            ref other => panic!("expected HeavyRelic, got {other:?}"),
+        };
+        assert_eq!(t2_relic_val, 230);
+        let t2_bonus_val = items2
+            .iter()
+            .find_map(|i| match i.kind {
+                WorldItemKind::BonusLoot { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected Tier 2 bonus loot");
+        assert_eq!(t2_bonus_val, 55);
 
         let (_w3, info3) = generate_world_with_tier(101, 3, cfg);
         let items3 = create_cave_relic_states(&info3, &mut reg.next_id);
@@ -1080,8 +1112,16 @@ mod tests {
             WorldItemKind::HeavyRelic { value, .. } => value,
             ref other => panic!("expected HeavyRelic, got {other:?}"),
         };
-        assert_eq!(t3_relic_val, 220 + 3 * 90);
+        assert_eq!(t3_relic_val, 340);
         assert!(t3_relic_val > t1_relic_val);
+        let t3_bonus_val = items3
+            .iter()
+            .find_map(|i| match i.kind {
+                WorldItemKind::BonusLoot { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected Tier 3 bonus loot");
+        assert_eq!(t3_bonus_val, 85);
 
         // Verify unique IDs and to_net_state roundtrip
         let first = &items3[0];

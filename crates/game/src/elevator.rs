@@ -12,7 +12,9 @@ use voxel_net::ElevatorPhase;
 /// Duration of the seamless shaft descent from Base Shed to Cave landing (seconds).
 pub const ELEVATOR_DESCENT_DURATION_S: f32 = 7.0;
 /// Duration of the loud extraction winch holdout before doors slam shut (seconds).
-pub const ELEVATOR_WINCH_DURATION_S: f32 = 12.0;
+pub const ELEVATOR_WINCH_DURATION_S: f32 = 18.0;
+/// Reduced extraction winch holdout duration when the Crew Winch Overdrive upgrade is installed (seconds).
+pub const ELEVATOR_WINCH_OVERDRIVE_DURATION_S: f32 = 11.0;
 /// Duration of the shaft ascent back up to the Base Shed (seconds).
 pub const ELEVATOR_ASCENT_DURATION_S: f32 = 7.0;
 /// Half-width / half-depth of the walkable elevator cage interior in meters.
@@ -275,16 +277,28 @@ impl ElevatorState {
     }
 
     /// Transitions `CaveIdle -> WinchActive`, initiating the loud extraction holdout climax.
-    pub fn start_winch(&mut self) {
+    /// When `overdrive` is `true` (Crew Winch Overdrive upgrade), the holdout duration is cut
+    /// from [`ELEVATOR_WINCH_DURATION_S`] (`18.0s`) to [`ELEVATOR_WINCH_OVERDRIVE_DURATION_S`] (`11.0s`).
+    pub fn start_winch_with_overdrive(&mut self, overdrive: bool) {
         if self.phase != ElevatorPhase::CaveIdle {
             return;
         }
 
         self.phase = ElevatorPhase::WinchActive;
-        self.phase_timer_s = ELEVATOR_WINCH_DURATION_S;
+        self.phase_timer_s = if overdrive {
+            ELEVATOR_WINCH_OVERDRIVE_DURATION_S
+        } else {
+            ELEVATOR_WINCH_DURATION_S
+        };
         self.winch_pulse_timer_s = 0.0;
         self.cable_shudder_active = false;
         self.doors_closed = false;
+    }
+
+    /// Transitions `CaveIdle -> WinchActive` with the standard holdout duration.
+    #[allow(dead_code)]
+    pub fn start_winch(&mut self) {
+        self.start_winch_with_overdrive(false);
     }
 
     /// Applies an authoritative host network snapshot to a guest's local elevator state.
@@ -1088,5 +1102,19 @@ mod tests {
             (riding_flare.y - (state.platform_y_m + 0.02 + flare_r.y)).abs() < 1e-4,
             "settled flare should move smoothly with the descending deck"
         );
+    }
+
+    #[test]
+    fn start_winch_with_overdrive_reduces_holdout_from_18s_to_11s() {
+        let (_world_arc, _info, mut state) = sample_world_and_state();
+        state.phase = ElevatorPhase::CaveIdle;
+        state.start_winch_with_overdrive(false);
+        assert_eq!(state.phase, ElevatorPhase::WinchActive);
+        assert!((state.phase_timer_s - 18.0).abs() < 1e-4);
+
+        state.phase = ElevatorPhase::CaveIdle;
+        state.start_winch_with_overdrive(true);
+        assert_eq!(state.phase, ElevatorPhase::WinchActive);
+        assert!((state.phase_timer_s - 11.0).abs() < 1e-4);
     }
 }

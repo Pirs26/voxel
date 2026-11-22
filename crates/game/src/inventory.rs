@@ -114,6 +114,9 @@ pub struct PassiveGear {
     pub headlamp: bool,
     /// Soft-sole footwear: reduces footstep acoustic energy by 45%.
     pub stealth_boots: bool,
+    /// Tungsten-tipped pickaxe upgrade: doubles melee damage against predators & faster mining.
+    #[serde(default)]
+    pub reinforced_pickaxe: bool,
 }
 
 /// Tracks whether both hands are occupied by a heavy carry or teammate drag.
@@ -786,6 +789,9 @@ impl PlayerInventory {
         if self.passive.stealth_boots {
             passives.push("Stealth Boots");
         }
+        if self.passive.reinforced_pickaxe {
+            passives.push("Reinforced Pickaxe");
+        }
         if !passives.is_empty() {
             line.push_str(&format!("  | Gear: {}", passives.join(", ")));
         }
@@ -844,6 +850,7 @@ impl PlayerInventory {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShopCatalogItem {
     BatteryCell,
+    HiCapBatteryCell,
     FlarePack,
     FoamCanister,
     NoiseDecoys,
@@ -851,8 +858,12 @@ pub enum ShopCatalogItem {
     Headlamp,
     HeadlampCellMk2,
     StealthBoots,
+    ReinforcedPickaxe,
     ToolBeltUpgrade,
     BatteryPouchUpgrade,
+    DepthTierPermit,
+    WinchOverdrive,
+    FastChargerArray,
 }
 
 /// Static catalog metadata for a Base Shed shop entry.
@@ -864,67 +875,97 @@ pub struct ShopItemInfo {
     pub description: &'static str,
 }
 
-/// Balanced Base Shed shop catalog.
-pub const SHOP_CATALOG: [ShopItemInfo; 10] = [
+/// Balanced Base Shed shop catalog (v0.2.0 economy rebalance & escalating sinks).
+pub const SHOP_CATALOG: [ShopItemInfo; 15] = [
     ShopItemInfo {
         item: ShopCatalogItem::BatteryCell,
         name: "Battery Cell",
-        cost: 35,
+        cost: 65,
         description: "Full 100% rechargeable battery cell for your pouch.",
+    },
+    ShopItemInfo {
+        item: ShopCatalogItem::HiCapBatteryCell,
+        name: "Hi-Cap Battery",
+        cost: 165,
+        description: "175% capacity cell (+75% longer flashlight runtime).",
     },
     ShopItemInfo {
         item: ShopCatalogItem::FlarePack,
         name: "Flare Pack (x3)",
-        cost: 40,
+        cost: 75,
         description: "Pack of 3 throwable glow flares (stacks up to 4).",
     },
     ShopItemInfo {
         item: ShopCatalogItem::FoamCanister,
         name: "Acoustic Foam (8)",
-        cost: 50,
+        cost: 95,
         description: "8 acoustic foam charges to seal tunnels & deaden echoes.",
     },
     ShopItemInfo {
         item: ShopCatalogItem::NoiseDecoys,
         name: "Noise Decoys (x2)",
-        cost: 55,
+        cost: 115,
         description: "2 throwable clicker decoys to lure blind predators away.",
     },
     ShopItemInfo {
         item: ShopCatalogItem::AidKit,
         name: "Aid Kit",
-        cost: 75,
+        cost: 150,
         description: "Consumable medical kit to revive a downed teammate.",
     },
     ShopItemInfo {
         item: ShopCatalogItem::Headlamp,
         name: "Headlamp Mk I",
-        cost: 180,
-        description: "Hands-free 120s floodlight [F]. Sealed cell recharges at Shed Charger.",
+        cost: 360,
+        description: "Hands-free 120s floodlight [F]. Sealed cell recharges at Shed.",
     },
     ShopItemInfo {
         item: ShopCatalogItem::HeadlampCellMk2,
         name: "Headlamp Cell Mk II",
-        cost: 140,
-        description: "Upgrades sealed Headlamp internal battery to 240s (2x duration).",
+        cost: 420,
+        description: "Upgrades sealed Headlamp internal battery to 240s (2x runtime).",
     },
     ShopItemInfo {
         item: ShopCatalogItem::StealthBoots,
         name: "Stealth Boots",
-        cost: 160,
+        cost: 340,
         description: "Passive soft-sole boots — reduces footstep noise by 45%.",
+    },
+    ShopItemInfo {
+        item: ShopCatalogItem::ReinforcedPickaxe,
+        name: "Reinforced Pickaxe",
+        cost: 380,
+        description: "2x melee damage against predators & improved mining durability.",
     },
     ShopItemInfo {
         item: ShopCatalogItem::ToolBeltUpgrade,
         name: "Tool Belt (+1)",
-        cost: 140,
-        description: "Permanently adds +1 active belt slot (max 5).",
+        cost: 220,
+        description: "Permanently adds +1 active belt slot (220 / 440 / 750 cr).",
     },
     ShopItemInfo {
         item: ShopCatalogItem::BatteryPouchUpgrade,
         name: "Battery Pouch (+2)",
-        cost: 120,
-        description: "Permanently adds +2 battery pouch slots (max 6).",
+        cost: 200,
+        description: "Permanently adds +2 battery pouch slots (200 / 480 cr).",
+    },
+    ShopItemInfo {
+        item: ShopCatalogItem::DepthTierPermit,
+        name: "Depth Tier Permit",
+        cost: 450,
+        description: "Crew permit unlocking deeper cave tiers (T2: 450 / T3: 950 cr).",
+    },
+    ShopItemInfo {
+        item: ShopCatalogItem::WinchOverdrive,
+        name: "Winch Overdrive",
+        cost: 600,
+        description: "Crew Shed upgrade: cuts cave extraction winch from 18s to 11s.",
+    },
+    ShopItemInfo {
+        item: ShopCatalogItem::FastChargerArray,
+        name: "Fast-Charger Array",
+        cost: 420,
+        description: "Crew Shed upgrade: 3x pad speed & auto-charge on Shed return.",
     },
 ];
 
@@ -936,6 +977,105 @@ pub fn shop_item_info(item: ShopCatalogItem) -> &'static ShopItemInfo {
         .expect("all ShopCatalogItem variants exist in SHOP_CATALOG")
 }
 
+/// Returns the dynamic credit cost for `item`, accounting for escalating personal and crew
+/// upgrade tiers (`ToolBeltUpgrade`, `BatteryPouchUpgrade`, and `DepthTierPermit`).
+pub fn dynamic_shop_cost(
+    item: ShopCatalogItem,
+    inv: &PlayerInventory,
+    unlocked_depth_tier: u8,
+) -> u32 {
+    match item {
+        ShopCatalogItem::ToolBeltUpgrade => match inv.belt_capacity {
+            0..=2 => 220,
+            3 => 440,
+            _ => 750,
+        },
+        ShopCatalogItem::BatteryPouchUpgrade => {
+            if inv.battery_pouch_capacity <= 2 {
+                200
+            } else {
+                480
+            }
+        }
+        ShopCatalogItem::DepthTierPermit => {
+            if unlocked_depth_tier <= 1 {
+                450
+            } else {
+                950
+            }
+        }
+        _ => shop_item_info(item).cost,
+    }
+}
+
+/// Attempts to purchase a shared crew/Shed upgrade (`DepthTierPermit`, `WinchOverdrive`, or
+/// `FastChargerArray`), deducting `credits` and mutating campaign progression flags atomically.
+pub fn purchase_crew_upgrade(
+    item: ShopCatalogItem,
+    credits: &mut i32,
+    unlocked_depth_tier: &mut u8,
+    winch_overdrive: &mut bool,
+    fast_charger: &mut bool,
+) -> Result<&'static str, &'static str> {
+    match item {
+        ShopCatalogItem::DepthTierPermit if *unlocked_depth_tier >= 3 => {
+            return Err("All Depth Tiers (1-3) are already unlocked.");
+        }
+        ShopCatalogItem::WinchOverdrive if *winch_overdrive => {
+            return Err("Winch Overdrive already installed.");
+        }
+        ShopCatalogItem::FastChargerArray if *fast_charger => {
+            return Err("Fast-Charger Array already installed.");
+        }
+        ShopCatalogItem::DepthTierPermit
+        | ShopCatalogItem::WinchOverdrive
+        | ShopCatalogItem::FastChargerArray => {}
+        _ => return Err("Item is a personal purchase, not a crew upgrade."),
+    }
+
+    if *credits <= 0 {
+        return Err("Company debt! Extract relics before buying gear.");
+    }
+
+    let cost = match item {
+        ShopCatalogItem::DepthTierPermit => {
+            if *unlocked_depth_tier <= 1 {
+                450
+            } else {
+                950
+            }
+        }
+        _ => shop_item_info(item).cost,
+    };
+
+    if *credits < cost as i32 {
+        return Err("Not enough credits.");
+    }
+
+    let ok_msg = match item {
+        ShopCatalogItem::DepthTierPermit => {
+            *unlocked_depth_tier = ((*unlocked_depth_tier).max(1) + 1).min(3);
+            if *unlocked_depth_tier == 2 {
+                "Unlocked Depth Tier 2 Permit! Deeper expeditions authorized."
+            } else {
+                "Unlocked Depth Tier 3 Permit! Maximum depth authorized."
+            }
+        }
+        ShopCatalogItem::WinchOverdrive => {
+            *winch_overdrive = true;
+            "Installed Winch Overdrive! Extraction winch holdout reduced from 18s to 11s."
+        }
+        ShopCatalogItem::FastChargerArray => {
+            *fast_charger = true;
+            "Installed Fast-Charger Array! 3x pad recharge & auto-top-off on Shed return."
+        }
+        _ => unreachable!(),
+    };
+
+    *credits -= cost as i32;
+    Ok(ok_msg)
+}
+
 /// Attempts to buy `item` from the Shed shop, deducting `credits` and updating `inv`.
 /// Returns a user-facing status message on success or failure without partial state changes.
 pub fn purchase_shop_item(
@@ -943,8 +1083,6 @@ pub fn purchase_shop_item(
     credits: &mut i32,
     item: ShopCatalogItem,
 ) -> Result<&'static str, &'static str> {
-    let info = shop_item_info(item);
-
     // Check permanent upgrade caps/ownership before checking credits for clear feedback.
     match item {
         ShopCatalogItem::Headlamp if inv.passive.headlamp => {
@@ -959,6 +1097,9 @@ pub fn purchase_shop_item(
         ShopCatalogItem::StealthBoots if inv.passive.stealth_boots => {
             return Err("Stealth Boots already owned.");
         }
+        ShopCatalogItem::ReinforcedPickaxe if inv.passive.reinforced_pickaxe => {
+            return Err("Reinforced Pickaxe already owned.");
+        }
         ShopCatalogItem::ToolBeltUpgrade if inv.belt_capacity >= MAX_BELT_CAPACITY => {
             return Err("Tool Belt is already at maximum capacity (5).");
         }
@@ -967,6 +1108,11 @@ pub fn purchase_shop_item(
         {
             return Err("Battery Pouch is already at maximum capacity (6).");
         }
+        ShopCatalogItem::DepthTierPermit
+        | ShopCatalogItem::WinchOverdrive
+        | ShopCatalogItem::FastChargerArray => {
+            return Err("Crew upgrades require campaign state.");
+        }
         _ => {}
     }
 
@@ -974,7 +1120,8 @@ pub fn purchase_shop_item(
         return Err("Company debt! Extract relics before buying gear.");
     }
 
-    if *credits < info.cost as i32 {
+    let cost = dynamic_shop_cost(item, inv, 1);
+    if *credits < cost as i32 {
         return Err("Not enough credits.");
     }
 
@@ -983,6 +1130,14 @@ pub fn purchase_shop_item(
             inv.try_add_battery(BatteryCellItem::full())
                 .map_err(|_| "Battery pouch is full.")?;
             "Purchased Battery Cell."
+        }
+        ShopCatalogItem::HiCapBatteryCell => {
+            inv.try_add_battery(BatteryCellItem {
+                charge: 1.0,
+                capacity_scale: 1.75,
+            })
+            .map_err(|_| "Battery pouch is full.")?;
+            "Purchased Hi-Cap Battery Cell (+75% runtime)!"
         }
         ShopCatalogItem::FlarePack => {
             inv.try_add_belt_item(BeltItem::Flares { count: 3 })
@@ -1019,6 +1174,10 @@ pub fn purchase_shop_item(
             inv.passive.stealth_boots = true;
             "Equipped Stealth Boots (-45% footstep noise)."
         }
+        ShopCatalogItem::ReinforcedPickaxe => {
+            inv.passive.reinforced_pickaxe = true;
+            "Equipped Reinforced Pickaxe (2x melee damage & improved mining)!"
+        }
         ShopCatalogItem::ToolBeltUpgrade => {
             if !inv.upgrade_belt() {
                 return Err("Tool Belt is already at maximum capacity (5).");
@@ -1031,9 +1190,12 @@ pub fn purchase_shop_item(
             }
             "Upgraded Battery Pouch (+2 slots)."
         }
+        ShopCatalogItem::DepthTierPermit
+        | ShopCatalogItem::WinchOverdrive
+        | ShopCatalogItem::FastChargerArray => unreachable!(),
     };
 
-    *credits -= info.cost as i32;
+    *credits -= cost as i32;
     Ok(ok_msg)
 }
 
@@ -1221,53 +1383,53 @@ mod tests {
     #[test]
     fn shop_purchases_validate_credits_capacity_and_upgrades() {
         let mut inv = PlayerInventory::starter();
-        let mut credits = 500;
+        let mut credits = 980;
 
         // Pouch is already 2/2 full -> buying BatteryCell fails without charging credits.
         assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::BatteryCell).is_err());
-        assert_eq!(credits, 500);
+        assert_eq!(credits, 980);
 
-        // Upgrade pouch (120cr) -> 4 slots, then buy BatteryCell (35cr).
+        // Upgrade pouch (200cr) -> 4 slots, then buy BatteryCell (65cr).
         assert!(
             purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::BatteryPouchUpgrade)
                 .is_ok()
         );
-        assert_eq!(credits, 380);
+        assert_eq!(credits, 780);
         assert_eq!(inv.battery_pouch_capacity, 4);
         assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::BatteryCell).is_ok());
-        assert_eq!(credits, 345);
+        assert_eq!(credits, 715);
         assert_eq!(inv.battery_pouch.len(), 3);
 
-        // Buy Headlamp (180cr); second purchase rejected.
+        // Buy Headlamp (360cr); second purchase rejected.
         assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::Headlamp).is_ok());
-        assert_eq!(credits, 165);
+        assert_eq!(credits, 355);
         assert!(inv.passive.headlamp);
         assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::Headlamp).is_err());
-        assert_eq!(credits, 165);
+        assert_eq!(credits, 355);
 
-        // Buy StealthBoots (160cr) -> 5cr left; cannot afford FlarePack (40cr).
+        // Buy StealthBoots (340cr) -> 15cr left; cannot afford FlarePack (75cr).
         assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::StealthBoots).is_ok());
-        assert_eq!(credits, 5);
+        assert_eq!(credits, 15);
         assert!(
             purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::FlarePack).is_err()
         );
-        assert_eq!(credits, 5);
+        assert_eq!(credits, 15);
     }
 
     #[test]
     fn headlamp_sealed_battery_upgrade_and_shed_recharge() {
         let mut inv = PlayerInventory::starter();
-        let mut credits: i32 = 400;
+        let mut credits: i32 = 850;
 
         // Mk II upgrade requires Headlamp Mk I first
         assert!(
             purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::HeadlampCellMk2).is_err()
         );
-        assert_eq!(credits, 400);
+        assert_eq!(credits, 850);
 
-        // Purchase Headlamp Mk I (180 cr, 120s runtime)
+        // Purchase Headlamp Mk I (360 cr, 120s runtime)
         assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::Headlamp).is_ok());
-        assert_eq!(credits, 220);
+        assert_eq!(credits, 490);
         assert!(inv.passive.headlamp);
         assert_eq!(inv.headlamp_tier, 1);
         assert!((inv.headlamp_duration_s() - HEADLAMP_MK1_DURATION_S).abs() < 1e-4);
@@ -1281,11 +1443,11 @@ mod tests {
         assert!(inv.recharge_all_batteries(1.0));
         assert_eq!(inv.headlamp_charge_pct(), 100);
 
-        // Purchase Headlamp Cell Mk II (140 cr, 240s runtime)
+        // Purchase Headlamp Cell Mk II (420 cr, 240s runtime)
         assert!(
             purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::HeadlampCellMk2).is_ok()
         );
-        assert_eq!(credits, 80);
+        assert_eq!(credits, 70);
         assert_eq!(inv.headlamp_tier, 2);
         assert!((inv.headlamp_duration_s() - HEADLAMP_MK2_DURATION_S).abs() < 1e-4);
         assert!((inv.drain_headlamp(60.0) - 0.75).abs() < 1e-4);
@@ -1293,6 +1455,181 @@ mod tests {
         // Duplicate Mk II purchase rejected
         assert!(
             purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::HeadlampCellMk2).is_err()
+        );
+    }
+
+    #[test]
+    fn escalating_tool_belt_and_battery_pouch_upgrade_costs() {
+        let mut inv = PlayerInventory::starter();
+        let mut credits: i32 = 2_500;
+
+        // Tool Belt escalates: 2->3 (220 cr), 3->4 (440 cr), 4->5 (750 cr), then maxed at 5.
+        assert_eq!(dynamic_shop_cost(ShopCatalogItem::ToolBeltUpgrade, &inv, 1), 220);
+        assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::ToolBeltUpgrade).is_ok());
+        assert_eq!(inv.belt_capacity, 3);
+        assert_eq!(credits, 2_500 - 220);
+
+        assert_eq!(dynamic_shop_cost(ShopCatalogItem::ToolBeltUpgrade, &inv, 1), 440);
+        assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::ToolBeltUpgrade).is_ok());
+        assert_eq!(inv.belt_capacity, 4);
+        assert_eq!(credits, 2_500 - 220 - 440);
+
+        assert_eq!(dynamic_shop_cost(ShopCatalogItem::ToolBeltUpgrade, &inv, 1), 750);
+        assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::ToolBeltUpgrade).is_ok());
+        assert_eq!(inv.belt_capacity, 5);
+        assert_eq!(credits, 2_500 - 220 - 440 - 750);
+
+        assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::ToolBeltUpgrade).is_err());
+
+        // Battery Pouch escalates: 2->4 (200 cr), 4->6 (480 cr), then maxed at 6.
+        assert_eq!(dynamic_shop_cost(ShopCatalogItem::BatteryPouchUpgrade, &inv, 1), 200);
+        assert!(
+            purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::BatteryPouchUpgrade)
+                .is_ok()
+        );
+        assert_eq!(inv.battery_pouch_capacity, 4);
+        assert_eq!(credits, 2_500 - 220 - 440 - 750 - 200);
+
+        assert_eq!(dynamic_shop_cost(ShopCatalogItem::BatteryPouchUpgrade, &inv, 1), 480);
+        assert!(
+            purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::BatteryPouchUpgrade)
+                .is_ok()
+        );
+        assert_eq!(inv.battery_pouch_capacity, 6);
+        assert_eq!(credits, 2_500 - 220 - 440 - 750 - 200 - 480);
+
+        assert!(
+            purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::BatteryPouchUpgrade)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn hi_cap_battery_and_reinforced_pickaxe_purchases() {
+        let mut inv = PlayerInventory::starter();
+        inv.battery_pouch.pop(); // Free 1 pouch slot (1/2)
+        let mut credits: i32 = 600;
+
+        assert_eq!(dynamic_shop_cost(ShopCatalogItem::HiCapBatteryCell, &inv, 1), 165);
+        assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::HiCapBatteryCell).is_ok());
+        assert_eq!(credits, 435);
+        assert_eq!(inv.battery_pouch.len(), 2);
+        let hicap = inv.battery_pouch.last().copied().unwrap();
+        assert!((hicap.charge - 1.0).abs() < 1e-6);
+        assert!((hicap.capacity_scale - 1.75).abs() < 1e-6);
+
+        assert!(!inv.passive.reinforced_pickaxe);
+        assert_eq!(dynamic_shop_cost(ShopCatalogItem::ReinforcedPickaxe, &inv, 1), 380);
+        assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::ReinforcedPickaxe).is_ok());
+        assert_eq!(credits, 55);
+        assert!(inv.passive.reinforced_pickaxe);
+        assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::ReinforcedPickaxe).is_err());
+        assert_eq!(credits, 55);
+    }
+
+    #[test]
+    fn crew_gold_sinks_depth_permits_winch_overdrive_and_fast_charger() {
+        let inv = PlayerInventory::starter();
+        let mut credits: i32 = 2_600;
+        let mut unlocked_tier: u8 = 1;
+        let mut winch_overdrive = false;
+        let mut fast_charger = false;
+
+        // Tier 1 -> Tier 2 Permit costs 450 cr
+        assert_eq!(
+            dynamic_shop_cost(ShopCatalogItem::DepthTierPermit, &inv, unlocked_tier),
+            450
+        );
+        assert!(
+            purchase_crew_upgrade(
+                ShopCatalogItem::DepthTierPermit,
+                &mut credits,
+                &mut unlocked_tier,
+                &mut winch_overdrive,
+                &mut fast_charger,
+            )
+            .is_ok()
+        );
+        assert_eq!(unlocked_tier, 2);
+        assert_eq!(credits, 2_150);
+
+        // Tier 2 -> Tier 3 Permit costs 950 cr
+        assert_eq!(
+            dynamic_shop_cost(ShopCatalogItem::DepthTierPermit, &inv, unlocked_tier),
+            950
+        );
+        assert!(
+            purchase_crew_upgrade(
+                ShopCatalogItem::DepthTierPermit,
+                &mut credits,
+                &mut unlocked_tier,
+                &mut winch_overdrive,
+                &mut fast_charger,
+            )
+            .is_ok()
+        );
+        assert_eq!(unlocked_tier, 3);
+        assert_eq!(credits, 1_200);
+
+        // Buying another permit when Tier 3 is already unlocked fails cleanly
+        assert!(
+            purchase_crew_upgrade(
+                ShopCatalogItem::DepthTierPermit,
+                &mut credits,
+                &mut unlocked_tier,
+                &mut winch_overdrive,
+                &mut fast_charger,
+            )
+            .is_err()
+        );
+        assert_eq!(credits, 1_200);
+
+        // Winch Overdrive costs 600 cr and cannot be bought twice
+        assert!(
+            purchase_crew_upgrade(
+                ShopCatalogItem::WinchOverdrive,
+                &mut credits,
+                &mut unlocked_tier,
+                &mut winch_overdrive,
+                &mut fast_charger,
+            )
+            .is_ok()
+        );
+        assert!(winch_overdrive);
+        assert_eq!(credits, 600);
+        assert!(
+            purchase_crew_upgrade(
+                ShopCatalogItem::WinchOverdrive,
+                &mut credits,
+                &mut unlocked_tier,
+                &mut winch_overdrive,
+                &mut fast_charger,
+            )
+            .is_err()
+        );
+
+        // Fast-Charger Array costs 420 cr and cannot be bought twice
+        assert!(
+            purchase_crew_upgrade(
+                ShopCatalogItem::FastChargerArray,
+                &mut credits,
+                &mut unlocked_tier,
+                &mut winch_overdrive,
+                &mut fast_charger,
+            )
+            .is_ok()
+        );
+        assert!(fast_charger);
+        assert_eq!(credits, 180);
+        assert!(
+            purchase_crew_upgrade(
+                ShopCatalogItem::FastChargerArray,
+                &mut credits,
+                &mut unlocked_tier,
+                &mut winch_overdrive,
+                &mut fast_charger,
+            )
+            .is_err()
         );
     }
 

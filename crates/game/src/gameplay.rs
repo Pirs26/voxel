@@ -33,15 +33,19 @@ use crate::{
     decibel_wall::{spawn_decibel_wall, update_decibel_wall_system},
     elevator::{
         ELEVATOR_CAGE_HALF_EXTENT_M, ELEVATOR_DOOR_CLOSED_Y_M, ELEVATOR_DOOR_OPEN_Y_M,
-        ELEVATOR_WINCH_DURATION_S, ElevatorArrivedCaveEvent, ElevatorBulbLight, ElevatorCageRoot,
-        ElevatorDoorVisual, ElevatorReturnedShedEvent, ElevatorState, TriggerElevatorLeverEvent,
-        compute_ambient_brightness_for_depth, spawn_elevator_cage, step_elevator_state,
+        ELEVATOR_WINCH_DURATION_S, ELEVATOR_WINCH_OVERDRIVE_DURATION_S, ElevatorArrivedCaveEvent,
+        ElevatorBulbLight, ElevatorCageRoot, ElevatorDoorVisual, ElevatorReturnedShedEvent,
+        ElevatorState, TriggerElevatorLeverEvent, compute_ambient_brightness_for_depth,
+        spawn_elevator_cage, step_elevator_state,
     },
     health::{
         LocalHealthPhase, MonsterHitLocalPlayerEvent, PlayerHealthState, RESCUE_RANGE_M,
         REVIVE_CHANNEL_S, RemoteHealthMap, ReviveCompletedEvent, TeamWipeEvent, check_team_wiped,
     },
-    inventory::{BeltItem, CarryHandState, PlayerInventory, ShopCatalogItem, purchase_shop_item},
+    inventory::{
+        BeltItem, CarryHandState, PlayerInventory, ShopCatalogItem, dynamic_shop_cost,
+        purchase_crew_upgrade, purchase_shop_item,
+    },
     net_bridge::{CoopMenuOpen, CoopState, clear_remote_players},
     parkour_board::{spawn_parkour_billboard, update_parkour_billboard_system},
     physics::{aabb_intersects_world, ray_aabb_intersect},
@@ -547,7 +551,35 @@ fn handle_shop_actions_system(
     for ev in actions.read().copied() {
         match ev {
             ShopActionEvent::Buy(catalog_item) => {
-                match purchase_shop_item(&mut inv, &mut campaign.save.credits, catalog_item) {
+                let purchase_res = match catalog_item {
+                    ShopCatalogItem::DepthTierPermit
+                    | ShopCatalogItem::WinchOverdrive
+                    | ShopCatalogItem::FastChargerArray => {
+                        let prev_unlocked = campaign.save.unlocked_depth_tier;
+                        let save = &mut campaign.save;
+                        let res = purchase_crew_upgrade(
+                            catalog_item,
+                            &mut save.credits,
+                            &mut save.unlocked_depth_tier,
+                            &mut save.winch_overdrive,
+                            &mut save.fast_charger,
+                        );
+                        if res.is_ok() {
+                            if catalog_item == ShopCatalogItem::DepthTierPermit
+                                && campaign.save.unlocked_depth_tier > prev_unlocked
+                            {
+                                campaign.save.selected_depth_tier =
+                                    campaign.save.unlocked_depth_tier;
+                            }
+                            if catalog_item == ShopCatalogItem::FastChargerArray {
+                                inv.recharge_all_batteries(1.0);
+                            }
+                        }
+                        res
+                    }
+                    _ => purchase_shop_item(&mut inv, &mut campaign.save.credits, catalog_item),
+                };
+                match purchase_res {
                     Ok(msg) => {
                         toast.show(msg, 3.2);
                         campaign.dirty = true;
@@ -586,12 +618,16 @@ fn handle_shop_actions_system(
                     campaign.dirty = true;
                     toast.show(format!("Selected Depth Tier {tier} for next dive"), 2.5);
                 } else {
+                    let permit_cost = dynamic_shop_cost(
+                        ShopCatalogItem::DepthTierPermit,
+                        &inv,
+                        campaign.save.unlocked_depth_tier,
+                    );
                     toast.show(
                         format!(
-                            "Depth Tier {tier} locked — extract from Tier {} first!",
-                            tier - 1
+                            "Depth Tier {tier} locked — buy Depth Tier Permit ({permit_cost} cr) at the Supply Terminal!"
                         ),
-                        3.0,
+                        3.2,
                     );
                 }
             }
@@ -1510,7 +1546,14 @@ fn station_and_item_interact_system(
             ShedStation::ChargerBench => {
                 let charged = inv.recharge_all_batteries(1.0);
                 if charged {
-                    toast.show("All batteries recharged to 100%!", 2.5);
+                    if campaign.save.fast_charger {
+                        toast.show(
+                            "Fast-Charger Array: All batteries topped off instantly!",
+                            2.5,
+                        );
+                    } else {
+                        toast.show("All batteries recharged to 100%!", 2.5);
+                    }
                 } else {
                     toast.show("All carried batteries are already at 100%", 2.0);
                 }
@@ -1841,12 +1884,18 @@ fn elevator_runtime_system(
                     });
                 }
                 ElevatorPhase::CaveIdle => {
-                    elevator.start_winch();
+                    let overdrive = campaign.save.winch_overdrive;
+                    elevator.start_winch_with_overdrive(overdrive);
                     coop.send_elevator_sync(elevator);
+                    let holdout_s = if overdrive {
+                        ELEVATOR_WINCH_OVERDRIVE_DURATION_S.round() as u32
+                    } else {
+                        ELEVATOR_WINCH_DURATION_S.round() as u32
+                    };
+                    let tag = if overdrive { " (WINCH OVERDRIVE)" } else { "" };
                     toast.show(
                         format!(
-                            "EXTRACTION WINCH ACTIVATED! Loud machinery drawing predators — {}s!",
-                            ELEVATOR_WINCH_DURATION_S.round() as u32
+                            "EXTRACTION WINCH ACTIVATED{tag}! Loud machinery drawing predators — {holdout_s}s!"
                         ),
                         3.8,
                     );
@@ -2125,8 +2174,8 @@ fn elevator_runtime_system(
 
         campaign.save.credits = next_credits;
         campaign.save.dives_completed = campaign.save.dives_completed.saturating_add(1);
-        if relics_extracted > 0 && elevator.depth_tier >= campaign.save.unlocked_depth_tier {
-            campaign.save.unlocked_depth_tier = (elevator.depth_tier + 1).min(3);
+        if campaign.save.fast_charger {
+            inv.recharge_all_batteries(1.0);
         }
         campaign.dirty = true;
 
@@ -2150,10 +2199,25 @@ fn elevator_runtime_system(
         returned_writer.write(ElevatorReturnedShedEvent {
             depth_tier: elevator.depth_tier,
         });
+        let next_permit_cost = dynamic_shop_cost(
+            ShopCatalogItem::DepthTierPermit,
+            inv,
+            campaign.save.unlocked_depth_tier,
+        ) as i32;
+        let permit_hint = if campaign.save.unlocked_depth_tier < 3
+            && campaign.save.credits >= next_permit_cost
+        {
+            format!(
+                "  |  Depth Tier {} Permit ({next_permit_cost} cr) available at Terminal!",
+                campaign.save.unlocked_depth_tier + 1
+            )
+        } else {
+            String::new()
+        };
         if fine > 0 {
             toast.show(
                 format!(
-                    "Extracted! +{payout} cr  |  Company Fine: -{fine} cr ({unrecovered_bodies} body left behind) — Balance: {} cr",
+                    "Extracted! +{payout} cr  |  Company Fine: -{fine} cr ({unrecovered_bodies} body left behind) — Balance: {} cr{permit_hint}",
                     campaign.save.credits
                 ),
                 6.0,
@@ -2161,7 +2225,7 @@ fn elevator_runtime_system(
         } else if !recovered_body_ids.is_empty() {
             toast.show(
                 format!(
-                    "Extracted! +{payout} cr ({relics_extracted} relic(s)) — All fallen companions recovered! Balance: {} cr",
+                    "Extracted! +{payout} cr ({relics_extracted} relic(s)) — All fallen companions recovered! Balance: {} cr{permit_hint}",
                     campaign.save.credits
                 ),
                 5.5,
@@ -2169,7 +2233,7 @@ fn elevator_runtime_system(
         } else {
             toast.show(
                 format!(
-                    "Extracted! +{payout} credits ({relics_extracted} relic(s)) — Campaign Auto-Saved!"
+                    "Extracted! +{payout} credits ({relics_extracted} relic(s)) — Campaign Auto-Saved!{permit_hint}"
                 ),
                 5.0,
             );
@@ -2246,6 +2310,7 @@ struct WorldItemsEnv<'w> {
     world_res: Res<'w, WorldResource>,
     level_info: Res<'w, LevelInfoResource>,
     elevator: Option<Res<'w, ElevatorState>>,
+    campaign: Res<'w, CampaignState>,
 }
 
 /// Simulates physical world items: Heavy Relic carry/scrape acoustics, dropped item gravity/bounces,
@@ -2435,7 +2500,12 @@ fn world_items_runtime_system(
                 .distance(level_info.0.charger_bench_pos_m + Vec3::Y * 0.5)
                 <= CHARGER_PAD_RADIUS_M
         {
-            *charge = (*charge + CHARGER_PAD_RATE_PER_S * dt).clamp(0.0, 1.0);
+            let pad_rate = if env.campaign.save.fast_charger {
+                CHARGER_PAD_RATE_PER_S * 3.0
+            } else {
+                CHARGER_PAD_RATE_PER_S
+            };
+            *charge = (*charge + pad_rate * dt).clamp(0.0, 1.0);
         }
 
         // D. Simple gravity & bounce physics for dropped/thrown items
@@ -3356,10 +3426,10 @@ mod tests {
         assert_eq!(balance, 20 - UNRECOVERED_COMPANION_FINE * 2);
         assert!(balance < 0);
 
-        // Subsequent successful relic extraction pays off negative debt
-        let (recovered_balance, fine2) = compute_extraction_balance(balance, 150, 0);
+        // Subsequent successful relic extraction (2x Tier 1 relics = 280 cr) pays off negative debt
+        let (recovered_balance, fine2) = compute_extraction_balance(balance, 280, 0);
         assert_eq!(fine2, 0);
-        assert_eq!(recovered_balance, balance + 150);
+        assert_eq!(recovered_balance, balance + 280);
         assert!(recovered_balance > 0);
     }
 
