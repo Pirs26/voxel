@@ -14,18 +14,58 @@ use crate::{
     inventory::{BeltItem, PlayerInventory},
     net_bridge::CoopMenuOpen,
     player::{PlayerController, PlayerFlashlight},
-    settings::{AppScreen, SettingsMenuOpen},
+    settings::{AppScreen, DEFAULT_FOV_DEG, SettingsMenuOpen, UserSettings},
     shed::ShopOverlayOpen,
 };
 
-/// Base local offset of [`ViewmodelRoot`] relative to the first-person `Camera3d`.
-pub const VIEWMODEL_BASE_OFFSET: Vec3 = Vec3::new(0.28, -0.24, -0.45);
-/// Base local offset of the left-hand miner's pickaxe pivot relative to [`ViewmodelRoot`].
-pub const PICKAXE_REST_OFFSET: Vec3 = Vec3::new(-0.50, -0.02, 0.02);
-/// Base local offset of the right-hand active belt tool pivot relative to [`ViewmodelRoot`].
-pub const RIGHT_HAND_REST_OFFSET: Vec3 = Vec3::ZERO;
-/// Base local offset of the two-handed heavy-carry brace arms relative to [`ViewmodelRoot`].
-pub const CARRY_ARMS_REST_OFFSET: Vec3 = Vec3::new(-0.28, -0.03, 0.03);
+/// Reference vertical FOV (degrees) used to normalize viewmodel apparent scale.
+pub const VIEWMODEL_REF_FOV_DEG: f32 = DEFAULT_FOV_DEG;
+/// Depth in meters along camera `-Z` where first-person held tools are framed.
+pub const VIEWMODEL_DEPTH_M: f32 = 0.44;
+/// Fallback local offset of [`ViewmodelRoot`] relative to the first-person `Camera3d`.
+pub const VIEWMODEL_BASE_OFFSET: Vec3 = Vec3::ZERO;
+/// Fallback local offset of the left-hand miner's pickaxe pivot relative to [`ViewmodelRoot`].
+pub const PICKAXE_REST_OFFSET: Vec3 = Vec3::new(-0.38, -0.21, -0.45);
+/// Fallback local offset of the right-hand active belt tool pivot relative to [`ViewmodelRoot`].
+pub const RIGHT_HAND_REST_OFFSET: Vec3 = Vec3::new(0.37, -0.20, -0.44);
+/// Fallback local offset of the two-handed heavy-carry brace arms relative to [`ViewmodelRoot`].
+pub const CARRY_ARMS_REST_OFFSET: Vec3 = Vec3::new(0.0, -0.22, -0.42);
+
+/// FOV- and aspect-compensated camera-space offsets and uniform scale for the viewmodel pivots.
+#[derive(Clone, Copy, Debug)]
+pub struct ViewmodelFovLayout {
+    pub pickaxe_offset: Vec3,
+    pub right_hand_offset: Vec3,
+    pub carry_arms_offset: Vec3,
+    pub rig_scale: f32,
+}
+
+/// Computes camera-space offsets tucked cleanly into the lower-left and lower-right corners
+/// regardless of the player's vertical FOV (`60°`–`110°`) or window aspect ratio.
+pub fn compute_fov_viewmodel_layout(vfov_rad: f32, aspect_ratio: f32) -> ViewmodelFovLayout {
+    let clamped_fov = vfov_rad.clamp(55.0_f32.to_radians(), 115.0_f32.to_radians());
+    let clamped_aspect = aspect_ratio.clamp(1.1, 2.6);
+    let tan_half_v = (clamped_fov * 0.5).tan();
+    let ref_tan = (VIEWMODEL_REF_FOV_DEG.to_radians() * 0.5).tan();
+
+    let half_h = VIEWMODEL_DEPTH_M * tan_half_v;
+    let half_w = half_h * clamped_aspect;
+
+    // Keep apparent screen-space tool size steady across narrow and wide FOV settings
+    let rig_scale = (tan_half_v / ref_tan).powf(0.65).clamp(0.82, 1.32);
+
+    ViewmodelFovLayout {
+        pickaxe_offset: Vec3::new(-0.66 * half_w, -0.60 * half_h, -(VIEWMODEL_DEPTH_M + 0.02)),
+        right_hand_offset: Vec3::new(0.64 * half_w, -0.58 * half_h, -VIEWMODEL_DEPTH_M),
+        carry_arms_offset: Vec3::new(0.0, -0.64 * half_h, -(VIEWMODEL_DEPTH_M - 0.02)),
+        rig_scale,
+    }
+}
+
+/// Front pickaxe blade pitch angle (radians around `+X`) — negative pitches the `-Z` tip DOWNWARD.
+pub const PICKAXE_FRONT_TIP_PITCH_RAD: f32 = -0.34;
+/// Rear pickaxe adze pitch angle (radians around `+X`) — positive pitches the `+Z` tip DOWNWARD.
+pub const PICKAXE_REAR_TIP_PITCH_RAD: f32 = 0.28;
 
 /// Duration in seconds of the `[LMB]` pickaxe swing animation arc.
 pub const PICKAXE_SWING_DURATION_S: f32 = 0.28;
@@ -58,6 +98,8 @@ pub enum ViewmodelVisibilityGroup {
     Pickaxe,
     /// Two-handed carry brace arms (visible whenever `inv.is_hands_occupied()`).
     CarryArms,
+    /// Right-hand glove & forearm (visible whenever hands are free and a belt item is held).
+    RightHandArm,
     /// Handheld steel flashlight body.
     Flashlight,
     /// Glowing warm flashlight lens cap when `PlayerFlashlight::on && battery > 0.0`.
@@ -108,16 +150,17 @@ impl Plugin for ViewmodelPlugin {
     }
 }
 
-/// Rest rotation for the left-hand pickaxe so the iron head frames cleanly in the lower-left view.
+/// Rest rotation for the left-hand pickaxe so the downward-curved iron head frames cleanly
+/// in the lower-left corner without intruding on the center crosshair.
 #[inline]
 pub fn pickaxe_rest_rotation() -> Quat {
-    Quat::from_euler(EulerRot::YXZ, -0.24, 0.20, -0.14)
+    Quat::from_euler(EulerRot::YXZ, -0.18, 0.14, -0.10)
 }
 
-/// Rest rotation for the right-hand tool pivot so held items point slightly inward toward the crosshair.
+/// Rest rotation for the right-hand tool pivot so held items sit comfortably in the lower-right corner.
 #[inline]
 pub fn right_hand_rest_rotation() -> Quat {
-    Quat::from_euler(EulerRot::YXZ, 0.10, 0.06, 0.04)
+    Quat::from_euler(EulerRot::YXZ, 0.14, 0.05, 0.05)
 }
 
 /// Computes the sinusoidal figure-8 walking bob translation offset and subtle roll/pitch rotation.
@@ -315,11 +358,16 @@ fn attach_viewmodel_system(
     });
 
     // Pre-build blocky cuboid meshes
-    let mesh_pick_handle = meshes.add(Cuboid::new(0.030, 0.33, 0.030));
-    let mesh_pick_grip = meshes.add(Cuboid::new(0.035, 0.11, 0.035));
-    let mesh_pick_collar = meshes.add(Cuboid::new(0.044, 0.045, 0.046));
-    let mesh_pick_head_main = meshes.add(Cuboid::new(0.036, 0.036, 0.22));
-    let mesh_pick_tip = meshes.add(Cuboid::new(0.028, 0.028, 0.075));
+    let mesh_pick_handle = meshes.add(Cuboid::new(0.028, 0.36, 0.028));
+    let mesh_pick_grip = meshes.add(Cuboid::new(0.034, 0.12, 0.034));
+    let mesh_pick_collar = meshes.add(Cuboid::new(0.044, 0.046, 0.048));
+    let mesh_pick_head_main = meshes.add(Cuboid::new(0.034, 0.038, 0.14));
+    let mesh_pick_front_blade = meshes.add(Cuboid::new(0.026, 0.030, 0.105));
+    let mesh_pick_front_spike = meshes.add(Cuboid::new(0.018, 0.020, 0.065));
+    let mesh_pick_rear_adze = meshes.add(Cuboid::new(0.032, 0.026, 0.095));
+    let mesh_hand_glove = meshes.add(Cuboid::new(0.064, 0.058, 0.072));
+    let mesh_hand_cuff = meshes.add(Cuboid::new(0.068, 0.064, 0.042));
+    let mesh_hand_forearm = meshes.add(Cuboid::new(0.064, 0.060, 0.22));
 
     let mesh_fl_body = meshes.add(Cuboid::new(0.050, 0.050, 0.21));
     let mesh_fl_grip = meshes.add(Cuboid::new(0.055, 0.055, 0.09));
@@ -364,7 +412,7 @@ fn attach_viewmodel_system(
                 Visibility::Hidden,
             ))
             .with_children(|root| {
-                // 1. Left-Hand / Main Swing Pickaxe
+                // 1. Left-Hand / Main Swing Pickaxe (downward-curved mining head + gloved forearm)
                 root.spawn((
                     ViewmodelPivot::Pickaxe,
                     ViewmodelVisibilityGroup::Pickaxe,
@@ -381,33 +429,61 @@ fn attach_viewmodel_system(
                     pick.spawn((
                         Mesh3d(mesh_pick_grip),
                         MeshMaterial3d(mat_leather_grip),
-                        Transform::from_xyz(0.0, -0.09, 0.0),
+                        Transform::from_xyz(0.0, -0.10, 0.0),
                     ));
                     pick.spawn((
                         Mesh3d(mesh_pick_collar),
                         MeshMaterial3d(mat_dark_steel.clone()),
-                        Transform::from_xyz(0.0, 0.14, 0.0),
+                        Transform::from_xyz(0.0, 0.16, 0.0),
                     ));
+                    // Central iron head crown
                     pick.spawn((
                         Mesh3d(mesh_pick_head_main),
                         MeshMaterial3d(mat_dark_iron.clone()),
-                        Transform::from_xyz(0.0, 0.145, -0.01),
+                        Transform::from_xyz(0.0, 0.165, 0.0),
+                    ));
+                    // Front curved pickaxe prong (NEGATIVE X pitch bends -Z tip DOWNWARD!)
+                    pick.spawn((
+                        Mesh3d(mesh_pick_front_blade),
+                        MeshMaterial3d(mat_dark_iron.clone()),
+                        Transform::from_xyz(0.0, 0.148, -0.105)
+                            .with_rotation(Quat::from_rotation_x(PICKAXE_FRONT_TIP_PITCH_RAD)),
                     ));
                     pick.spawn((
-                        Mesh3d(mesh_pick_tip.clone()),
+                        Mesh3d(mesh_pick_front_spike),
                         MeshMaterial3d(mat_dark_iron.clone()),
-                        Transform::from_xyz(0.0, 0.132, -0.135)
-                            .with_rotation(Quat::from_rotation_x(0.28)),
+                        Transform::from_xyz(0.0, 0.118, -0.172)
+                            .with_rotation(Quat::from_rotation_x(PICKAXE_FRONT_TIP_PITCH_RAD - 0.16)),
+                    ));
+                    // Rear curved adze prong (POSITIVE X pitch bends +Z tip DOWNWARD!)
+                    pick.spawn((
+                        Mesh3d(mesh_pick_rear_adze),
+                        MeshMaterial3d(mat_dark_iron.clone()),
+                        Transform::from_xyz(0.0, 0.150, 0.095)
+                            .with_rotation(Quat::from_rotation_x(PICKAXE_REAR_TIP_PITCH_RAD)),
+                    ));
+                    // Left gloved hand & forearm anchoring the pickaxe to the lower-left edge
+                    pick.spawn((
+                        Mesh3d(mesh_hand_glove.clone()),
+                        MeshMaterial3d(mat_glove_fabric.clone()),
+                        Transform::from_xyz(-0.015, -0.10, 0.025)
+                            .with_rotation(Quat::from_euler(EulerRot::YXZ, 0.15, -0.18, 0.0)),
                     ));
                     pick.spawn((
-                        Mesh3d(mesh_pick_tip),
-                        MeshMaterial3d(mat_dark_iron.clone()),
-                        Transform::from_xyz(0.0, 0.135, 0.11)
-                            .with_rotation(Quat::from_rotation_x(-0.22)),
+                        Mesh3d(mesh_hand_cuff.clone()),
+                        MeshMaterial3d(mat_dark_steel.clone()),
+                        Transform::from_xyz(-0.032, -0.135, 0.075)
+                            .with_rotation(Quat::from_euler(EulerRot::YXZ, 0.20, -0.32, 0.0)),
+                    ));
+                    pick.spawn((
+                        Mesh3d(mesh_hand_forearm.clone()),
+                        MeshMaterial3d(mat_sleeve_canvas.clone()),
+                        Transform::from_xyz(-0.065, -0.19, 0.19)
+                            .with_rotation(Quat::from_euler(EulerRot::YXZ, 0.22, -0.35, 0.0)),
                     ));
                 });
 
-                // 2. Right-Hand Active Belt Tool Pivot
+                // 2. Right-Hand Active Belt Tool Pivot (with gloved hand & forearm anchor)
                 root.spawn((
                     ViewmodelPivot::RightHand,
                     Transform::from_translation(RIGHT_HAND_REST_OFFSET)
@@ -415,6 +491,32 @@ fn attach_viewmodel_system(
                     Visibility::Inherited,
                 ))
                 .with_children(|right| {
+                    // Right gloved hand & forearm anchoring held tools to the lower-right corner
+                    right.spawn((
+                        ViewmodelVisibilityGroup::RightHandArm,
+                        Transform::default(),
+                        Visibility::Inherited,
+                    ))
+                    .with_children(|arm| {
+                        arm.spawn((
+                            Mesh3d(mesh_hand_glove),
+                            MeshMaterial3d(mat_glove_fabric.clone()),
+                            Transform::from_xyz(0.015, -0.055, 0.045)
+                                .with_rotation(Quat::from_euler(EulerRot::YXZ, -0.14, -0.15, 0.0)),
+                        ));
+                        arm.spawn((
+                            Mesh3d(mesh_hand_cuff),
+                            MeshMaterial3d(mat_dark_steel.clone()),
+                            Transform::from_xyz(0.038, -0.095, 0.095)
+                                .with_rotation(Quat::from_euler(EulerRot::YXZ, -0.18, -0.28, 0.0)),
+                        ));
+                        arm.spawn((
+                            Mesh3d(mesh_hand_forearm),
+                            MeshMaterial3d(mat_sleeve_canvas.clone()),
+                            Transform::from_xyz(0.075, -0.155, 0.21)
+                                .with_rotation(Quat::from_euler(EulerRot::YXZ, -0.22, -0.32, 0.0)),
+                        ));
+                    });
                     // 2a. Flashlight
                     right
                         .spawn((
@@ -689,8 +791,8 @@ fn attach_viewmodel_system(
     });
 }
 
-/// Advances walking bob, `[LMB]` pickaxe swing (`0.28s`), and `[RMB]` foam-spray recoil (`0.18s`),
-/// applying transforms to all [`ViewmodelPivot`] entities in a single non-conflicting query.
+/// Advances walking bob, FOV-compensated corner placement, `[LMB]` pickaxe swing (`0.28s`),
+/// and `[RMB]` held-item use kick (`0.18s`) in a single non-conflicting pivot query.
 #[allow(clippy::too_many_arguments)]
 fn animate_viewmodel_system(
     time: Res<Time>,
@@ -699,10 +801,11 @@ fn animate_viewmodel_system(
     menu_open: Option<Res<CoopMenuOpen>>,
     shop_open: Option<Res<ShopOverlayOpen>>,
     settings_open: Option<Res<SettingsMenuOpen>>,
+    user_settings: Option<Res<UserSettings>>,
     health: Option<Res<PlayerHealthState>>,
     inv: Option<Res<PlayerInventory>>,
     cursor_q: Query<&CursorOptions, With<PrimaryWindow>>,
-    player_q: Query<&PlayerController>,
+    player_q: Query<(&PlayerController, Option<&Projection>)>,
     mut anim: ResMut<ViewmodelAnimationState>,
     mut pivot_q: Query<(&ViewmodelPivot, &mut Transform)>,
 ) {
@@ -716,6 +819,17 @@ fn animate_viewmodel_system(
         && !settings_open.as_ref().is_some_and(|s| s.0);
     let is_healthy = health.as_ref().is_none_or(|h| h.is_healthy());
     let hands_occupied = inv.as_ref().is_some_and(|i| i.is_hands_occupied());
+    let active_item_usable = inv.as_ref().is_some_and(|i| {
+        matches!(
+            i.active_item(),
+            Some(
+                BeltItem::Flashlight
+                    | BeltItem::Flares { .. }
+                    | BeltItem::AcousticFoam { .. }
+                    | BeltItem::NoiseDecoys { .. }
+            )
+        )
+    });
     let cursor_locked = cursor_q
         .single()
         .is_ok_and(|c| c.grab_mode != CursorGrabMode::None)
@@ -727,16 +841,33 @@ fn animate_viewmodel_system(
         if mouse_input.just_pressed(MouseButton::Left) {
             anim.swing_timer_s = PICKAXE_SWING_DURATION_S;
         }
-        if mouse_input.just_pressed(MouseButton::Right) {
+        if mouse_input.just_pressed(MouseButton::Right) && active_item_usable {
             anim.recoil_timer_s = FOAM_RECOIL_DURATION_S;
         }
     }
 
-    let (horiz_speed, grounded, crouching) = if let Ok(pc) = player_q.single() {
-        (pc.velocity_m.xz().length(), pc.grounded, pc.crouching)
-    } else {
-        (0.0, false, false)
-    };
+    let default_fov = user_settings
+        .as_ref()
+        .map_or(DEFAULT_FOV_DEG, |s| s.fov_deg)
+        .to_radians();
+    let (horiz_speed, grounded, crouching, vfov_rad, aspect_ratio) =
+        if let Ok((pc, proj)) = player_q.single() {
+            let (fov, aspect) = match proj {
+                Some(Projection::Perspective(p)) => (p.fov, p.aspect_ratio),
+                _ => (default_fov, 16.0 / 9.0),
+            };
+            (
+                pc.velocity_m.xz().length(),
+                pc.grounded,
+                pc.crouching,
+                fov,
+                aspect,
+            )
+        } else {
+            (0.0, false, false, default_fov, 16.0 / 9.0)
+        };
+
+    let layout = compute_fov_viewmodel_layout(vfov_rad, aspect_ratio);
 
     let target_speed_ratio = if in_game && grounded && horiz_speed > 0.05 {
         (horiz_speed / 4.2).clamp(0.0, 1.25)
@@ -752,14 +883,14 @@ fn animate_viewmodel_system(
             (anim.walk_phase_rad + dt * freq).rem_euclid(std::f32::consts::TAU);
     }
 
-    let target_crouch_m = if crouching { -0.025 } else { 0.0 };
+    let target_crouch_m = if crouching { -0.022 } else { 0.0 };
     anim.smoothed_crouch_m += (target_crouch_m - anim.smoothed_crouch_m) * blend;
 
     // Gentle idle breathing motion
     let idle_t = time.elapsed_secs();
     let idle_offset = Vec3::new(
-        (idle_t * 1.3).sin() * 0.0025,
-        (idle_t * 2.1).cos() * 0.0035 + anim.smoothed_crouch_m,
+        (idle_t * 1.3).sin() * 0.0022,
+        (idle_t * 2.1).cos() * 0.0032 + anim.smoothed_crouch_m,
         0.0,
     );
 
@@ -772,19 +903,23 @@ fn animate_viewmodel_system(
             ViewmodelPivot::Root => {
                 tf.translation = VIEWMODEL_BASE_OFFSET + idle_offset + bob_pos;
                 tf.rotation = bob_rot;
+                tf.scale = Vec3::ONE;
             }
             ViewmodelPivot::Pickaxe => {
-                tf.translation = PICKAXE_REST_OFFSET + swing_pos;
+                tf.translation = layout.pickaxe_offset + swing_pos * layout.rig_scale;
                 tf.rotation = pickaxe_rest_rotation() * swing_rot;
+                tf.scale = Vec3::splat(layout.rig_scale);
             }
             ViewmodelPivot::RightHand => {
-                tf.translation = RIGHT_HAND_REST_OFFSET + recoil_pos;
+                tf.translation = layout.right_hand_offset + recoil_pos * layout.rig_scale;
                 tf.rotation = right_hand_rest_rotation() * recoil_rot;
+                tf.scale = Vec3::splat(layout.rig_scale);
             }
             ViewmodelPivot::CarryArms => {
                 let carry_strain_y = (idle_t * 2.8).sin() * 0.004;
-                tf.translation = CARRY_ARMS_REST_OFFSET + Vec3::Y * carry_strain_y;
+                tf.translation = layout.carry_arms_offset + Vec3::Y * carry_strain_y;
                 tf.rotation = Quat::IDENTITY;
+                tf.scale = Vec3::splat(layout.rig_scale);
             }
         }
     }
@@ -824,6 +959,7 @@ fn sync_viewmodel_visibility_system(
             ViewmodelVisibilityGroup::Root => show_root,
             ViewmodelVisibilityGroup::Pickaxe => !hands_occupied,
             ViewmodelVisibilityGroup::CarryArms => hands_occupied,
+            ViewmodelVisibilityGroup::RightHandArm => !hands_occupied && active_item.is_some(),
             ViewmodelVisibilityGroup::Flashlight => {
                 !hands_occupied && matches!(active_item, Some(BeltItem::Flashlight))
             }
@@ -899,6 +1035,19 @@ mod tests {
         // Mid-recoil kicks backward (+Z)
         let (recoil_mid_pos, _) = compute_foam_recoil_pose(FOAM_RECOIL_DURATION_S * 0.5);
         assert!(recoil_mid_pos.z > 0.02);
+
+        // Both front (-Z) and rear (+Z) pickaxe prongs curve DOWNWARD (y < 0) in right-handed space!
+        let front_dir = Quat::from_rotation_x(PICKAXE_FRONT_TIP_PITCH_RAD) * Vec3::NEG_Z;
+        let rear_dir = Quat::from_rotation_x(PICKAXE_REAR_TIP_PITCH_RAD) * Vec3::Z;
+        assert!(front_dir.y < -0.2, "front pick prong must curve downward: {front_dir:?}");
+        assert!(rear_dir.y < -0.2, "rear pick adze must curve downward: {rear_dir:?}");
+
+        // Wider FOV pushes left/right tools outward proportionally so they never float in the center
+        let narrow = compute_fov_viewmodel_layout(65.0_f32.to_radians(), 16.0 / 9.0);
+        let wide = compute_fov_viewmodel_layout(105.0_f32.to_radians(), 16.0 / 9.0);
+        assert!(wide.right_hand_offset.x > narrow.right_hand_offset.x * 1.4);
+        assert!(wide.pickaxe_offset.x < narrow.pickaxe_offset.x * 1.4);
+        assert!(wide.rig_scale > narrow.rig_scale);
     }
 
     #[test]
