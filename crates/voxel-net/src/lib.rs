@@ -175,6 +175,7 @@ mod tests {
                 unlocked_depth_tier: 3,
             },
             ReliableMessage::PlayerProfileSync {
+                player_id: 0,
                 player_name: "HostDiver".to_string(),
                 visor_rgb: [0.2, 0.8, 1.0],
                 inventory_json: r#"{"belt":["flashlight","aid_kit"]}"#.to_string(),
@@ -428,6 +429,58 @@ mod tests {
 
         assert!(host_got_delta, "host did not receive VoxelDelta");
         assert!(client_got_voice, "client did not receive VoiceFrame");
+
+        // 4b. Live visor color & profile sync (Host -> Client and Client -> Host)
+        let host_new_visor = [0.98, 0.24, 0.28];
+        host.send_reliable(ReliableMessage::PlayerProfileSync {
+            player_id: 0,
+            player_name: "HostDiver".to_string(),
+            visor_rgb: host_new_visor,
+            inventory_json: String::new(),
+        });
+        let guest_new_visor = [0.22, 0.95, 0.42];
+        let guest_inv_json = r#"{"belt_capacity":3}"#.to_string();
+        client.send_reliable(ReliableMessage::PlayerProfileSync {
+            player_id: 99, // Host must overwrite with authenticated guest ID (1)
+            player_name: "GuestScout".to_string(),
+            visor_rgb: guest_new_visor,
+            inventory_json: guest_inv_json.clone(),
+        });
+
+        let mut client_saw_host_visor = false;
+        let mut host_saw_guest_profile = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !(client_saw_host_visor && host_saw_guest_profile) {
+            for ev in client.poll_events() {
+                if let NetEvent::PlayerProfileSync {
+                    player_id,
+                    visor_rgb,
+                    ..
+                } = ev
+                    && player_id == 0
+                    && visor_rgb == host_new_visor
+                {
+                    client_saw_host_visor = true;
+                }
+            }
+            for ev in host.poll_events() {
+                if let NetEvent::PlayerProfileSync {
+                    player_id,
+                    visor_rgb,
+                    inventory_json,
+                    ..
+                } = ev
+                    && player_id == 1
+                    && visor_rgb == guest_new_visor
+                    && inventory_json == guest_inv_json
+                {
+                    host_saw_guest_profile = true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(client_saw_host_visor, "client did not receive host visor color update");
+        assert!(host_saw_guest_profile, "host did not receive guest visor & inventory update");
 
         // 5. Verify clean drop/shutdown and PlayerLeft notification on host.
         drop(client);

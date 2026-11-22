@@ -146,6 +146,7 @@ pub enum ReliableMessage {
         unlocked_depth_tier: u8,
     },
     PlayerProfileSync {
+        player_id: PlayerId,
         player_name: String,
         visor_rgb: [f32; 3],
         inventory_json: String,

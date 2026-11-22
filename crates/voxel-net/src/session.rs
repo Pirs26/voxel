@@ -95,6 +95,7 @@ pub enum NetEvent {
         unlocked_depth_tier: u8,
     },
     PlayerProfileSync {
+        player_id: PlayerId,
         player_name: String,
         visor_rgb: [f32; 3],
         inventory_json: String,
@@ -397,6 +398,7 @@ impl HostState {
                 | ReliableMessage::WorldItemSpawn(_)
                 | ReliableMessage::WorldItemUpdate(_)
                 | ReliableMessage::WorldItemRemove { .. }
+                | ReliableMessage::PlayerProfileSync { .. }
         )
     }
 
@@ -438,6 +440,19 @@ impl HostState {
             }
             ReliableMessage::WorldItemRemove { item_id } => {
                 self.world_items.remove(item_id);
+            }
+            ReliableMessage::PlayerProfileSync {
+                player_id,
+                player_name,
+                visor_rgb,
+                ..
+            } => {
+                if let Some(info) = self.players.get_mut(player_id) {
+                    info.visor_rgb = *visor_rgb;
+                    if !player_name.trim().is_empty() {
+                        info.name = player_name.clone();
+                    }
+                }
             }
             _ => {}
         }
@@ -756,7 +771,15 @@ async fn handle_incoming_guest(
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<()>();
     let done_tx_rel = done_tx.clone();
     let reader_handle = tokio::spawn(async move {
-        while let Ok(Some(msg)) = read_reliable_frame(&mut recv_stream).await {
+        while let Ok(Some(mut msg)) = read_reliable_frame(&mut recv_stream).await {
+            // Enforce authenticated sender ID on guest-sent profile/visor updates
+            if let ReliableMessage::PlayerProfileSync {
+                player_id: ref mut pid,
+                ..
+            } = msg
+            {
+                *pid = player_id;
+            }
             let should_relay = !matches!(msg, ReliableMessage::RequestElevatorAction { .. });
             if HostState::mutates_state(&msg) {
                 let mut guard = state_rel.write().await;
@@ -1177,12 +1200,14 @@ fn emit_reliable_event(events: &EventQueue, msg: ReliableMessage) {
             },
         ),
         ReliableMessage::PlayerProfileSync {
+            player_id,
             player_name,
             visor_rgb,
             inventory_json,
         } => push_event(
             events,
             NetEvent::PlayerProfileSync {
+                player_id,
                 player_name,
                 visor_rgb,
                 inventory_json,
