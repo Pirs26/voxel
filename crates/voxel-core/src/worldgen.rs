@@ -11,35 +11,75 @@ use crate::{
 /// Important landmarks produced by deterministic world generation.
 #[derive(Clone, Debug)]
 pub struct GeneratedLevelInfo {
-    /// Player spawn point in world meters (inside the starter shed / cave entry).
+    /// Player spawn point in world meters (inside the Base Shed on solid Timber floor).
     pub spawn_pos_m: Vec3,
-    /// Position of the elevator platform floor in world meters.
+    /// Position of the elevator platform floor at the top of the shaft in world meters.
     pub elevator_pos_m: Vec3,
     /// Acoustic demo beacon position (behind a breachable cracked rock wall!).
     pub acoustic_beacon_pos_m: Vec3,
     /// Center of the grand echoing cavern in world meters.
     pub grand_cavern_pos_m: Vec3,
+    /// Active depth tier (1..=3).
+    pub depth_tier: u8,
+    /// Top surface Y of the Base Shed floor in meters (`(shed_floor_y + 1) * voxel_size_m`).
+    pub shed_floor_y_m: f32,
+    /// Top surface Y of the Cave landing floor in meters (`(cave_floor_y + 1) * voxel_size_m`).
+    pub cave_floor_y_m: f32,
+    /// Top elevator stop (shaft center XZ, Y = `shed_floor_y_m`).
+    pub elevator_top_pos_m: Vec3,
+    /// Bottom elevator stop (shaft center XZ, Y = `cave_floor_y_m`).
+    pub elevator_bottom_pos_m: Vec3,
+    /// Elevator lever console inside the Shed right next to the +X shaft boarding entrance.
+    pub elevator_lever_shed_pos_m: Vec3,
+    /// Elevator winch call station in the Cave landing right next to the +X shaft opening.
+    pub elevator_winch_cave_pos_m: Vec3,
+    /// Shop terminal station inside the Shed on a distinct wall/corner.
+    pub shop_terminal_pos_m: Vec3,
+    /// Battery charger bench inside the Shed on a distinct wall/corner.
+    pub charger_bench_pos_m: Vec3,
+    /// Wooden workbench counter top inside the Shed for starter spare items.
+    pub shed_workbench_pos_m: Vec3,
+    /// Interior AABB minimum corner of the Base Shed in world meters.
+    pub shed_bounds_min_m: Vec3,
+    /// Interior AABB maximum corner of the Base Shed in world meters.
+    pub shed_bounds_max_m: Vec3,
+    /// Guaranteed walkable spawn positions for heavy quest relics (2 for T1, 3 for T2, 4 for T3).
+    pub relic_spawns_m: Vec<Vec3>,
+    /// Guaranteed walkable spawn positions for small bonus loot items (2-4).
+    pub bonus_loot_spawns_m: Vec<Vec3>,
+    /// Guaranteed walkable spawn positions for blind acoustic predators (1 for T1, 2 for T2-T3).
+    pub monster_spawns_m: Vec<Vec3>,
 }
 
-/// Deterministically builds a playable vertical testbed level:
-/// - Upper wooden **Starter Shed** (warm, short reverb, acoustic test partition)
-/// - Steel **Vertical Mineshaft** with stepped spiral walkway down into darkness
-/// - Lower **Echoing Cave Network** (grand reverberant cavern, narrow winding tunnels,
-///   a **Cracked Rock breachable wall** hiding a resonant acoustic beacon chamber,
-///   and glowing bioluminescent crystal landmarks).
+const SHED_HALF_MIN_X: i32 = 10;
+const SHED_HALF_MAX_X: i32 = 11;
+const SHED_HALF_Z: i32 = 9;
+const SHED_ROOF_OFFSET: i32 = 7;
+const SHAFT_RADIUS: i32 = 4;
+
+/// Deterministically builds a playable vertical testbed level at depth tier 1.
 pub fn generate_world(seed: u64, config: VoxelConfig) -> (VoxelWorld, GeneratedLevelInfo) {
+    generate_world_with_tier(seed, 1, config)
+}
+
+/// Deterministically builds the persistent surface Base Shed (`y >= shed_floor_y`)
+/// and the underground vertical mineshaft + echoing cave network (`y < shed_floor_y`)
+/// for the requested `depth_tier` (clamped to `1..=3`).
+pub fn generate_world_with_tier(
+    seed: u64,
+    depth_tier: u8,
+    config: VoxelConfig,
+) -> (VoxelWorld, GeneratedLevelInfo) {
     let mut world = VoxelWorld::new(config);
     let max = config.world_voxels();
-    let simplex = Simplex::new(seed as u32);
+    let (cx, cz, shed_floor_y, _cave_floor_y) = compute_layout_coords(max);
 
-    // Coordinate landmarks in voxel space (scaled proportionally to world_voxels)
-    let cx = max.x / 2;
-    let cz = max.z / 2;
-    let shed_floor_y = (max.y * 3) / 4; // e.g., y = 96 in a 128-tall world
-    let cave_floor_y = max.y / 4;       // e.g., y = 32 in a 128-tall world
-
-    // Helper: carve or fill chunk-by-chunk
+    // 1. Populate the surface layer (`y >= shed_floor_y`) across all chunks first.
     for cy in 0..config.world_chunks.y as i32 {
+        let base_y = cy * CHUNK_SIZE as i32;
+        if base_y + CHUNK_SIZE as i32 <= shed_floor_y {
+            continue;
+        }
         for cz_i in 0..config.world_chunks.z as i32 {
             for cx_i in 0..config.world_chunks.x as i32 {
                 let mut chunk = Chunk::new_uniform(VoxelId::Air);
@@ -47,20 +87,14 @@ pub fn generate_world(seed: u64, config: VoxelConfig) -> (VoxelWorld, GeneratedL
 
                 for ly in 0..CHUNK_SIZE {
                     let y = base.y + ly as i32;
+                    if y < shed_floor_y {
+                        continue;
+                    }
                     for lz in 0..CHUNK_SIZE {
                         let z = base.z + lz as i32;
                         for lx in 0..CHUNK_SIZE {
                             let x = base.x + lx as i32;
-
-                            let mat = sample_base_voxel(
-                                IVec3::new(x, y, z),
-                                max,
-                                cx,
-                                cz,
-                                shed_floor_y,
-                                cave_floor_y,
-                                &simplex,
-                            );
+                            let mat = sample_surface_voxel(IVec3::new(x, y, z), max, shed_floor_y);
                             if mat != VoxelId::Air {
                                 chunk.set(lx, ly, lz, mat);
                             }
@@ -72,31 +106,147 @@ pub fn generate_world(seed: u64, config: VoxelConfig) -> (VoxelWorld, GeneratedL
         }
     }
 
-    // Carve connected walkable cave arteries + grand cavern + acoustic test alcove
-    carve_sphere(&mut world, IVec3::new(cx, cave_floor_y + 7, cz), 8.0);
+    // 2. Build the persistent wooden Base Shed on top of `shed_floor_y`.
+    build_starter_shed(&mut world, cx, cz, shed_floor_y);
+
+    // 3. Populate the underground cave and steel shaft strictly below `shed_floor_y`.
+    let info = regenerate_underground(&mut world, seed, depth_tier);
+    world.mark_all_dirty();
+
+    (world, info)
+}
+
+/// Regenerates ONLY the underground region (`y < shed_floor_y`) and the vertical steel
+/// elevator shaft below `shed_floor_y`, leaving EVERY voxel at `y >= shed_floor_y`
+/// (the persistent Base Shed and any player edits/foam inside it) completely untouched.
+///
+/// Marks all affected chunks dirty for re-meshing.
+pub fn regenerate_underground(
+    world: &mut VoxelWorld,
+    seed: u64,
+    depth_tier: u8,
+) -> GeneratedLevelInfo {
+    let config = world.config();
+    let max = config.world_voxels();
+    let tier = depth_tier.clamp(1, 3);
+    let (cx, cz, shed_floor_y, cave_floor_y) = compute_layout_coords(max);
+
+    let cave_seed = mix_seed(seed, tier);
+    let simplex = Simplex::new((cave_seed ^ (cave_seed >> 32)) as u32);
+
+    // 1. Regenerate underground base rock strictly for `y < shed_floor_y`.
+    for cy in 0..config.world_chunks.y as i32 {
+        let base_y = cy * CHUNK_SIZE as i32;
+        if base_y >= shed_floor_y {
+            continue;
+        }
+        let spans_shed_floor = base_y + CHUNK_SIZE as i32 > shed_floor_y;
+
+        for cz_i in 0..config.world_chunks.z as i32 {
+            for cx_i in 0..config.world_chunks.x as i32 {
+                let cc = IVec3::new(cx_i, cy, cz_i);
+                let base = cc * CHUNK_SIZE as i32;
+
+                let mut chunk = if spans_shed_floor {
+                    // Preserve all voxels at `y >= shed_floor_y` verbatim!
+                    world
+                        .get_chunk(cc)
+                        .cloned()
+                        .unwrap_or_else(|| Chunk::new_uniform(VoxelId::Air))
+                } else {
+                    Chunk::new_uniform(VoxelId::Air)
+                };
+
+                let ly_limit = if spans_shed_floor {
+                    (shed_floor_y - base_y) as usize
+                } else {
+                    CHUNK_SIZE
+                };
+
+                for ly in 0..ly_limit {
+                    let y = base.y + ly as i32;
+                    for lz in 0..CHUNK_SIZE {
+                        let z = base.z + lz as i32;
+                        for lx in 0..CHUNK_SIZE {
+                            let x = base.x + lx as i32;
+                            let mat = sample_underground_voxel(
+                                IVec3::new(x, y, z),
+                                max,
+                                shed_floor_y,
+                                tier,
+                                &simplex,
+                            );
+                            if spans_shed_floor || mat != VoxelId::Air {
+                                chunk.set(lx, ly, lz, mat);
+                            }
+                        }
+                    }
+                }
+
+                world.insert_chunk(cc, chunk);
+
+                // If this chunk sits directly beneath the shed floor boundary, dirty the
+                // chunk immediately above so bottom-face culling & AO stay seamless.
+                if base_y + CHUNK_SIZE as i32 == shed_floor_y {
+                    world.mark_chunk_dirty(cc + IVec3::Y);
+                }
+            }
+        }
+    }
+
+    // Deterministic subtle offsets per (seed, depth_tier) so each dive feels fresh
+    // while keeping every chamber safely within bedrock bounds even on 3x3x3 test worlds.
+    let cavern_z_off = deterministic_range(cave_seed, 1, -2, 2);
+    let west_z_off = deterministic_range(cave_seed, 2, -2, 2);
+    let south_x_off = deterministic_range(cave_seed, 3, -2, 2);
+
+    // 2. Carve connected walkable cave arteries, grand cavern, sealed alcove & deep wings.
+    carve_sphere(world, IVec3::new(cx, cave_floor_y + 7, cz), 8.5, shed_floor_y);
 
     // Grand Echoing Cavern to the +X side (huge vaulted stone ceiling for dramatic reverb!)
-    let cavern_center = IVec3::new(cx + 26, cave_floor_y + 10, cz);
-    carve_ellipsoid(&mut world, cavern_center, Vec3::new(17.0, 12.0, 15.0));
-    // Tunnel from shaft base to grand cavern
+    let cavern_center = IVec3::new(cx + 26, cave_floor_y + 10, cz + cavern_z_off);
+    carve_ellipsoid(
+        world,
+        cavern_center,
+        Vec3::new(17.0, 11.5 + tier as f32, 15.0),
+        shed_floor_y,
+    );
+    // Main tunnel from +X shaft opening to grand cavern
     carve_tunnel(
-        &mut world,
-        IVec3::new(cx, cave_floor_y + 3, cz),
-        IVec3::new(cx + 14, cave_floor_y + 3, cz),
-        3.2,
+        world,
+        IVec3::new(cx + 4, cave_floor_y + 3, cz),
+        IVec3::new(cx + 16, cave_floor_y + 3, cz + cavern_z_off),
+        3.3,
+        shed_floor_y,
     );
 
     // Secondary winding tunnel to the -Z side leading to a sealed Cracked Rock chamber
     let hallway_mid = IVec3::new(cx + 22, cave_floor_y + 3, cz - 14);
     let alcove_center = IVec3::new(cx + 22, cave_floor_y + 4, cz - 26);
-    carve_tunnel(&mut world, IVec3::new(cx + 22, cave_floor_y + 3, cz - 6), hallway_mid, 2.8);
-    carve_ellipsoid(&mut world, alcove_center, Vec3::new(7.5, 5.5, 7.0));
-    // Connect hallway to alcove, then seal with a 2-voxel-thick CrackedRock wall!
-    carve_tunnel(&mut world, hallway_mid, alcove_center, 2.5);
+    carve_tunnel(
+        world,
+        IVec3::new(cx + 22, cave_floor_y + 3, cz - 6 + cavern_z_off),
+        hallway_mid,
+        2.9,
+        shed_floor_y,
+    );
+    carve_ellipsoid(
+        world,
+        alcove_center,
+        Vec3::new(7.5, 5.5, 7.0),
+        shed_floor_y,
+    );
+    carve_tunnel(world, hallway_mid, alcove_center, 2.6, shed_floor_y);
+
+    // Seal alcove entrance with a 2-voxel-thick CrackedRock breachable wall!
     for dy in 0..7 {
+        let y = cave_floor_y + 1 + dy;
+        if y >= shed_floor_y {
+            continue;
+        }
         for dx in -4..=4 {
             for dz in 0..2 {
-                let p = IVec3::new(cx + 22 + dx, cave_floor_y + 1 + dy, cz - 19 - dz);
+                let p = IVec3::new(cx + 22 + dx, y, cz - 19 - dz);
                 if world.get(p) == VoxelId::Air {
                     world.set(p, VoxelId::CrackedRock);
                 }
@@ -104,67 +254,412 @@ pub fn generate_world(seed: u64, config: VoxelConfig) -> (VoxelWorld, GeneratedL
         }
     }
 
-    // Looping tunnel from alcove back toward shaft (-X side) for circular exploration
+    // Wrap-around galleries outside the steel shaft so +X exit loops cleanly to West & South wings
     carve_tunnel(
-        &mut world,
-        IVec3::new(cx, cave_floor_y + 3, cz),
-        IVec3::new(cx - 18, cave_floor_y + 4, cz - 12),
+        world,
+        IVec3::new(cx + 6, cave_floor_y + 3, cz),
+        IVec3::new(cx + 6, cave_floor_y + 3, cz - 7),
+        2.8,
+        shed_floor_y,
+    );
+    carve_tunnel(
+        world,
+        IVec3::new(cx + 6, cave_floor_y + 3, cz - 7),
+        IVec3::new(cx - 7, cave_floor_y + 3, cz - 8),
+        2.8,
+        shed_floor_y,
+    );
+    carve_tunnel(
+        world,
+        IVec3::new(cx + 6, cave_floor_y + 3, cz),
+        IVec3::new(cx + 6, cave_floor_y + 3, cz + 7),
+        2.8,
+        shed_floor_y,
+    );
+    carve_tunnel(
+        world,
+        IVec3::new(cx + 6, cave_floor_y + 3, cz + 7),
+        IVec3::new(cx - 6, cave_floor_y + 3, cz + 8),
+        2.8,
+        shed_floor_y,
+    );
+
+    // West Cavern (-X, -Z) for circular exploration
+    let west_center = IVec3::new(cx - 20, cave_floor_y + 6, cz - 14 + west_z_off);
+    carve_tunnel(
+        world,
+        IVec3::new(cx - 7, cave_floor_y + 3, cz - 8),
+        IVec3::new(west_center.x + 2, cave_floor_y + 3, west_center.z + 2),
         3.0,
+        shed_floor_y,
+    );
+    carve_ellipsoid(world, west_center, Vec3::new(9.0, 7.0, 9.0), shed_floor_y);
+
+    // Deep South Vault (+X/+Z wing; expanded with cracked rock threshold on Tier >= 2)
+    let south_center = IVec3::new(cx + 12 + south_x_off, cave_floor_y + 6, cz + 24);
+    carve_tunnel(
+        world,
+        IVec3::new(cx + 20, cave_floor_y + 3, cz + 9 + cavern_z_off),
+        IVec3::new(south_center.x + 2, cave_floor_y + 3, south_center.z - 4),
+        2.9,
+        shed_floor_y,
+    );
+    carve_tunnel(
+        world,
+        IVec3::new(cx + 6, cave_floor_y + 3, cz + 8),
+        IVec3::new(south_center.x - 2, cave_floor_y + 3, south_center.z - 4),
+        2.6,
+        shed_floor_y,
     );
     carve_ellipsoid(
-        &mut world,
-        IVec3::new(cx - 20, cave_floor_y + 6, cz - 14),
-        Vec3::new(9.0, 7.0, 9.0),
+        world,
+        south_center,
+        Vec3::new(8.5 + (tier - 1) as f32, 6.0 + tier as f32, 8.5),
+        shed_floor_y,
     );
 
-    // Flat Dirt/Stone walkable floors in main cave hubs
-    flatten_floor(&mut world, IVec3::new(cx, cave_floor_y, cz), 9, VoxelId::CaveDirt);
-    flatten_floor(&mut world, IVec3::new(cx + 26, cave_floor_y, cz), 15, VoxelId::CaveDirt);
-    flatten_floor(&mut world, IVec3::new(cx + 22, cave_floor_y, cz - 26), 6, VoxelId::CaveStone);
-    flatten_floor(&mut world, IVec3::new(cx - 20, cave_floor_y, cz - 14), 8, VoxelId::CaveDirt);
-
-    // Place a vertical steel shaft connecting Shed down to Cave + walkable spiral stairs
-    // (until Week 3 elevator ride automates descent, you can walk down the shaft & hear the metallic echoes!)
-    build_shaft_and_stairs(&mut world, cx, cz, cave_floor_y, shed_floor_y);
-
-    // Build cozy Wooden Starter Shed on top with an acoustic demonstration wall
-    build_starter_shed(&mut world, cx, cz, shed_floor_y);
-
-    // Scatter glowing Bioluminescent Crystals for visual landmarks in pitch darkness
-    let crystal_spots = [
-        IVec3::new(cx + 12, cave_floor_y + 1, cz + 2),
-        IVec3::new(cx + 26, cave_floor_y + 1, cz + 10),
-        IVec3::new(cx + 35, cave_floor_y + 1, cz - 4),
-        IVec3::new(cx + 22, cave_floor_y + 1, cz - 26), // inside sealed alcove
-        IVec3::new(cx - 18, cave_floor_y + 1, cz - 12),
-        IVec3::new(cx + 3, cave_floor_y + 1, cz - 3),
-    ];
-    for spot in crystal_spots {
-        world.set(spot, VoxelId::BiolumCrystal);
-        world.set(spot + IVec3::Y, VoxelId::BiolumCrystal);
+    // Deep Southwest Chamber (-X/+Z wing; connects West Cavern & Deep South Vault)
+    let sw_center = IVec3::new(cx - 22, cave_floor_y + 7, cz + 20);
+    if tier >= 2 {
+        carve_tunnel(
+            world,
+            IVec3::new(west_center.x, cave_floor_y + 3, west_center.z + 6),
+            IVec3::new(sw_center.x, cave_floor_y + 3, sw_center.z - 5),
+            2.9,
+            shed_floor_y,
+        );
+        carve_tunnel(
+            world,
+            IVec3::new(south_center.x - 5, cave_floor_y + 3, south_center.z),
+            IVec3::new(sw_center.x + 6, cave_floor_y + 3, sw_center.z + 2),
+            2.9,
+            shed_floor_y,
+        );
+        carve_ellipsoid(
+            world,
+            sw_center,
+            Vec3::new(9.5, 7.0 + (tier - 1) as f32, 9.5),
+            shed_floor_y,
+        );
+    } else {
+        // Tier 1 still carves a modest southern loop gallery to keep navigation flowing
+        carve_tunnel(
+            world,
+            IVec3::new(cx - 6, cave_floor_y + 3, cz + 8),
+            IVec3::new(west_center.x + 2, cave_floor_y + 3, west_center.z + 6),
+            2.7,
+            shed_floor_y,
+        );
     }
 
-    world.mark_all_dirty();
+    // 3. Flat walkable floors in all cave hubs (strictly `< shed_floor_y`)
+    flatten_floor(
+        world,
+        IVec3::new(cx, cave_floor_y, cz),
+        9,
+        VoxelId::CaveDirt,
+        shed_floor_y,
+    );
+    flatten_floor(
+        world,
+        IVec3::new(cavern_center.x, cave_floor_y, cavern_center.z),
+        15,
+        VoxelId::CaveDirt,
+        shed_floor_y,
+    );
+    flatten_floor(
+        world,
+        IVec3::new(alcove_center.x, cave_floor_y, alcove_center.z),
+        6,
+        VoxelId::CaveStone,
+        shed_floor_y,
+    );
+    flatten_floor(
+        world,
+        IVec3::new(west_center.x, cave_floor_y, west_center.z),
+        8,
+        VoxelId::CaveDirt,
+        shed_floor_y,
+    );
+    flatten_floor(
+        world,
+        IVec3::new(south_center.x, cave_floor_y, south_center.z),
+        8,
+        VoxelId::CaveStone,
+        shed_floor_y,
+    );
+    if tier >= 2 {
+        flatten_floor(
+            world,
+            IVec3::new(sw_center.x, cave_floor_y, sw_center.z),
+            8,
+            VoxelId::CaveDirt,
+            shed_floor_y,
+        );
+    }
 
-    // Start player right in the Cave Hub near the shaft so Week-1 acoustic testing is immediate,
-    // with stairs leading right up to the Wooden Shed!
-    let info = GeneratedLevelInfo {
-        spawn_pos_m: config.voxel_to_world_center(IVec3::new(cx + 6, cave_floor_y + 2, cz)),
-        elevator_pos_m: config.voxel_to_world_center(IVec3::new(cx, shed_floor_y + 1, cz)),
-        acoustic_beacon_pos_m: config.voxel_to_world_center(IVec3::new(cx + 22, cave_floor_y + 3, cz - 25)),
-        grand_cavern_pos_m: config.voxel_to_world_center(cavern_center),
-    };
+    // 4. Build unobstructed 7x7 vertical steel mineshaft strictly below `shed_floor_y`.
+    build_shaft(world, cx, cz, cave_floor_y, shed_floor_y);
 
-    (world, info)
+    // 5. Scatter glowing Bioluminescent Crystals (varies by tier: deeper = sparser/moodier).
+    let mut crystal_spots = vec![
+        IVec3::new(cx + 12, cave_floor_y + 1, cz + 2),
+        IVec3::new(cavern_center.x, cave_floor_y + 1, cavern_center.z + 10),
+        IVec3::new(alcove_center.x - 2, cave_floor_y + 1, alcove_center.z),
+        IVec3::new(west_center.x + 2, cave_floor_y + 1, west_center.z + 2),
+    ];
+    if tier == 1 {
+        crystal_spots.push(IVec3::new(
+            cavern_center.x + 9,
+            cave_floor_y + 1,
+            cavern_center.z - 5,
+        ));
+        crystal_spots.push(IVec3::new(cx + 6, cave_floor_y + 1, cz - 3));
+    } else if tier == 2 {
+        crystal_spots.push(IVec3::new(
+            south_center.x + 3,
+            cave_floor_y + 1,
+            south_center.z - 2,
+        ));
+    } else {
+        crystal_spots.push(IVec3::new(
+            sw_center.x + 3,
+            cave_floor_y + 1,
+            sw_center.z - 3,
+        ));
+    }
+    for spot in crystal_spots {
+        if spot.y + 1 < shed_floor_y {
+            world.set(spot, VoxelId::BiolumCrystal);
+            world.set(spot + IVec3::Y, VoxelId::BiolumCrystal);
+        }
+    }
+
+    // 6. Compute and guarantee walkable spawn points for relics, bonus loot, and monsters.
+    let mut relic_voxels = vec![
+        // Relic 1: inside the sealed Cracked Rock alcove
+        IVec3::new(alcove_center.x, cave_floor_y + 1, alcove_center.z - 1),
+        // Relic 2: inside the Grand Echoing Cavern
+        IVec3::new(cavern_center.x + 5, cave_floor_y + 1, cavern_center.z + 4),
+    ];
+    if tier >= 2 {
+        // Relic 3: Deep South Vault
+        relic_voxels.push(IVec3::new(
+            south_center.x,
+            cave_floor_y + 1,
+            south_center.z + 2,
+        ));
+    }
+    if tier >= 3 {
+        // Relic 4: Deep Southwest Chamber
+        relic_voxels.push(IVec3::new(
+            sw_center.x - 2,
+            cave_floor_y + 1,
+            sw_center.z + 2,
+        ));
+    }
+    let relic_spawns_m = relic_voxels
+        .into_iter()
+        .map(|v| ensure_walkable_spawn(world, v, VoxelId::CaveStone, shed_floor_y))
+        .collect();
+
+    let mut bonus_voxels = vec![
+        IVec3::new(west_center.x - 2, cave_floor_y + 1, west_center.z - 1),
+        IVec3::new(cavern_center.x + 1, cave_floor_y + 1, cavern_center.z - 7),
+    ];
+    if tier >= 2 {
+        bonus_voxels.push(IVec3::new(
+            south_center.x + 3,
+            cave_floor_y + 1,
+            south_center.z - 3,
+        ));
+    }
+    if tier >= 3 {
+        bonus_voxels.push(IVec3::new(
+            sw_center.x + 3,
+            cave_floor_y + 1,
+            sw_center.z - 2,
+        ));
+    }
+    let bonus_loot_spawns_m = bonus_voxels
+        .into_iter()
+        .map(|v| ensure_walkable_spawn(world, v, VoxelId::CaveDirt, shed_floor_y))
+        .collect();
+
+    let mut monster_voxels = vec![
+        // Deep far side of the Grand Cavern — far from shaft landing!
+        IVec3::new(cavern_center.x + 9, cave_floor_y + 1, cavern_center.z - 1),
+    ];
+    if tier >= 2 {
+        // Second predator in the opposite Deep Southwest Chamber
+        monster_voxels.push(IVec3::new(
+            sw_center.x,
+            cave_floor_y + 1,
+            sw_center.z - 1,
+        ));
+    }
+    let monster_spawns_m = monster_voxels
+        .into_iter()
+        .map(|v| ensure_walkable_spawn(world, v, VoxelId::CaveDirt, shed_floor_y))
+        .collect();
+
+    // Ensure cave winch station landing spot is clear right next to the +X shaft exit
+    let winch_voxel = IVec3::new(cx + 5, cave_floor_y + 1, cz + 3);
+    ensure_walkable_spawn(world, winch_voxel, VoxelId::CaveDirt, shed_floor_y);
+
+    build_level_info(
+        config,
+        tier,
+        cx,
+        cz,
+        shed_floor_y,
+        cave_floor_y,
+        cavern_center,
+        alcove_center,
+        relic_spawns_m,
+        bonus_loot_spawns_m,
+        monster_spawns_m,
+    )
 }
 
-fn sample_base_voxel(
+#[allow(clippy::too_many_arguments)]
+fn build_level_info(
+    config: VoxelConfig,
+    depth_tier: u8,
+    cx: i32,
+    cz: i32,
+    shed_floor_y: i32,
+    cave_floor_y: i32,
+    cavern_center: IVec3,
+    alcove_center: IVec3,
+    relic_spawns_m: Vec<Vec3>,
+    bonus_loot_spawns_m: Vec<Vec3>,
+    monster_spawns_m: Vec<Vec3>,
+) -> GeneratedLevelInfo {
+    let vs = config.voxel_size_m;
+    let shed_floor_y_m = (shed_floor_y + 1) as f32 * vs;
+    let cave_floor_y_m = (cave_floor_y + 1) as f32 * vs;
+
+    let shaft_center_x = (cx as f32 + 0.5) * vs;
+    let shaft_center_z = (cz as f32 + 0.5) * vs;
+    let elevator_top_pos_m = Vec3::new(shaft_center_x, shed_floor_y_m, shaft_center_z);
+    let elevator_bottom_pos_m = Vec3::new(shaft_center_x, cave_floor_y_m, shaft_center_z);
+
+    // Spawn inside Base Shed on solid Timber floor facing the shaft/workbench
+    let spawn_pos_m = Vec3::new(
+        ((cx + 7) as f32 + 0.5) * vs,
+        shed_floor_y_m + 0.05,
+        (cz as f32 + 0.5) * vs,
+    );
+
+    // Interactive Shed & Cave stations on distinct walls/corners
+    let elevator_lever_shed_pos_m = Vec3::new(
+        ((cx + 5) as f32 + 0.5) * vs,
+        shed_floor_y_m,
+        ((cz + 3) as f32 + 0.5) * vs,
+    );
+    let elevator_winch_cave_pos_m = Vec3::new(
+        ((cx + 5) as f32 + 0.5) * vs,
+        cave_floor_y_m,
+        ((cz + 3) as f32 + 0.5) * vs,
+    );
+    let shop_terminal_pos_m = Vec3::new(
+        ((cx + 9) as f32 + 0.5) * vs,
+        shed_floor_y_m,
+        ((cz - 5) as f32 + 0.5) * vs,
+    );
+    let charger_bench_pos_m = Vec3::new(
+        ((cx + 4) as f32 + 0.5) * vs,
+        shed_floor_y_m,
+        ((cz - 7) as f32 + 0.5) * vs,
+    );
+    // Top surface of the 1-voxel-tall wooden workbench counter along the +Z wall
+    let shed_workbench_pos_m = Vec3::new(
+        ((cx + 6) as f32 + 0.5) * vs,
+        (shed_floor_y + 2) as f32 * vs + 0.05,
+        ((cz + 7) as f32 + 0.5) * vs,
+    );
+
+    let min_x = cx - SHED_HALF_MIN_X;
+    let max_x = cx + SHED_HALF_MAX_X;
+    let min_z = cz - SHED_HALF_Z;
+    let max_z = cz + SHED_HALF_Z;
+    let roof_y = shed_floor_y + SHED_ROOF_OFFSET;
+
+    let shed_bounds_min_m =
+        config.voxel_to_world_min(IVec3::new(min_x + 1, shed_floor_y + 1, min_z + 1));
+    let shed_bounds_max_m = config.voxel_to_world_min(IVec3::new(max_x, roof_y, max_z));
+
+    GeneratedLevelInfo {
+        spawn_pos_m,
+        elevator_pos_m: elevator_top_pos_m,
+        acoustic_beacon_pos_m: config.voxel_to_world_center(IVec3::new(
+            alcove_center.x,
+            cave_floor_y + 3,
+            alcove_center.z + 1,
+        )),
+        grand_cavern_pos_m: config.voxel_to_world_center(cavern_center),
+        depth_tier,
+        shed_floor_y_m,
+        cave_floor_y_m,
+        elevator_top_pos_m,
+        elevator_bottom_pos_m,
+        elevator_lever_shed_pos_m,
+        elevator_winch_cave_pos_m,
+        shop_terminal_pos_m,
+        charger_bench_pos_m,
+        shed_workbench_pos_m,
+        shed_bounds_min_m,
+        shed_bounds_max_m,
+        relic_spawns_m,
+        bonus_loot_spawns_m,
+        monster_spawns_m,
+    }
+}
+
+#[inline]
+fn compute_layout_coords(max: IVec3) -> (i32, i32, i32, i32) {
+    let cx = max.x / 2;
+    let cz = max.z / 2;
+    let shed_floor_y = (max.y * 3) / 4; // e.g., y = 96 in a 128-tall world
+    let cave_floor_y = max.y / 4; // e.g., y = 32 in a 128-tall world
+    (cx, cz, shed_floor_y, cave_floor_y)
+}
+
+#[inline]
+fn mix_seed(seed: u64, depth_tier: u8) -> u64 {
+    let mut x = seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add((depth_tier as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9));
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
+#[inline]
+fn deterministic_range(seed: u64, salt: u64, min: i32, max: i32) -> i32 {
+    let h = mix_seed(seed ^ salt.wrapping_mul(0xD6E8_FEB8_6659_FD93), salt as u8);
+    let span = (max - min + 1).max(1) as u64;
+    min + (h % span) as i32
+}
+
+fn sample_surface_voxel(p: IVec3, max: IVec3, shed_floor_y: i32) -> VoxelId {
+    if p.x <= 1 || p.z <= 1 || p.x >= max.x - 2 || p.z >= max.z - 2 {
+        return VoxelId::Bedrock;
+    }
+    if p.y > shed_floor_y {
+        return VoxelId::Air;
+    }
+    VoxelId::CaveDirt
+}
+
+fn sample_underground_voxel(
     p: IVec3,
     max: IVec3,
-    _cx: i32,
-    _cz: i32,
     shed_floor_y: i32,
-    _cave_floor_y: i32,
+    depth_tier: u8,
     simplex: &Simplex,
 ) -> VoxelId {
     // Solid bedrock boundary shell
@@ -172,40 +667,31 @@ fn sample_base_voxel(
         return VoxelId::Bedrock;
     }
 
-    // Open sky above surface shed
-    if p.y > shed_floor_y {
-        return VoxelId::Air;
-    }
+    // Underground: 3D cave noise creates natural side pockets while keeping strong stone walls.
+    // Higher depth tiers open slightly more irregular rock pockets and cracked seams.
+    let freq = 0.055 + (depth_tier.saturating_sub(1) as f64) * 0.006;
+    let air_threshold = 0.56 - (depth_tier.saturating_sub(1) as f64) * 0.03;
+    let cracked_threshold = 0.62 - (depth_tier.saturating_sub(1) as f64) * 0.04;
 
-    // Surface layer right below shed
-    if p.y == shed_floor_y {
-        return VoxelId::CaveDirt;
-    }
-
-    // Underground: 3D cave noise creates natural side pockets while keeping strong stone walls
-    let n = simplex.get([
-        p.x as f64 * 0.055,
-        p.y as f64 * 0.075,
-        p.z as f64 * 0.055,
-    ]);
+    let n = simplex.get([p.x as f64 * freq, p.y as f64 * 0.075, p.z as f64 * freq]);
     let n2 = simplex.get([
         p.x as f64 * 0.14 + 31.7,
         p.y as f64 * 0.14,
         p.z as f64 * 0.14 - 19.3,
     ]);
 
-    if p.y < shed_floor_y - 8 && p.y > 8 && n > 0.56 {
+    if p.y < shed_floor_y - 8 && p.y > 8 && n > air_threshold {
         return VoxelId::Air;
     }
 
-    if n2 > 0.62 && p.y < shed_floor_y - 6 {
+    if n2 > cracked_threshold && p.y < shed_floor_y - 6 {
         VoxelId::CrackedRock
     } else {
         VoxelId::CaveStone
     }
 }
 
-fn carve_sphere(world: &mut VoxelWorld, center: IVec3, radius: f32) {
+fn carve_sphere(world: &mut VoxelWorld, center: IVec3, radius: f32, shed_floor_y: i32) {
     let r = radius.ceil() as i32;
     let r2 = radius * radius;
     for dy in -r..=r {
@@ -213,7 +699,7 @@ fn carve_sphere(world: &mut VoxelWorld, center: IVec3, radius: f32) {
             for dx in -r..=r {
                 if (dx * dx + dy * dy + dz * dz) as f32 <= r2 {
                     let p = center + IVec3::new(dx, dy, dz);
-                    if p.y > 2 {
+                    if p.y > 2 && p.y < shed_floor_y {
                         world.set(p, VoxelId::Air);
                     }
                 }
@@ -222,7 +708,7 @@ fn carve_sphere(world: &mut VoxelWorld, center: IVec3, radius: f32) {
     }
 }
 
-fn carve_ellipsoid(world: &mut VoxelWorld, center: IVec3, radii: Vec3) {
+fn carve_ellipsoid(world: &mut VoxelWorld, center: IVec3, radii: Vec3, shed_floor_y: i32) {
     let rx = radii.x.ceil() as i32;
     let ry = radii.y.ceil() as i32;
     let rz = radii.z.ceil() as i32;
@@ -234,7 +720,7 @@ fn carve_ellipsoid(world: &mut VoxelWorld, center: IVec3, radii: Vec3) {
                 let nz = dz as f32 / radii.z;
                 if nx * nx + ny * ny + nz * nz <= 1.0 {
                     let p = center + IVec3::new(dx, dy, dz);
-                    if p.y > 2 {
+                    if p.y > 2 && p.y < shed_floor_y {
                         world.set(p, VoxelId::Air);
                     }
                 }
@@ -243,49 +729,99 @@ fn carve_ellipsoid(world: &mut VoxelWorld, center: IVec3, radii: Vec3) {
     }
 }
 
-fn carve_tunnel(world: &mut VoxelWorld, a: IVec3, b: IVec3, radius: f32) {
+fn carve_tunnel(world: &mut VoxelWorld, a: IVec3, b: IVec3, radius: f32, shed_floor_y: i32) {
     let dist = a.as_vec3().distance(b.as_vec3());
     let steps = (dist * 1.5).ceil().max(1.0) as i32;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
         let p = a.as_vec3().lerp(b.as_vec3(), t).round().as_ivec3();
-        carve_sphere(world, p, radius);
+        carve_sphere(world, p, radius, shed_floor_y);
     }
 }
 
-fn flatten_floor(world: &mut VoxelWorld, center: IVec3, radius: i32, mat: VoxelId) {
+fn flatten_floor(
+    world: &mut VoxelWorld,
+    center: IVec3,
+    radius: i32,
+    mat: VoxelId,
+    shed_floor_y: i32,
+) {
     let r2 = radius * radius;
     for dz in -radius..=radius {
         for dx in -radius..=radius {
             if dx * dx + dz * dz <= r2 {
                 let p = IVec3::new(center.x + dx, center.y, center.z + dz);
-                world.set(p, mat);
-                world.set(p - IVec3::Y, VoxelId::CaveStone);
-                // Ensure headroom right above floor
+                if p.y < shed_floor_y {
+                    world.set(p, mat);
+                    if p.y > 1 {
+                        world.set(p - IVec3::Y, VoxelId::CaveStone);
+                    }
+                }
+                // Ensure headroom right above floor without crossing `shed_floor_y`
                 for h in 1..=3 {
-                    world.set(p + IVec3::new(0, h, 0), VoxelId::Air);
+                    let above = p + IVec3::new(0, h, 0);
+                    if above.y < shed_floor_y {
+                        world.set(above, VoxelId::Air);
+                    }
                 }
             }
         }
     }
 }
 
-fn build_shaft_and_stairs(
+/// Ensures `voxel` (and 2 voxels above it) are `Air` with solid ground directly beneath,
+/// strictly staying below `shed_floor_y`, and returns the walkable world-meter position.
+fn ensure_walkable_spawn(
+    world: &mut VoxelWorld,
+    voxel: IVec3,
+    floor_mat: VoxelId,
+    shed_floor_y: i32,
+) -> Vec3 {
+    let below = voxel - IVec3::Y;
+    if below.y >= 1 && below.y < shed_floor_y && !world.is_solid(below) {
+        world.set(below, floor_mat);
+    }
+    for h in 0..=2 {
+        let p = voxel + IVec3::new(0, h, 0);
+        if p.y > 2 && p.y < shed_floor_y {
+            world.set(p, VoxelId::Air);
+        }
+    }
+    let vs = world.voxel_size_m();
+    Vec3::new(
+        (voxel.x as f32 + 0.5) * vs,
+        voxel.y as f32 * vs + 0.05,
+        (voxel.z as f32 + 0.5) * vs,
+    )
+}
+
+/// Builds an unobstructed 7x7 interior vertical steel elevator shaft strictly below `shed_floor_y`,
+/// with a +X doorway at the cave bottom (`y <= cave_floor_y + 5`, `dz.abs() <= 2`).
+fn build_shaft(
     world: &mut VoxelWorld,
     cx: i32,
     cz: i32,
     cave_floor_y: i32,
     shed_floor_y: i32,
 ) {
-    let shaft_r = 4i32;
-    for y in (cave_floor_y + 1)..=shed_floor_y {
-        for dz in -shaft_r..=shaft_r {
-            for dx in -shaft_r..=shaft_r {
+    // Solid steel landing pad directly underneath the elevator cage
+    for dz in -SHAFT_RADIUS..=SHAFT_RADIUS {
+        for dx in -SHAFT_RADIUS..=SHAFT_RADIUS {
+            let floor_p = IVec3::new(cx + dx, cave_floor_y, cz + dz);
+            if floor_p.y < shed_floor_y {
+                world.set(floor_p, VoxelId::Steel);
+            }
+        }
+    }
+
+    for y in (cave_floor_y + 1)..shed_floor_y {
+        for dz in -SHAFT_RADIUS..=SHAFT_RADIUS {
+            for dx in -SHAFT_RADIUS..=SHAFT_RADIUS {
                 let p = IVec3::new(cx + dx, y, cz + dz);
-                let on_wall = dx.abs() == shaft_r || dz.abs() == shaft_r;
+                let on_wall = dx.abs() == SHAFT_RADIUS || dz.abs() == SHAFT_RADIUS;
                 if on_wall {
                     // Leave cave entrance opening at bottom on +X side
-                    if y <= cave_floor_y + 5 && dx == shaft_r && dz.abs() <= 2 {
+                    if y <= cave_floor_y + 5 && dx == SHAFT_RADIUS && dz.abs() <= 2 {
                         world.set(p, VoxelId::Air);
                     } else {
                         world.set(p, VoxelId::Steel);
@@ -296,38 +832,32 @@ fn build_shaft_and_stairs(
             }
         }
     }
-
-    // Simple spiral steel ledges along shaft walls so player can climb between cave and shed in Week 1
-    for (step_idx, y) in ((cave_floor_y + 1)..shed_floor_y).enumerate() {
-        let angle_step = step_idx as i32;
-        let side = (angle_step / 4) % 4;
-        let offset = (angle_step % 4) - 1;
-        let (dx, dz) = match side {
-            0 => (offset, -3),
-            1 => (3, offset),
-            2 => (-offset, 3),
-            _ => (-3, -offset),
-        };
-        world.set(IVec3::new(cx + dx, y, cz + dz), VoxelId::Steel);
-    }
 }
 
 fn build_starter_shed(world: &mut VoxelWorld, cx: i32, cz: i32, shed_floor_y: i32) {
-    // Wooden floor & walls around shaft
-    let min_x = cx - 9;
-    let max_x = cx + 9;
-    let min_z = cz - 8;
-    let max_z = cz + 8;
-    let roof_y = shed_floor_y + 7;
+    let min_x = cx - SHED_HALF_MIN_X;
+    let max_x = cx + SHED_HALF_MAX_X;
+    let min_z = cz - SHED_HALF_Z;
+    let max_z = cz + SHED_HALF_Z;
+    let roof_y = shed_floor_y + SHED_ROOF_OFFSET;
 
     for y in shed_floor_y..=roof_y {
         for z in min_z..=max_z {
             for x in min_x..=max_x {
                 let p = IVec3::new(x, y, z);
-                // Keep elevator shaft hole open on floor
-                let in_shaft = (x - cx).abs() < 4 && (z - cz).abs() < 4;
+                let dx = x - cx;
+                let dz = z - cz;
+                let in_shaft_hole = dx.abs() < SHAFT_RADIUS && dz.abs() < SHAFT_RADIUS;
+                let on_shaft_rim = !in_shaft_hole
+                    && dx.abs() <= SHAFT_RADIUS
+                    && dz.abs() <= SHAFT_RADIUS;
+
                 if y == shed_floor_y {
-                    if !in_shaft {
+                    if in_shaft_hole {
+                        world.set(p, VoxelId::Air);
+                    } else if on_shaft_rim {
+                        world.set(p, VoxelId::Steel);
+                    } else {
                         world.set(p, VoxelId::Timber);
                     }
                 } else if y == roof_y
@@ -344,8 +874,32 @@ fn build_starter_shed(world: &mut VoxelWorld, cx: i32, cz: i32, shed_floor_y: i3
         }
     }
 
-    // Add a bioluminescent shed worklight block
-    world.set(IVec3::new(cx - 6, shed_floor_y + 5, cz), VoxelId::BiolumCrystal);
+    // Low 1-voxel steel safety railings around -X, -Z, +Z edges of the shaft hole,
+    // leaving the +X boarding edge (`dx == SHAFT_RADIUS`, `dz in -3..=3`) wide open!
+    let rail_y = shed_floor_y + 1;
+    for d in -SHAFT_RADIUS..=SHAFT_RADIUS {
+        // -X railing
+        world.set(IVec3::new(cx - SHAFT_RADIUS, rail_y, cz + d), VoxelId::Steel);
+        // -Z railing
+        world.set(IVec3::new(cx + d, rail_y, cz - SHAFT_RADIUS), VoxelId::Steel);
+        // +Z railing
+        world.set(IVec3::new(cx + d, rail_y, cz + SHAFT_RADIUS), VoxelId::Steel);
+    }
+
+    // Wooden workbench counter along the +Z wall for starter spare items
+    for x in (cx + 5)..=(cx + 8) {
+        world.set(IVec3::new(x, shed_floor_y + 1, cz + 7), VoxelId::Timber);
+    }
+
+    // Bioluminescent worklights mounted near the Shed ceiling
+    world.set(
+        IVec3::new(cx - 6, shed_floor_y + 5, cz),
+        VoxelId::BiolumCrystal,
+    );
+    world.set(
+        IVec3::new(cx + 7, shed_floor_y + 5, cz),
+        VoxelId::BiolumCrystal,
+    );
 }
 
 #[cfg(test)]
@@ -354,16 +908,208 @@ mod tests {
     use glam::UVec3;
 
     #[test]
-    fn worldgen_is_deterministic() {
+    fn worldgen_is_deterministic_across_seeds_and_tiers() {
         let cfg = VoxelConfig::half_player_scale(UVec3::splat(3));
-        let (w1, i1) = generate_world(1337, cfg);
-        let (w2, i2) = generate_world(1337, cfg);
-        assert_eq!(i1.spawn_pos_m, i2.spawn_pos_m);
-        for x in 10..40 {
-            for y in 10..40 {
-                let p = IVec3::new(x, y, 25);
-                assert_eq!(w1.get(p), w2.get(p));
+        for tier in 1..=3 {
+            let (w1, i1) = generate_world_with_tier(1337, tier, cfg);
+            let (w2, i2) = generate_world_with_tier(1337, tier, cfg);
+            assert_eq!(i1.depth_tier, tier);
+            assert_eq!(i1.spawn_pos_m, i2.spawn_pos_m);
+            assert_eq!(i1.elevator_top_pos_m, i2.elevator_top_pos_m);
+            assert_eq!(i1.elevator_bottom_pos_m, i2.elevator_bottom_pos_m);
+            assert_eq!(i1.relic_spawns_m, i2.relic_spawns_m);
+            assert_eq!(i1.bonus_loot_spawns_m, i2.bonus_loot_spawns_m);
+            assert_eq!(i1.monster_spawns_m, i2.monster_spawns_m);
+            for x in 10..50 {
+                for y in 10..80 {
+                    let p = IVec3::new(x, y, 48);
+                    assert_eq!(w1.get(p), w2.get(p));
+                }
             }
+        }
+    }
+
+    #[test]
+    fn generate_world_delegates_to_tier_one() {
+        let cfg = VoxelConfig::half_player_scale(UVec3::splat(3));
+        let (_w1, i1) = generate_world(4242, cfg);
+        let (_w2, i2) = generate_world_with_tier(4242, 1, cfg);
+        assert_eq!(i1.depth_tier, 1);
+        assert_eq!(i1.spawn_pos_m, i2.spawn_pos_m);
+        assert_eq!(i1.relic_spawns_m, i2.relic_spawns_m);
+        assert_eq!(i1.bonus_loot_spawns_m, i2.bonus_loot_spawns_m);
+        assert_eq!(i1.monster_spawns_m, i2.monster_spawns_m);
+    }
+
+    #[test]
+    fn regenerate_underground_preserves_shed_and_changes_cave() {
+        // Test on BOTH 3x3x3 (shed_floor_y = 72, mid-chunk!) and 4x4x4 (shed_floor_y = 96, chunk boundary!)
+        for chunks in [UVec3::splat(3), UVec3::splat(4)] {
+            let cfg = VoxelConfig::half_player_scale(chunks);
+            let max = cfg.world_voxels();
+            let (cx, cz, shed_floor_y, _cave_floor_y) = compute_layout_coords(max);
+
+            let (mut world, info_before) = generate_world_with_tier(1001, 1, cfg);
+
+            // Place player AcousticFoam edits inside the Base Shed (both on the floor level and interior)
+            let foam_interior = IVec3::new(cx + 6, shed_floor_y + 1, cz - 2);
+            let foam_upper = IVec3::new(cx - 5, shed_floor_y + 3, cz + 2);
+            let foam_floor_level = IVec3::new(cx + 8, shed_floor_y, cz + 1);
+            assert!(world.set(foam_interior, VoxelId::AcousticFoam));
+            assert!(world.set(foam_upper, VoxelId::AcousticFoam));
+            assert!(world.set(foam_floor_level, VoxelId::AcousticFoam));
+
+            // Snapshot EVERY voxel inside the shed & surface layer (`y >= shed_floor_y`) around the shed
+            let mut surface_snapshot = Vec::new();
+            for y in shed_floor_y..=(shed_floor_y + SHED_ROOF_OFFSET) {
+                for z in (cz - SHED_HALF_Z)..=(cz + SHED_HALF_Z) {
+                    for x in (cx - SHED_HALF_MIN_X)..=(cx + SHED_HALF_MAX_X) {
+                        let p = IVec3::new(x, y, z);
+                        surface_snapshot.push((p, world.get(p)));
+                    }
+                }
+            }
+
+            // Snapshot an underground region before regeneration
+            let mut cave_before = Vec::new();
+            for y in 12..(shed_floor_y - 10) {
+                for x in 10..(max.x - 10) {
+                    let p = IVec3::new(x, y, cz + 15);
+                    cave_before.push((p, world.get(p)));
+                }
+            }
+
+            // Clear dirty chunks so we can also confirm regeneration marks underground chunks dirty
+            let _ = world.take_dirty_chunks();
+
+            // Regenerate underground with a new seed and deeper tier
+            let info_after = regenerate_underground(&mut world, 99999, 3);
+            assert_eq!(info_after.depth_tier, 3);
+            assert_eq!(info_before.shed_floor_y_m, info_after.shed_floor_y_m);
+            assert!(!world.take_dirty_chunks().is_empty());
+
+            // Every single voxel at `y >= shed_floor_y` MUST be untouched, including player foam!
+            assert_eq!(world.get(foam_interior), VoxelId::AcousticFoam);
+            assert_eq!(world.get(foam_upper), VoxelId::AcousticFoam);
+            assert_eq!(world.get(foam_floor_level), VoxelId::AcousticFoam);
+            for (p, expected) in surface_snapshot {
+                assert_eq!(
+                    world.get(p),
+                    expected,
+                    "surface/shed voxel at {p:?} was unexpectedly modified by regenerate_underground"
+                );
+            }
+
+            // Underground voxels MUST have changed with the new seed & tier
+            let changed_count = cave_before
+                .iter()
+                .filter(|&&(p, old)| world.get(p) != old)
+                .count();
+            assert!(
+                changed_count > 100,
+                "expected significant underground changes after regeneration, got {changed_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn spawns_are_walkable_and_shaft_is_unobstructed() {
+        let cfg = VoxelConfig::default(); // 4x4x4 = 128^3
+        let max = cfg.world_voxels();
+        let (cx, cz, shed_floor_y, cave_floor_y) = compute_layout_coords(max);
+
+        for tier in 1..=3 {
+            let (world, info) = generate_world_with_tier(777, tier, cfg);
+
+            // Check expected spawn counts per tier
+            let expected_relics = match tier {
+                1 => 2,
+                2 => 3,
+                _ => 4,
+            };
+            assert_eq!(info.relic_spawns_m.len(), expected_relics);
+            assert!((2..=4).contains(&info.bonus_loot_spawns_m.len()));
+            assert_eq!(info.monster_spawns_m.len(), if tier == 1 { 1 } else { 2 });
+
+            // Check spawn_pos_m is inside Base Shed on solid Timber floor with >= 2 Air headroom
+            let spawn_v = cfg.world_to_voxel(info.spawn_pos_m);
+            assert_eq!(world.get(spawn_v), VoxelId::Air);
+            assert_eq!(world.get(spawn_v + IVec3::Y), VoxelId::Air);
+            assert_eq!(world.get(spawn_v - IVec3::Y), VoxelId::Timber);
+            assert!(info.spawn_pos_m.x >= info.shed_bounds_min_m.x);
+            assert!(info.spawn_pos_m.x <= info.shed_bounds_max_m.x);
+            assert!(info.spawn_pos_m.y >= info.shed_bounds_min_m.y);
+            assert!(info.spawn_pos_m.y <= info.shed_bounds_max_m.y);
+            assert!(info.spawn_pos_m.z >= info.shed_bounds_min_m.z);
+            assert!(info.spawn_pos_m.z <= info.shed_bounds_max_m.z);
+
+            // Check all relic, bonus loot, and monster spawns are Air with solid floor directly below
+            for (label, list) in [
+                ("relic", &info.relic_spawns_m),
+                ("bonus_loot", &info.bonus_loot_spawns_m),
+                ("monster", &info.monster_spawns_m),
+            ] {
+                for &pos in list {
+                    let v = cfg.world_to_voxel(pos);
+                    assert_eq!(
+                        world.get(v),
+                        VoxelId::Air,
+                        "{label} spawn at {pos:?} (voxel {v:?}) must be Air (tier {tier})"
+                    );
+                    assert_eq!(
+                        world.get(v + IVec3::Y),
+                        VoxelId::Air,
+                        "{label} spawn at {pos:?} needs headroom (tier {tier})"
+                    );
+                    assert!(
+                        world.is_solid(v - IVec3::Y),
+                        "{label} spawn at {pos:?} (voxel {v:?}) must have solid floor beneath (tier {tier})"
+                    );
+                }
+            }
+
+            // Monsters must spawn far from the cave elevator landing (no spawn camping)
+            for &mpos in &info.monster_spawns_m {
+                let dist = mpos.distance(info.elevator_bottom_pos_m);
+                assert!(
+                    dist >= 18.0,
+                    "monster spawn too close to shaft landing: {dist:.1}m (tier {tier})"
+                );
+            }
+
+            // Unobstructed 7x7 interior shaft (`dx, dz in -3..=3`) from cave floor to shed floor
+            for y in (cave_floor_y + 1)..=shed_floor_y {
+                for dz in -3..=3 {
+                    for dx in -3..=3 {
+                        assert_eq!(
+                            world.get(IVec3::new(cx + dx, y, cz + dz)),
+                            VoxelId::Air,
+                            "shaft interior obstructed at dx={dx}, y={y}, dz={dz}"
+                        );
+                    }
+                }
+            }
+
+            // Shed +X shaft boarding opening is clear (`dx == 4, dz in -3..=3`)
+            for dz in -3..=3 {
+                assert_eq!(
+                    world.get(IVec3::new(cx + SHAFT_RADIUS, shed_floor_y + 1, cz + dz)),
+                    VoxelId::Air
+                );
+            }
+            // Shed -X, -Z, +Z safety railings exist at `shed_floor_y + 1`
+            assert_eq!(
+                world.get(IVec3::new(cx - SHAFT_RADIUS, shed_floor_y + 1, cz)),
+                VoxelId::Steel
+            );
+            assert_eq!(
+                world.get(IVec3::new(cx, shed_floor_y + 1, cz - SHAFT_RADIUS)),
+                VoxelId::Steel
+            );
+            assert_eq!(
+                world.get(IVec3::new(cx, shed_floor_y + 1, cz + SHAFT_RADIUS)),
+                VoxelId::Steel
+            );
         }
     }
 }

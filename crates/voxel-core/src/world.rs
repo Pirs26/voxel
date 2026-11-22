@@ -178,6 +178,11 @@ impl VoxelWorld {
         }
     }
 
+    /// Marks a specific chunk coordinate dirty for re-meshing.
+    pub fn mark_chunk_dirty(&mut self, chunk_coord: IVec3) {
+        self.mark_dirty(chunk_coord);
+    }
+
     /// Mark all existing chunks dirty (e.g., right after initial worldgen).
     pub fn mark_all_dirty(&mut self) {
         let wx = self.wx;

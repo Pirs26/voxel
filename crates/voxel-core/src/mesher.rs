@@ -177,9 +177,9 @@ pub fn mesh_chunk(world: &VoxelWorld, chunk_coord: IVec3) -> ChunkMeshData {
                         ];
 
                         let v_start = out.positions.len() as u32;
-                        for i in 0..4 {
+                        for (i, corner) in corners.iter().enumerate() {
                             let ao_f = ao_multiplier(face.ao[i]);
-                            out.positions.push(corners[i].to_array());
+                            out.positions.push(corner.to_array());
                             out.normals.push(normal);
                             out.colors.push([
                                 (base_col[0] * ao_f).min(1.8),
