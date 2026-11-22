@@ -11,7 +11,7 @@ use crate::{
     audio_bridge::PlaySpatialSoundEvent,
     elevator::{ELEVATOR_CAGE_HALF_EXTENT_M, ElevatorState},
     health::{CRAWL_EYE_HEIGHT_M, CRAWL_SPEED_M_S, DRAG_SPEED_M_S, PlayerHealthState},
-    inventory::{CarryHandState, PlayerInventory},
+    inventory::{BeltItem, CarryHandState, PlayerInventory},
     net_bridge::CoopMenuOpen,
     physics::{
         PLAYER_EYE_CROUCH_M, PLAYER_EYE_STAND_M, PLAYER_GRAVITY_M_S2, PLAYER_HEIGHT_CROUCH_M,
@@ -467,11 +467,13 @@ fn player_move_system(
 fn flashlight_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
     screen: Res<AppScreen>,
     menu_open: Res<CoopMenuOpen>,
     shop_open: Res<ShopOverlayOpen>,
     settings_open: Res<SettingsMenuOpen>,
     health: Res<PlayerHealthState>,
+    cursor_q: Query<&CursorOptions, With<PrimaryWindow>>,
     mut inv: ResMut<PlayerInventory>,
     mut light_q: Query<(&mut SpotLight, &mut PlayerFlashlight)>,
 ) {
@@ -485,11 +487,19 @@ fn flashlight_system(
         return;
     }
 
+    let cursor_locked = cursor_q
+        .single()
+        .is_ok_and(|c| c.grab_mode != CursorGrabMode::None);
+    let rmb_held_flashlight = cursor_locked
+        && mouse.just_pressed(MouseButton::Right)
+        && !inv.is_hands_occupied()
+        && matches!(inv.active_item(), Some(BeltItem::Flashlight));
+
     if !menu_open.0
         && !shop_open.0
         && !settings_open.0
         && health.is_alive()
-        && keys.just_pressed(KeyCode::KeyF)
+        && (rmb_held_flashlight || keys.just_pressed(KeyCode::KeyF))
     {
         fl.on = !fl.on;
     }

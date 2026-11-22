@@ -39,7 +39,7 @@ use crate::{
         LocalHealthPhase, MonsterHitLocalPlayerEvent, PlayerHealthState, RESCUE_RANGE_M,
         REVIVE_CHANNEL_S, RemoteHealthMap, ReviveCompletedEvent, TeamWipeEvent, check_team_wiped,
     },
-    inventory::{CarryHandState, PlayerInventory, ShopCatalogItem, purchase_shop_item},
+    inventory::{BeltItem, CarryHandState, PlayerInventory, ShopCatalogItem, purchase_shop_item},
     net_bridge::{CoopMenuOpen, CoopState, clear_remote_players},
     physics::{aabb_intersects_world, ray_aabb_intersect},
     player::PlayerController,
@@ -579,12 +579,14 @@ struct InventoryInputRes<'w> {
 }
 
 /// Handles belt hotkeys (`1`–`5`), Subnautica-style `[R]` + Scroll Wheel battery swapper,
-/// `[Q]` physical battery/item dropping, and `[T]` throwable Noise Decoys.
+/// `[Q]` physical battery/item dropping, and `[RMB]` (or `[T]`) throwable Noise Decoys.
 #[allow(clippy::too_many_arguments)]
 fn inventory_input_system(
     keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
     mut wheel_reader: MessageReader<MouseWheel>,
     mut res: InventoryInputRes,
+    cursor_q: Query<&CursorOptions, With<PrimaryWindow>>,
     player_q: Query<(&PlayerController, &Transform)>,
     mut items_q: Query<(&mut WorldItemEntity, &Transform)>,
     mut spawn_item_writer: MessageWriter<SpawnWorldItemEvent>,
@@ -796,8 +798,14 @@ fn inventory_input_system(
         }
     }
 
-    // 4. `[T]` Throw an active Noise Decoy to lure Blind Acoustic Stalkers!
-    if keys.just_pressed(KeyCode::KeyT) && !inv.is_hands_occupied() {
+    // 4. `[RMB]` while holding Noise Decoy (or `[T]` quick-throw) to lure Blind Acoustic Stalkers!
+    let cursor_locked = cursor_q
+        .single()
+        .is_ok_and(|c| c.grab_mode != CursorGrabMode::None);
+    let rmb_held_decoy = cursor_locked
+        && mouse.just_pressed(MouseButton::Right)
+        && matches!(inv.active_item(), Some(BeltItem::NoiseDecoys { .. }));
+    if (rmb_held_decoy || keys.just_pressed(KeyCode::KeyT)) && !inv.is_hands_occupied() {
         if inv.consume_decoy() {
             let origin = cam_tf.translation + forward * 0.6;
             let vel = forward * 11.0 + Vec3::Y * 2.5;
@@ -858,6 +866,7 @@ struct InteractState<'w> {
 fn station_and_item_interact_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
     mut menus: InteractMenus,
     mut cursor_q: Query<&mut CursorOptions, With<PrimaryWindow>>,
     mut st: InteractState,
@@ -1060,9 +1069,9 @@ fn station_and_item_interact_system(
                         player_id: pid,
                         name: rp.info.name.clone(),
                     },
-                    key_badge: "E / H".to_string(),
+                    key_badge: "E / RMB".to_string(),
                     label: format!("Rescue {}", rp.info.name),
-                    sublabel: "[E] Drag • Hold [H] Aid Kit (4s)".to_string(),
+                    sublabel: "[E] Carry • Hold [RMB] Aid Kit (4s)".to_string(),
                     accent: TargetAccent::Interact,
                 });
             }
@@ -1200,19 +1209,26 @@ fn station_and_item_interact_system(
         crosshair_target.clear();
     }
 
-    // 2. Hold `[H]` to channel consumable Aid Kit revive on aimed/nearby downed teammate
+    // 2. Hold `[RMB]` while holding an Aid Kit (or `[H]`) to channel 4s revive on downed teammate
     let revive_target = match &crosshair_target.target {
         Some(LookTargetKind::DownedPlayer { player_id, name }) => {
             Some((*player_id, name.clone()))
         }
         _ => nearby_downed_for_revive.map(|(_, pid, name)| (pid, name)),
     };
-    if keys.pressed(KeyCode::KeyH) && !inv.is_hands_occupied() {
+    let cursor_locked = cursor_q
+        .single()
+        .is_ok_and(|c| c.grab_mode != CursorGrabMode::None);
+    let rmb_aid_kit = cursor_locked
+        && mouse.pressed(MouseButton::Right)
+        && matches!(inv.active_item(), Some(BeltItem::AidKit));
+    let holding_revive = rmb_aid_kit || keys.pressed(KeyCode::KeyH);
+    if holding_revive && !inv.is_hands_occupied() {
         if let Some((target_pid, name)) = revive_target {
             let has_aid = inv
                 .belt
                 .iter()
-                .any(|s| matches!(s, Some(crate::inventory::BeltItem::AidKit)));
+                .any(|s| matches!(s, Some(BeltItem::AidKit)));
             if has_aid {
                 if health.reviving_target != Some(target_pid) {
                     health.reviving_target = Some(target_pid);
@@ -2801,23 +2817,14 @@ mod tests {
         // Add living remote teammate outside -> 1 missing
         coop.remote_players.insert(
             2,
-            RemotePlayerData {
-                info: PlayerInfo {
+            RemotePlayerData::dummy_for_test(
+                PlayerInfo {
                     id: 2,
                     name: "P2".into(),
                     visor_rgb: [1.0, 1.0, 1.0],
                 },
-                entity: Entity::PLACEHOLDER,
-                head_entity: Entity::PLACEHOLDER,
-                flashlight_entity: Entity::PLACEHOLDER,
-                visor_material: Handle::default(),
-                target_feet_m: outside,
-                current_feet_m: outside,
-                target_yaw: 0.0,
-                target_pitch: 0.0,
-                crouching: false,
-                flashlight_on: true,
-            },
+                outside,
+            ),
         );
         remote_health.0.insert(2, LocalHealthPhase::Healthy);
         assert_eq!(

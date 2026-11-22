@@ -12,7 +12,7 @@ use crate::{
     audio_bridge::{AcousticBeaconState, PlaySpatialSoundEvent},
     gameplay::GameplayToast,
     health::PlayerHealthState,
-    inventory::PlayerInventory,
+    inventory::{BeltItem, PlayerInventory},
     net_bridge::{CoopMenuOpen, CoopState},
     physics::{
         PLAYER_HEIGHT_CROUCH_M, PLAYER_HEIGHT_STAND_M, aabb_intersects_world, ray_aabb_intersect,
@@ -141,7 +141,8 @@ fn voxel_interact_system(
     };
 
     let break_pressed = mouse.just_pressed(MouseButton::Left);
-    let place_pressed = mouse.just_pressed(MouseButton::Right);
+    let place_pressed = mouse.just_pressed(MouseButton::Right)
+        && matches!(inv.active_item(), Some(BeltItem::AcousticFoam { .. }));
     if !break_pressed && !place_pressed {
         return;
     }
@@ -301,29 +302,36 @@ fn voxel_interact_system(
     }
 }
 
-/// Press `G` to throw a glowing flare from belt inventory that bounces off voxel walls.
+/// Press `[RMB]` while holding Glow Flares (or `[G]` quick-throw) to toss a glowing flare
+/// that bounces off voxel walls and flash-stuns Stalkers on direct impact.
 #[allow(clippy::too_many_arguments)]
 fn throw_flare_system(
     keys: Res<ButtonInput<KeyCode>>,
-    screen: Res<AppScreen>,
-    menu_open: Res<CoopMenuOpen>,
-    shop_open: Res<ShopOverlayOpen>,
-    settings_open: Res<SettingsMenuOpen>,
-    health: Res<PlayerHealthState>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    gate: ToolGateRes,
+    cursor_q: Query<&CursorOptions, With<PrimaryWindow>>,
     mut inv: ResMut<PlayerInventory>,
     mut toast: ResMut<GameplayToast>,
     coop: Res<CoopState>,
     player_q: Query<&Transform, With<PlayerController>>,
     mut flare_writer: MessageWriter<SpawnFlareEvent>,
 ) {
-    if *screen != AppScreen::InGame
-        || menu_open.0
-        || shop_open.0
-        || settings_open.0
-        || !health.is_healthy()
+    if *gate.screen != AppScreen::InGame
+        || gate.menu_open.0
+        || gate.shop_open.0
+        || gate.settings_open.0
+        || !gate.health.is_healthy()
         || inv.is_hands_occupied()
-        || !keys.just_pressed(KeyCode::KeyG)
     {
+        return;
+    }
+    let cursor_locked = cursor_q
+        .single()
+        .is_ok_and(|c| c.grab_mode != CursorGrabMode::None);
+    let rmb_held_flare = cursor_locked
+        && mouse.just_pressed(MouseButton::Right)
+        && matches!(inv.active_item(), Some(BeltItem::Flares { .. }));
+    if !rmb_held_flare && !keys.just_pressed(KeyCode::KeyG) {
         return;
     }
     if !inv.consume_flare() {

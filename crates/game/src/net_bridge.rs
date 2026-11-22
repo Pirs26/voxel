@@ -8,8 +8,9 @@ use voxel_acoustics::{AcousticEvent, AcousticEventKind, Bands3};
 use voxel_audio_dsp::SynthClip;
 use voxel_core::{VoxelConfig, VoxelId, generate_world_with_tier};
 use voxel_net::{
-    ElevatorPhase, MonsterBehaviorState, NetEvent, NetSession, PlayerHealthStatus, PlayerId,
-    PlayerInfo, ReliableMessage, UnreliableDatagram, WorldItemNetState,
+    ElevatorPhase, HeldItemNetKind, MonsterBehaviorState, NetEvent, NetSession,
+    PlayerHealthStatus, PlayerId, PlayerInfo, ReliableMessage, UnreliableDatagram,
+    WorldItemNetState,
 };
 
 use crate::{
@@ -22,7 +23,7 @@ use crate::{
     health::{
         LocalHealthPhase, MonsterHitLocalPlayerEvent, PlayerHealthState, RemoteHealthMap,
     },
-    inventory::PlayerInventory,
+    inventory::{BeltItem, PlayerInventory},
     physics::PLAYER_EYE_STAND_M,
     player::{PlayerController, PlayerFlashlight},
     relic::{RemoveWorldItemEvent, SpawnWorldItemEvent, WorldItemEntity},
@@ -30,18 +31,19 @@ use crate::{
     settings::{AppScreen, SettingsMenuOpen, UserSettings},
     shed::ShopOverlayOpen,
     tools::{SpawnFlareEvent, StrikeStalkerEvent},
+    viewmodel::{PICKAXE_FRONT_TIP_PITCH_RAD, PICKAXE_REAR_TIP_PITCH_RAD, ViewmodelAnimationState},
     voxel_render::{LevelInfoResource, WorldResource},
 };
 
 pub const DEFAULT_LEVEL_SEED: u64 = 1337;
 
 pub const VISOR_PALETTE: [(&str, [f32; 3]); 6] = [
-    ("Cyan", [0.15, 0.92, 0.88]),
-    ("Amber", [1.0, 0.68, 0.14]),
-    ("Emerald", [0.22, 0.95, 0.42]),
-    ("Crimson", [0.98, 0.24, 0.28]),
-    ("Violet", [0.72, 0.35, 1.0]),
-    ("Ice", [0.88, 0.94, 1.0]),
+    ("Cyan", [0.04, 0.90, 0.88]),
+    ("Amber", [1.0, 0.48, 0.04]),
+    ("Emerald", [0.06, 0.92, 0.24]),
+    ("Crimson", [0.96, 0.08, 0.12]),
+    ("Violet", [0.58, 0.12, 1.0]),
+    ("Ice", [0.28, 0.72, 1.0]),
 ];
 
 pub fn visor_idx_from_rgb(rgb: [f32; 3]) -> usize {
@@ -64,7 +66,12 @@ pub struct RemotePlayerData {
     pub info: PlayerInfo,
     pub entity: Entity,
     pub head_entity: Entity,
+    pub left_arm_entity: Entity,
+    pub right_arm_entity: Entity,
     pub flashlight_entity: Entity,
+    pub pickaxe_entity: Entity,
+    pub tool_entities: [(HeldItemNetKind, Entity); 6],
+    pub fl_lens_on_entity: Entity,
     pub visor_material: Handle<StandardMaterial>,
     pub target_feet_m: Vec3,
     pub current_feet_m: Vec3,
@@ -72,6 +79,41 @@ pub struct RemotePlayerData {
     pub target_pitch: f32,
     pub crouching: bool,
     pub flashlight_on: bool,
+    pub held_item: HeldItemNetKind,
+    pub pickaxe_swing_s: f32,
+}
+
+#[cfg(test)]
+impl RemotePlayerData {
+    pub fn dummy_for_test(info: PlayerInfo, feet: Vec3) -> Self {
+        Self {
+            info,
+            entity: Entity::PLACEHOLDER,
+            head_entity: Entity::PLACEHOLDER,
+            left_arm_entity: Entity::PLACEHOLDER,
+            right_arm_entity: Entity::PLACEHOLDER,
+            flashlight_entity: Entity::PLACEHOLDER,
+            pickaxe_entity: Entity::PLACEHOLDER,
+            tool_entities: [
+                (HeldItemNetKind::Flashlight, Entity::PLACEHOLDER),
+                (HeldItemNetKind::GlowFlare, Entity::PLACEHOLDER),
+                (HeldItemNetKind::AcousticFoam, Entity::PLACEHOLDER),
+                (HeldItemNetKind::NoiseDecoy, Entity::PLACEHOLDER),
+                (HeldItemNetKind::AidKit, Entity::PLACEHOLDER),
+                (HeldItemNetKind::BonusCrystal, Entity::PLACEHOLDER),
+            ],
+            fl_lens_on_entity: Entity::PLACEHOLDER,
+            visor_material: Handle::default(),
+            target_feet_m: feet,
+            current_feet_m: feet,
+            target_yaw: 0.0,
+            target_pitch: 0.0,
+            crouching: false,
+            flashlight_on: true,
+            held_item: HeldItemNetKind::Flashlight,
+            pickaxe_swing_s: 0.0,
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -469,12 +511,19 @@ impl Plugin for NetBridgePlugin {
     }
 }
 
+/// Computes a saturated linear HDR emissive color so tonemapping preserves rich visor color
+/// instead of desaturating into blinding white.
+fn visor_emissive_linear(rgb: [f32; 3]) -> LinearRgba {
+    let lin = Color::srgb(rgb[0], rgb[1], rgb[2]).to_linear();
+    LinearRgba::new(lin.red * 2.4, lin.green * 2.4, lin.blue * 2.4, 1.0)
+}
+
 fn make_visor_material(rgb: [f32; 3]) -> StandardMaterial {
     StandardMaterial {
         base_color: Color::srgb(rgb[0], rgb[1], rgb[2]),
-        emissive: LinearRgba::new(rgb[0] * 7.5, rgb[1] * 7.5, rgb[2] * 7.5, 1.0),
+        emissive: visor_emissive_linear(rgb),
         unlit: false,
-        perceptual_roughness: 0.2,
+        perceptual_roughness: 0.25,
         ..default()
     }
 }
@@ -491,10 +540,88 @@ fn spawn_remote_avatar(
         perceptual_roughness: 0.85,
         ..default()
     });
+    let glove_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.32, 0.28, 0.22),
+        perceptual_roughness: 0.85,
+        ..default()
+    });
+    let dark_steel = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.20, 0.22, 0.25),
+        perceptual_roughness: 0.42,
+        metallic: 0.78,
+        ..default()
+    });
+    let dark_iron = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.14, 0.15, 0.17),
+        perceptual_roughness: 0.50,
+        metallic: 0.82,
+        ..default()
+    });
+    let timber_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.46, 0.29, 0.15),
+        perceptual_roughness: 0.85,
+        ..default()
+    });
+    let lens_on_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.94, 0.76),
+        emissive: LinearRgba::new(4.5, 3.6, 1.8, 1.0),
+        perceptual_roughness: 0.15,
+        ..default()
+    });
+    let flare_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.80, 0.14, 0.12),
+        perceptual_roughness: 0.65,
+        ..default()
+    });
+    let flare_tip_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.42, 0.14),
+        emissive: LinearRgba::new(5.5, 1.8, 0.4, 1.0),
+        ..default()
+    });
+    let foam_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.14, 0.64, 0.60),
+        perceptual_roughness: 0.45,
+        ..default()
+    });
+    let white_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.92, 0.93, 0.95),
+        perceptual_roughness: 0.50,
+        ..default()
+    });
+    let decoy_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.90, 0.60, 0.12),
+        perceptual_roughness: 0.45,
+        ..default()
+    });
+    let aid_red_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.88, 0.14, 0.16),
+        emissive: LinearRgba::new(0.8, 0.08, 0.08, 1.0),
+        ..default()
+    });
+    let crystal_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.24, 0.90, 0.98),
+        emissive: LinearRgba::new(1.2, 4.2, 5.2, 1.0),
+        perceptual_roughness: 0.22,
+        ..default()
+    });
     let visor_mat = materials.add(make_visor_material(info.visor_rgb));
 
+    let arm_sleeve_mesh = meshes.add(Cuboid::new(0.15, 0.44, 0.15));
+    let arm_cuff_mesh = meshes.add(Cuboid::new(0.165, 0.08, 0.165));
+    let arm_glove_mesh = meshes.add(Cuboid::new(0.16, 0.14, 0.17));
+
     let mut head_entity = Entity::PLACEHOLDER;
+    let mut left_arm_entity = Entity::PLACEHOLDER;
+    let mut right_arm_entity = Entity::PLACEHOLDER;
     let mut flashlight_entity = Entity::PLACEHOLDER;
+    let mut pickaxe_entity = Entity::PLACEHOLDER;
+    let mut fl_ent = Entity::PLACEHOLDER;
+    let mut fl_lens_on_entity = Entity::PLACEHOLDER;
+    let mut flare_ent = Entity::PLACEHOLDER;
+    let mut foam_ent = Entity::PLACEHOLDER;
+    let mut decoy_ent = Entity::PLACEHOLDER;
+    let mut aid_ent = Entity::PLACEHOLDER;
+    let mut crystal_ent = Entity::PLACEHOLDER;
 
     let body_entity = commands
         .spawn((
@@ -513,7 +640,7 @@ fn spawn_remote_avatar(
             head_entity = parent
                 .spawn((
                     Mesh3d(meshes.add(Cuboid::new(0.42, 0.42, 0.42))),
-                    MeshMaterial3d(suit_mat),
+                    MeshMaterial3d(suit_mat.clone()),
                     Transform::from_xyz(0.0, 1.46, 0.0),
                 ))
                 .with_children(|head| {
@@ -546,6 +673,226 @@ fn spawn_remote_avatar(
                         .id();
                 })
                 .id();
+
+            // Left articulated arm + hand holding miner's Pickaxe (downward-curved head!)
+            left_arm_entity = parent
+                .spawn((
+                    Transform::from_xyz(-0.36, 1.06, 0.0),
+                    Visibility::Inherited,
+                ))
+                .with_children(|arm| {
+                    arm.spawn((
+                        Mesh3d(arm_sleeve_mesh.clone()),
+                        MeshMaterial3d(suit_mat.clone()),
+                        Transform::from_xyz(0.0, -0.20, 0.0),
+                    ));
+                    arm.spawn((
+                        Mesh3d(arm_cuff_mesh.clone()),
+                        MeshMaterial3d(dark_steel.clone()),
+                        Transform::from_xyz(0.0, -0.43, 0.0),
+                    ));
+                    arm.spawn((
+                        Mesh3d(arm_glove_mesh.clone()),
+                        MeshMaterial3d(glove_mat.clone()),
+                        Transform::from_xyz(0.0, -0.52, -0.01),
+                    ));
+
+                    // Third-person Pickaxe gripped in left hand
+                    pickaxe_entity = arm
+                        .spawn((
+                            Transform::from_xyz(0.0, -0.52, -0.10)
+                                .with_rotation(Quat::from_rotation_x(-1.15)),
+                            Visibility::Inherited,
+                        ))
+                        .with_children(|pick| {
+                            pick.spawn((
+                                Mesh3d(meshes.add(Cuboid::new(0.045, 0.56, 0.045))),
+                                MeshMaterial3d(timber_mat),
+                                Transform::from_xyz(0.0, 0.16, 0.0),
+                            ));
+                            pick.spawn((
+                                Mesh3d(meshes.add(Cuboid::new(0.065, 0.07, 0.22))),
+                                MeshMaterial3d(dark_iron.clone()),
+                                Transform::from_xyz(0.0, 0.44, 0.0),
+                            ));
+                            pick.spawn((
+                                Mesh3d(meshes.add(Cuboid::new(0.045, 0.05, 0.18))),
+                                MeshMaterial3d(dark_iron.clone()),
+                                Transform::from_xyz(0.0, 0.41, -0.17)
+                                    .with_rotation(Quat::from_rotation_x(PICKAXE_FRONT_TIP_PITCH_RAD)),
+                            ));
+                            pick.spawn((
+                                Mesh3d(meshes.add(Cuboid::new(0.05, 0.045, 0.15))),
+                                MeshMaterial3d(dark_iron.clone()),
+                                Transform::from_xyz(0.0, 0.415, 0.15)
+                                    .with_rotation(Quat::from_rotation_x(PICKAXE_REAR_TIP_PITCH_RAD)),
+                            ));
+                        })
+                        .id();
+                })
+                .id();
+
+            // Right articulated arm + hand holding active belt tool (visible to teammates!)
+            right_arm_entity = parent
+                .spawn((
+                    Transform::from_xyz(0.36, 1.06, 0.0),
+                    Visibility::Inherited,
+                ))
+                .with_children(|arm| {
+                    arm.spawn((
+                        Mesh3d(arm_sleeve_mesh),
+                        MeshMaterial3d(suit_mat),
+                        Transform::from_xyz(0.0, -0.20, 0.0),
+                    ));
+                    arm.spawn((
+                        Mesh3d(arm_cuff_mesh),
+                        MeshMaterial3d(dark_steel.clone()),
+                        Transform::from_xyz(0.0, -0.43, 0.0),
+                    ));
+                    arm.spawn((
+                        Mesh3d(arm_glove_mesh),
+                        MeshMaterial3d(glove_mat),
+                        Transform::from_xyz(0.0, -0.52, -0.01),
+                    ));
+
+                    // Tool grip anchor at the right hand
+                    arm.spawn((
+                        Transform::from_xyz(0.0, -0.53, -0.08),
+                        Visibility::Inherited,
+                    ))
+                    .with_children(|hand| {
+                        // 1. Flashlight
+                        fl_ent = hand
+                            .spawn((Transform::default(), Visibility::Inherited))
+                            .with_children(|fl| {
+                                fl.spawn((
+                                    Mesh3d(meshes.add(Cuboid::new(0.085, 0.085, 0.30))),
+                                    MeshMaterial3d(dark_steel.clone()),
+                                    Transform::from_xyz(0.0, 0.0, -0.10),
+                                ));
+                                fl.spawn((
+                                    Mesh3d(meshes.add(Cuboid::new(0.11, 0.11, 0.07))),
+                                    MeshMaterial3d(dark_iron.clone()),
+                                    Transform::from_xyz(0.0, 0.0, -0.25),
+                                ));
+                                fl_lens_on_entity = fl
+                                    .spawn((
+                                        Mesh3d(meshes.add(Cuboid::new(0.09, 0.09, 0.02))),
+                                        MeshMaterial3d(lens_on_mat),
+                                        Transform::from_xyz(0.0, 0.0, -0.29),
+                                        Visibility::Inherited,
+                                    ))
+                                    .id();
+                            })
+                            .id();
+
+                        // 2. Glow Flare
+                        flare_ent = hand
+                            .spawn((
+                                Transform::from_xyz(0.0, 0.04, -0.04),
+                                Visibility::Hidden,
+                            ))
+                            .with_children(|f| {
+                                f.spawn((
+                                    Mesh3d(meshes.add(Cuboid::new(0.06, 0.30, 0.06))),
+                                    MeshMaterial3d(flare_mat),
+                                    Transform::default(),
+                                ));
+                                f.spawn((
+                                    Mesh3d(meshes.add(Cuboid::new(0.07, 0.06, 0.07))),
+                                    MeshMaterial3d(flare_tip_mat),
+                                    Transform::from_xyz(0.0, 0.17, 0.0),
+                                ));
+                            })
+                            .id();
+
+                        // 3. Acoustic Foam Canister
+                        foam_ent = hand
+                            .spawn((
+                                Transform::from_xyz(0.0, 0.02, -0.06),
+                                Visibility::Hidden,
+                            ))
+                            .with_children(|fm| {
+                                fm.spawn((
+                                    Mesh3d(meshes.add(Cuboid::new(0.11, 0.28, 0.11))),
+                                    MeshMaterial3d(foam_mat),
+                                    Transform::default(),
+                                ));
+                                fm.spawn((
+                                    Mesh3d(meshes.add(Cuboid::new(0.04, 0.04, 0.11))),
+                                    MeshMaterial3d(white_mat.clone()),
+                                    Transform::from_xyz(0.0, 0.16, -0.06),
+                                ));
+                            })
+                            .id();
+
+                        // 4. Noise Decoy
+                        decoy_ent = hand
+                            .spawn((
+                                Transform::from_xyz(0.0, 0.01, -0.06),
+                                Visibility::Hidden,
+                            ))
+                            .with_children(|dc| {
+                                dc.spawn((
+                                    Mesh3d(meshes.add(Cuboid::new(0.14, 0.17, 0.10))),
+                                    MeshMaterial3d(decoy_mat),
+                                    Transform::default(),
+                                ));
+                                dc.spawn((
+                                    Mesh3d(meshes.add(Cuboid::new(0.02, 0.10, 0.02))),
+                                    MeshMaterial3d(dark_steel.clone()),
+                                    Transform::from_xyz(0.04, 0.12, 0.0),
+                                ));
+                            })
+                            .id();
+
+                        // 5. Aid Kit
+                        aid_ent = hand
+                            .spawn((
+                                Transform::from_xyz(0.0, 0.0, -0.07),
+                                Visibility::Hidden,
+                            ))
+                            .with_children(|aid| {
+                                aid.spawn((
+                                    Mesh3d(meshes.add(Cuboid::new(0.20, 0.14, 0.10))),
+                                    MeshMaterial3d(white_mat),
+                                    Transform::default(),
+                                ));
+                                aid.spawn((
+                                    Mesh3d(meshes.add(Cuboid::new(0.09, 0.03, 0.02))),
+                                    MeshMaterial3d(aid_red_mat.clone()),
+                                    Transform::from_xyz(0.0, 0.0, -0.052),
+                                ));
+                                aid.spawn((
+                                    Mesh3d(meshes.add(Cuboid::new(0.03, 0.09, 0.02))),
+                                    MeshMaterial3d(aid_red_mat),
+                                    Transform::from_xyz(0.0, 0.0, -0.052),
+                                ));
+                            })
+                            .id();
+
+                        // 6. Bonus Crystal
+                        crystal_ent = hand
+                            .spawn((
+                                Transform::from_xyz(0.0, 0.04, -0.05),
+                                Visibility::Hidden,
+                            ))
+                            .with_children(|cr| {
+                                cr.spawn((
+                                    Mesh3d(meshes.add(Cuboid::new(0.08, 0.24, 0.08))),
+                                    MeshMaterial3d(crystal_mat),
+                                    Transform::from_rotation(Quat::from_euler(
+                                        EulerRot::YXZ,
+                                        0.35,
+                                        0.10,
+                                        -0.12,
+                                    )),
+                                ));
+                            })
+                            .id();
+                    });
+                })
+                .id();
         })
         .id();
 
@@ -553,7 +900,19 @@ fn spawn_remote_avatar(
         info: info.clone(),
         entity: body_entity,
         head_entity,
+        left_arm_entity,
+        right_arm_entity,
         flashlight_entity,
+        pickaxe_entity,
+        tool_entities: [
+            (HeldItemNetKind::Flashlight, fl_ent),
+            (HeldItemNetKind::GlowFlare, flare_ent),
+            (HeldItemNetKind::AcousticFoam, foam_ent),
+            (HeldItemNetKind::NoiseDecoy, decoy_ent),
+            (HeldItemNetKind::AidKit, aid_ent),
+            (HeldItemNetKind::BonusCrystal, crystal_ent),
+        ],
+        fl_lens_on_entity,
         visor_material: visor_mat,
         target_feet_m: spawn_feet,
         current_feet_m: spawn_feet,
@@ -561,6 +920,8 @@ fn spawn_remote_avatar(
         target_pitch: 0.0,
         crouching: false,
         flashlight_on: true,
+        held_item: HeldItemNetKind::Flashlight,
+        pickaxe_swing_s: 0.0,
     }
 }
 
@@ -844,12 +1205,7 @@ fn poll_network_events_system(
                     }
                     if let Some(mut mat) = materials.get_mut(&rp.visor_material) {
                         mat.base_color = Color::srgb(visor_rgb[0], visor_rgb[1], visor_rgb[2]);
-                        mat.emissive = LinearRgba::new(
-                            visor_rgb[0] * 7.5,
-                            visor_rgb[1] * 7.5,
-                            visor_rgb[2] * 7.5,
-                            1.0,
-                        );
+                        mat.emissive = visor_emissive_linear(visor_rgb);
                     }
                 }
 
@@ -1166,6 +1522,8 @@ fn poll_network_events_system(
                 pitch,
                 crouching,
                 flashlight_on,
+                held_item,
+                pickaxe_swing,
                 ..
             } => {
                 if let Some(rp) = coop.remote_players.get_mut(&player_id) {
@@ -1174,6 +1532,10 @@ fn poll_network_events_system(
                     rp.target_pitch = pitch;
                     rp.crouching = crouching;
                     rp.flashlight_on = flashlight_on;
+                    rp.held_item = held_item;
+                    if pickaxe_swing && rp.pickaxe_swing_s <= 0.02 {
+                        rp.pickaxe_swing_s = 0.28;
+                    }
                 }
             }
             NetEvent::VoiceFrame {
@@ -1271,9 +1633,12 @@ fn pending_disconnect_flush_system(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn send_local_pose_system(
     time: Res<Time>,
     screen: Res<AppScreen>,
+    inv: Res<PlayerInventory>,
+    vm_anim: Option<Res<ViewmodelAnimationState>>,
     mut coop: ResMut<CoopState>,
     player_q: Query<&PlayerController>,
     fl_q: Query<&PlayerFlashlight>,
@@ -1293,6 +1658,20 @@ fn send_local_pose_system(
         .single()
         .map(|f| f.on && f.battery > 0.0)
         .unwrap_or(false);
+    let held_item = if inv.is_hands_occupied() {
+        HeldItemNetKind::TwoHandedCarry
+    } else {
+        match inv.active_item() {
+            Some(BeltItem::Flashlight) => HeldItemNetKind::Flashlight,
+            Some(BeltItem::Flares { .. }) => HeldItemNetKind::GlowFlare,
+            Some(BeltItem::AcousticFoam { .. }) => HeldItemNetKind::AcousticFoam,
+            Some(BeltItem::NoiseDecoys { .. }) => HeldItemNetKind::NoiseDecoy,
+            Some(BeltItem::AidKit) => HeldItemNetKind::AidKit,
+            Some(BeltItem::BonusLoot { .. }) => HeldItemNetKind::BonusCrystal,
+            None => HeldItemNetKind::None,
+        }
+    };
+    let pickaxe_swing = vm_anim.as_ref().is_some_and(|a| a.swing_timer_s > 0.0);
 
     coop.pose_tick = coop.pose_tick.wrapping_add(1);
     let tick = coop.pose_tick;
@@ -1306,6 +1685,8 @@ fn send_local_pose_system(
             pitch: pc.pitch,
             crouching: pc.crouching,
             flashlight_on,
+            held_item,
+            pickaxe_swing,
         });
     }
 }
@@ -1315,11 +1696,15 @@ fn interpolate_remote_players_system(
     mut coop: ResMut<CoopState>,
     mut tf_q: Query<&mut Transform>,
     mut light_q: Query<&mut SpotLight>,
+    mut vis_q: Query<&mut Visibility>,
 ) {
-    let alpha = (time.delta_secs() * 14.0).clamp(0.0, 1.0);
+    let dt = time.delta_secs().min(0.05);
+    let alpha = (dt * 14.0).clamp(0.0, 1.0);
 
     for rp in coop.remote_players.values_mut() {
         rp.current_feet_m = rp.current_feet_m.lerp(rp.target_feet_m, alpha);
+        rp.pickaxe_swing_s = (rp.pickaxe_swing_s - dt).max(0.0);
+
         if let Ok(mut tf) = tf_q.get_mut(rp.entity) {
             tf.translation = rp.current_feet_m;
             tf.rotation = Quat::from_rotation_y(rp.target_yaw);
@@ -1328,6 +1713,84 @@ fn interpolate_remote_players_system(
             let head_y = if rp.crouching { 1.05 } else { 1.46 };
             head_tf.translation.y = head_y;
             head_tf.rotation = Quat::from_rotation_x(rp.target_pitch);
+        }
+        let shoulder_y = if rp.crouching { 0.80 } else { 1.06 };
+        let two_handed = rp.held_item == HeldItemNetKind::TwoHandedCarry;
+
+        if let Ok(mut left_tf) = tf_q.get_mut(rp.left_arm_entity) {
+            left_tf.translation.y = shoulder_y;
+            if two_handed {
+                left_tf.rotation = Quat::from_euler(
+                    EulerRot::YXZ,
+                    -0.25,
+                    0.82 + rp.target_pitch * 0.40,
+                    0.0,
+                );
+            } else {
+                let swing_t = (rp.pickaxe_swing_s / 0.28).clamp(0.0, 1.0);
+                let swing_arc = (swing_t * std::f32::consts::PI).sin() * 1.15;
+                left_tf.rotation = Quat::from_euler(
+                    EulerRot::YXZ,
+                    0.06,
+                    0.42 + rp.target_pitch * 0.35 + swing_arc,
+                    0.0,
+                );
+            }
+        }
+        if let Ok(mut right_tf) = tf_q.get_mut(rp.right_arm_entity) {
+            right_tf.translation.y = shoulder_y;
+            if two_handed {
+                right_tf.rotation = Quat::from_euler(
+                    EulerRot::YXZ,
+                    0.25,
+                    0.82 + rp.target_pitch * 0.40,
+                    0.0,
+                );
+            } else if rp.held_item == HeldItemNetKind::None {
+                right_tf.rotation = Quat::from_rotation_x(0.10);
+            } else {
+                right_tf.rotation = Quat::from_euler(
+                    EulerRot::YXZ,
+                    -0.08,
+                    0.68 + rp.target_pitch * 0.65,
+                    0.0,
+                );
+            }
+        }
+        if let Ok(mut pick_vis) = vis_q.get_mut(rp.pickaxe_entity) {
+            let desired = if two_handed {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
+            if *pick_vis != desired {
+                *pick_vis = desired;
+            }
+        }
+        for &(kind, tool_ent) in &rp.tool_entities {
+            if let Ok(mut vis) = vis_q.get_mut(tool_ent) {
+                let desired = if !two_handed && rp.held_item == kind {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                };
+                if *vis != desired {
+                    *vis = desired;
+                }
+            }
+        }
+        if let Ok(mut lens_vis) = vis_q.get_mut(rp.fl_lens_on_entity) {
+            let desired = if !two_handed
+                && rp.held_item == HeldItemNetKind::Flashlight
+                && rp.flashlight_on
+            {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            if *lens_vis != desired {
+                *lens_vis = desired;
+            }
         }
         if let Ok(mut spot) = light_q.get_mut(rp.flashlight_entity) {
             spot.intensity = if rp.flashlight_on { 320_000.0 } else { 0.0 };
