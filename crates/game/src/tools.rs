@@ -181,10 +181,11 @@ fn voxel_interact_system(
         }
 
         if let Some((_, monster_id, hit_pos_m)) = best_stalker {
-            *melee_cd_s = 0.95;
+            let reinforced = inv.passive.reinforced_pickaxe;
+            *melee_cd_s = if reinforced { 0.85 } else { 0.95 };
             strike_writer.write(StrikeStalkerEvent {
                 monster_id,
-                damage: 1,
+                damage: if reinforced { 2 } else { 1 },
                 stun_s: 1.15,
                 knockback_dir: dir,
                 hit_pos_m,
