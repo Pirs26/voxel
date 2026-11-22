@@ -51,10 +51,10 @@ use crate::{
         DECOY_ACTIVE_DURATION_S, DECOY_PULSE_INTERVAL_S, RELIC_SCRAPE_INTERVAL_S,
         RemoveWorldItemEvent, SpawnWorldItemEvent, WorldItemEntity, WorldItemRegistry,
         belt_item_to_world_kind, collect_shed_items_snapshot, create_cave_relic_states,
-        default_starter_shed_items, is_fallen_body, is_heavy_relic, is_pos_in_shed,
-        is_two_handed_world_item, relic_carry_speed_mult, relic_is_scraping, saved_to_world_kind,
-        spawn_world_item_visual, to_net_state, try_pickup_world_item_into_inventory,
-        world_item_display_name,
+        create_cave_salvage_states, default_starter_shed_items, is_fallen_body, is_heavy_relic,
+        is_pos_in_shed, is_two_handed_world_item, relic_carry_speed_mult, relic_is_scraping,
+        saved_to_world_kind, spawn_world_item_visual, to_net_state,
+        try_pickup_world_item_into_inventory, world_item_display_name,
     },
     save::{
         CampaignState, SaveSlotBrowser, SavedPlayerProfile, UNRECOVERED_COMPANION_FINE,
@@ -1955,6 +1955,18 @@ fn elevator_runtime_system(
         // Spawn depth-scaled relics & bonus loot
         let cave_items = create_cave_relic_states(&level_info.0, &mut item_reg.next_id);
         for net_state in cave_items {
+            coop.send_world_item_spawn(net_state.clone());
+            spawn_world_item_visual(&mut commands, &mut meshes, &mut materials, &net_state);
+        }
+
+        // Spawn scarce partially-used emergency salvage inside CrackedRock alcoves
+        let salvage_items = create_cave_salvage_states(
+            elevator.cave_seed,
+            elevator.depth_tier,
+            &level_info.0.salvage_spawns_m,
+            &mut || item_reg.alloc_id(),
+        );
+        for net_state in salvage_items {
             coop.send_world_item_spawn(net_state.clone());
             spawn_world_item_visual(&mut commands, &mut meshes, &mut materials, &net_state);
         }

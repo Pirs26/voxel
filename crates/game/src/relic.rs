@@ -364,6 +364,63 @@ pub fn create_cave_relic_states(
     items
 }
 
+#[inline]
+fn mix_salvage_seed(seed: u64, depth_tier: u8, idx: usize) -> u64 {
+    let mut x = seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(u64::from(depth_tier).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+        .wrapping_add((idx as u64).wrapping_add(1).wrapping_mul(0x94D0_49BB_1331_11EB));
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
+/// Builds deterministic networked states for scarce partially-used emergency salvage items
+/// hidden inside or behind breakable `CrackedRock` cave alcoves.
+///
+/// Salvage items are intentionally partially depleted so they reward exploration and clutch
+/// survival without replacing the Base Shed Supply Terminal economy.
+pub fn create_cave_salvage_states(
+    seed: u64,
+    depth_tier: u8,
+    spawns_m: &[Vec3],
+    alloc_id: &mut impl FnMut() -> u32,
+) -> Vec<WorldItemNetState> {
+    let mut items = Vec::with_capacity(spawns_m.len());
+
+    for (idx, &spawn_pos) in spawns_m.iter().enumerate() {
+        let h = mix_salvage_seed(seed, depth_tier, idx);
+        let kind = match h % 4 {
+            0 => {
+                // Partially-charged Battery Cell: 22%..=55% (0.22..=0.55)
+                let pct = 22 + ((h >> 8) % 34) as u32;
+                let charge = (pct as f32 / 100.0).clamp(0.22, 0.55);
+                WorldItemKind::BatteryCell { charge }
+            }
+            1 => WorldItemKind::FlarePack { count: 1 },
+            2 => {
+                let charges = 2 + ((h >> 8) & 1) as u8;
+                WorldItemKind::FoamCanister { charges }
+            }
+            _ => WorldItemKind::NoiseDecoy { count: 1 },
+        };
+
+        items.push(WorldItemNetState {
+            id: alloc_id(),
+            kind,
+            pos_m: spawn_pos + Vec3::Y * 0.20,
+            vel_m: Vec3::ZERO,
+            in_shed: false,
+            carried_by: Vec::new(),
+            active_timer_s: None,
+        });
+    }
+
+    items
+}
+
 /// Converts a live [`WorldItemEntity`] and its current world position into a [`WorldItemNetState`].
 pub fn to_net_state(ent: &WorldItemEntity, pos_m: Vec3) -> WorldItemNetState {
     WorldItemNetState {
@@ -1115,5 +1172,107 @@ mod tests {
                 "WorldItem PointLight must live on a dedicated child entity with no Mesh3d"
             );
         }
+    }
+
+    #[test]
+    fn cave_salvage_states_are_deterministic_partial_use_and_pickup_compatible() {
+        let spawns = [
+            Vec3::new(12.0, 29.0, 14.0),
+            Vec3::new(-18.0, 29.0, 22.0),
+            Vec3::new(24.0, 28.1, -19.0),
+        ];
+
+        // 1. Determinism for identical (seed, depth_tier, spawns_m)
+        let mut next_a = 100u32;
+        let mut next_b = 100u32;
+        let items_a = create_cave_salvage_states(4242, 2, &spawns, &mut || {
+            let id = next_a;
+            next_a += 1;
+            id
+        });
+        let items_b = create_cave_salvage_states(4242, 2, &spawns, &mut || {
+            let id = next_b;
+            next_b += 1;
+            id
+        });
+        assert_eq!(items_a, items_b);
+        assert_eq!(items_a.len(), spawns.len());
+
+        // 2. Sweep seeds & tiers to verify scarce partial-use bounds, pickup, and save roundtrip
+        let mut saw_battery = false;
+        let mut saw_flare = false;
+        let mut saw_foam_2 = false;
+        let mut saw_foam_3 = false;
+        let mut saw_decoy = false;
+
+        for tier in 1..=3 {
+            for seed in 1..=48u64 {
+                let mut reg = WorldItemRegistry::default();
+                let batch =
+                    create_cave_salvage_states(seed * 7919, tier, &spawns, &mut || reg.alloc_id());
+                assert_eq!(batch.len(), spawns.len());
+
+                for (idx, st) in batch.iter().enumerate() {
+                    assert!(!st.in_shed);
+                    assert_eq!(st.vel_m, Vec3::ZERO);
+                    assert_eq!(st.pos_m, spawns[idx] + Vec3::Y * 0.20);
+                    assert!(st.carried_by.is_empty());
+                    assert!(st.active_timer_s.is_none());
+
+                    match st.kind {
+                        WorldItemKind::BatteryCell { charge } => {
+                            saw_battery = true;
+                            assert!(
+                                (0.20..=0.55).contains(&charge) && charge >= 0.22,
+                                "salvage battery charge {charge} out of scarce 0.22..=0.55 bounds"
+                            );
+                        }
+                        WorldItemKind::FlarePack { count } => {
+                            saw_flare = true;
+                            assert_eq!(count, 1, "salvage emergency flare must have count == 1");
+                        }
+                        WorldItemKind::FoamCanister { charges } => {
+                            assert!(
+                                (2..=3).contains(&charges),
+                                "salvage foam canister charges {charges} out of 2..=3 bounds"
+                            );
+                            if charges == 2 {
+                                saw_foam_2 = true;
+                            }
+                            if charges == 3 {
+                                saw_foam_3 = true;
+                            }
+                        }
+                        WorldItemKind::NoiseDecoy { count } => {
+                            saw_decoy = true;
+                            assert_eq!(count, 1, "salvage noise decoy must have count == 1");
+                        }
+                        ref other => panic!("unexpected salvage WorldItemKind: {other:?}"),
+                    }
+
+                    // Roundtrip through SavedWorldItemKind
+                    let saved = world_kind_to_saved(&st.kind);
+                    let restored = saved_to_world_kind(&saved);
+                    assert_eq!(restored, st.kind);
+
+                    // Pickup compatibility into empty inventory
+                    let mut inv = PlayerInventory::starter();
+                    inv.belt = vec![None, None, None];
+                    inv.belt_capacity = 3;
+                    inv.battery_pouch.clear();
+                    assert!(
+                        try_pickup_world_item_into_inventory(&mut inv, &st.kind).is_ok(),
+                        "salvage item {:?} must be pickable into inventory",
+                        st.kind
+                    );
+                }
+            }
+        }
+
+        assert!(saw_battery, "expected salvage generator to produce BatteryCell");
+        assert!(saw_flare, "expected salvage generator to produce FlarePack");
+        assert!(saw_foam_2, "expected salvage generator to produce FoamCanister(2)");
+        assert!(saw_foam_3, "expected salvage generator to produce FoamCanister(3)");
+        assert!(saw_decoy, "expected salvage generator to produce NoiseDecoy");
     }
 }

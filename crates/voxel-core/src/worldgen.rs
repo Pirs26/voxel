@@ -57,6 +57,8 @@ pub struct GeneratedLevelInfo {
     pub relic_spawns_m: Vec<Vec3>,
     /// Guaranteed walkable spawn positions for small bonus loot items (2-4).
     pub bonus_loot_spawns_m: Vec<Vec3>,
+    /// Guaranteed walkable spawn positions for scarce partially-used emergency salvage behind CrackedRock alcoves (2-3).
+    pub salvage_spawns_m: Vec<Vec3>,
     /// Guaranteed walkable spawn positions for blind acoustic predators (1 for T1, 2 for T2-T3).
     pub monster_spawns_m: Vec<Vec3>,
 }
@@ -209,8 +211,15 @@ pub fn regenerate_underground(
 
     // 2. Carve a claustrophobic tunnel-maze labyrinth around the central shaft with
     //    breakable `CrackedRock` walls sealing shortcuts, flanking loops, and relic vaults.
-    let (cavern_center, alcove_center, relic_voxels, bonus_voxels, monster_voxels, crystal_spots) =
-        carve_tunnel_maze(world, cave_seed, tier, cx, cz, cave_floor_y, shed_floor_y);
+    let (
+        cavern_center,
+        alcove_center,
+        relic_voxels,
+        bonus_voxels,
+        salvage_voxels,
+        monster_voxels,
+        crystal_spots,
+    ) = carve_tunnel_maze(world, cave_seed, tier, cx, cz, cave_floor_y, shed_floor_y);
 
     // 3. Build unobstructed 7x7 vertical steel mineshaft strictly below `shed_floor_y`.
     build_shaft(world, cx, cz, cave_floor_y, shed_floor_y);
@@ -223,13 +232,18 @@ pub fn regenerate_underground(
         }
     }
 
-    // 5. Guarantee walkable spawn points for relics, bonus loot, and blind predators.
+    // 5. Guarantee walkable spawn points for relics, bonus loot, scarce salvage, and blind predators.
     let relic_spawns_m = relic_voxels
         .into_iter()
         .map(|v| ensure_walkable_spawn(world, v, VoxelId::CaveStone, shed_floor_y))
         .collect();
 
     let bonus_loot_spawns_m = bonus_voxels
+        .into_iter()
+        .map(|v| ensure_walkable_spawn(world, v, VoxelId::CaveDirt, shed_floor_y))
+        .collect();
+
+    let salvage_spawns_m = salvage_voxels
         .into_iter()
         .map(|v| ensure_walkable_spawn(world, v, VoxelId::CaveDirt, shed_floor_y))
         .collect();
@@ -254,6 +268,7 @@ pub fn regenerate_underground(
         alcove_center,
         relic_spawns_m,
         bonus_loot_spawns_m,
+        salvage_spawns_m,
         monster_spawns_m,
     )
 }
@@ -270,6 +285,7 @@ fn carve_tunnel_maze(
 ) -> (
     IVec3,
     IVec3,
+    Vec<IVec3>,
     Vec<IVec3>,
     Vec<IVec3>,
     Vec<IVec3>,
@@ -544,6 +560,34 @@ fn carve_tunnel_maze(
         bonus_voxels.push(IVec3::new(nodes[4][2].x, nodes[4][2].y + 1, nodes[4][2].z));
     }
 
+    // Scarce partially-used emergency salvage hidden inside dead-end pockets directly behind
+    // breakable `CrackedRock` alcove walls along the outer perimeter (2 on T1, 2-3 on T2, 3 on T3).
+    const SALVAGE_ALCOVE_CANDIDATES: [(usize, usize, IVec3); 8] = [
+        (1, 0, IVec3::new(0, 0, -1)),
+        (3, 0, IVec3::new(0, 0, -1)),
+        (0, 1, IVec3::new(-1, 0, 0)),
+        (0, 3, IVec3::new(-1, 0, 0)),
+        (1, 4, IVec3::new(0, 0, 1)),
+        (3, 4, IVec3::new(0, 0, 1)),
+        (4, 1, IVec3::new(1, 0, 0)),
+        (4, 3, IVec3::new(1, 0, 0)),
+    ];
+    let salvage_count = match tier {
+        1 => 2,
+        2 => deterministic_range(cave_seed, 1400, 2, 3) as usize,
+        _ => 3,
+    };
+    let salvage_start = deterministic_range(cave_seed, 1411, 0, 7) as usize;
+    let salvage_stride = if (cave_seed & 2) == 0 { 3 } else { 5 };
+    let mut salvage_voxels = Vec::with_capacity(salvage_count);
+    for i in 0..salvage_count {
+        let (gx, gz, out_dir) =
+            SALVAGE_ALCOVE_CANDIDATES[(salvage_start + i * salvage_stride) % 8];
+        let salvage_v =
+            carve_cracked_salvage_alcove(world, nodes[gz][gx], out_dir, shed_floor_y);
+        salvage_voxels.push(salvage_v);
+    }
+
     // Monsters spawn in the far southern corner vaults (~28m from the shaft around multiple bends).
     // On Tiers 2-3, offset by 1 voxel onto the chamber floor so they stand beside the corner relic/altar.
     let m_off = if tier >= 2 { 1 } else { 0 };
@@ -610,6 +654,7 @@ fn carve_tunnel_maze(
         alcove_center,
         relic_voxels,
         bonus_voxels,
+        salvage_voxels,
         monster_voxels,
         crystal_spots,
     )
@@ -969,6 +1014,43 @@ fn place_breakable_barricade(
     }
 }
 
+/// Carves a small dead-end salvage pocket (`d = 4..=5`) directly behind a 2-voxel-thick
+/// breakable `CrackedRock` alcove wall (`d = 2..=3`) extending outward from `node` along `out_dir`.
+fn carve_cracked_salvage_alcove(
+    world: &mut VoxelWorld,
+    node: IVec3,
+    out_dir: IVec3,
+    shed_floor_y: i32,
+) -> IVec3 {
+    let perp = IVec3::new(out_dir.z.abs(), 0, out_dir.x.abs());
+    for d in 2..=5 {
+        for w in -1..=1 {
+            let floor_p = node + out_dir * d + perp * w;
+            if floor_p.y < shed_floor_y {
+                world.set(floor_p, VoxelId::CaveDirt);
+                if floor_p.y > 1 {
+                    world.set(floor_p - IVec3::Y, VoxelId::CaveStone);
+                }
+                if floor_p.y > 2 {
+                    world.set(floor_p - IVec3::new(0, 2, 0), VoxelId::CaveStone);
+                }
+            }
+            let fill_mat = if d <= 3 {
+                VoxelId::CrackedRock
+            } else {
+                VoxelId::Air
+            };
+            for dy in 1..=3 {
+                let p = floor_p + IVec3::new(0, dy, 0);
+                if p.y > 2 && p.y < shed_floor_y {
+                    world.set(p, fill_mat);
+                }
+            }
+        }
+    }
+    node + out_dir * 4 + IVec3::Y
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_level_info(
     config: VoxelConfig,
@@ -981,6 +1063,7 @@ fn build_level_info(
     alcove_center: IVec3,
     relic_spawns_m: Vec<Vec3>,
     bonus_loot_spawns_m: Vec<Vec3>,
+    salvage_spawns_m: Vec<Vec3>,
     monster_spawns_m: Vec<Vec3>,
 ) -> GeneratedLevelInfo {
     let vs = config.voxel_size_m;
@@ -1093,6 +1176,7 @@ fn build_level_info(
         shed_bounds_max_m,
         relic_spawns_m,
         bonus_loot_spawns_m,
+        salvage_spawns_m,
         monster_spawns_m,
     }
 }
@@ -1968,6 +2052,83 @@ mod tests {
                 world.get(IVec3::new(cx + 22, shed_floor_y + 10, cz - 11)),
                 VoxelId::Timber
             );
+        }
+    }
+
+    #[test]
+    fn salvage_spawns_are_deterministic_walkable_underground_and_away_from_shaft() {
+        let cfg = VoxelConfig::default();
+        let max = cfg.world_voxels();
+        let (_cx, _cz, shed_floor_y, _cave_floor_y) = compute_layout_coords(max);
+
+        for tier in 1..=3 {
+            let (w1, i1) = generate_world_with_tier(5150, tier, cfg);
+            let (_w2, i2) = generate_world_with_tier(5150, tier, cfg);
+
+            // Deterministic for the same seed & tier
+            assert_eq!(i1.salvage_spawns_m, i2.salvage_spawns_m);
+
+            // 2-3 scarce salvage spawns per tier (2 on T1, 2-3 on T2, 3 on T3)
+            match tier {
+                1 => assert_eq!(i1.salvage_spawns_m.len(), 2),
+                2 => assert!((2..=3).contains(&i1.salvage_spawns_m.len())),
+                _ => assert_eq!(i1.salvage_spawns_m.len(), 3),
+            }
+
+            for &pos in &i1.salvage_spawns_m {
+                // Strictly below shed_floor_y
+                assert!(
+                    pos.y < i1.shed_floor_y_m,
+                    "salvage spawn {pos:?} must be strictly below shed_floor_y_m ({})",
+                    i1.shed_floor_y_m
+                );
+                let v = cfg.world_to_voxel(pos);
+                assert!(
+                    v.y + 2 < shed_floor_y,
+                    "salvage voxel {v:?} and headroom must sit strictly below shed_floor_y ({shed_floor_y})"
+                );
+
+                // Away from the elevator shaft landing (>= 14 m)
+                let dist = pos.distance(i1.elevator_bottom_pos_m);
+                assert!(
+                    dist >= 14.0,
+                    "salvage spawn at {pos:?} is too close to shaft landing: {dist:.2}m (tier {tier})"
+                );
+
+                // Guaranteed walkable with solid floor beneath and >= 2 voxels of Air headroom
+                assert_eq!(
+                    w1.get(v),
+                    VoxelId::Air,
+                    "salvage spawn voxel {v:?} must be Air (tier {tier})"
+                );
+                assert_eq!(
+                    w1.get(v + IVec3::Y),
+                    VoxelId::Air,
+                    "salvage spawn voxel {v:?} must have >= 2 voxels of Air headroom (tier {tier})"
+                );
+                assert!(
+                    w1.is_solid(v - IVec3::Y),
+                    "salvage spawn voxel {v:?} must have solid ground beneath (tier {tier})"
+                );
+
+                // Placed directly behind a breakable CrackedRock alcove wall
+                let has_nearby_cracked_rock = [
+                    IVec3::X,
+                    -IVec3::X,
+                    IVec3::Z,
+                    -IVec3::Z,
+                    IVec3::X * 2,
+                    -IVec3::X * 2,
+                    IVec3::Z * 2,
+                    -IVec3::Z * 2,
+                ]
+                .into_iter()
+                .any(|off| w1.get(v + off) == VoxelId::CrackedRock);
+                assert!(
+                    has_nearby_cracked_rock,
+                    "salvage spawn at {v:?} must sit behind a breakable CrackedRock alcove wall"
+                );
+            }
         }
     }
 }
