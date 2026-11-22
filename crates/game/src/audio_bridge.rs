@@ -517,7 +517,11 @@ fn process_mic_and_voice_frames(
     }
 
     // Decode incoming remote players' Opus frames and inject straight into the acoustic mixer!
+    let local_id = coop.session.as_ref().and_then(|s| s.local_player_id());
     for pkt in incoming_voice.read() {
+        if Some(pkt.speaker_id) == local_id {
+            continue;
+        }
         let pcm = audio
             .decoder_pool
             .decode_packet(pkt.speaker_id, pkt.seq, &pkt.opus_payload);

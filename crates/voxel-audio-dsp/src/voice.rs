@@ -618,6 +618,7 @@ fn start_input_stream(
 struct SpeakerDecoder {
     codec: OpusCodec,
     last_seq: Option<u16>,
+    consecutive_rejected: u8,
     resampler: StreamingResampler,
     decode_scratch: [f32; VOICE_FRAME_SAMPLES],
 }
@@ -627,6 +628,7 @@ impl SpeakerDecoder {
         Ok(Self {
             codec: OpusCodec::new()?,
             last_seq: None,
+            consecutive_rejected: 0,
             resampler: StreamingResampler::new(VOICE_SAMPLE_RATE as f32, output_sample_rate),
             decode_scratch: [0.0; VOICE_FRAME_SAMPLES],
         })
@@ -677,13 +679,24 @@ impl VoiceDecoderPool {
         if let Some(prev) = speaker.last_seq {
             let diff = seq.wrapping_sub(prev);
             if diff == 0 || diff > 32_768 {
-                // Duplicate or stale out-of-order packet
-                return Vec::new();
-            } else if diff == 2 || diff == 3 {
-                // 1 or 2 dropped packets: conceal with Opus PLC before decoding this frame
-                plc_frames = (diff - 1) as usize;
+                speaker.consecutive_rejected = speaker.consecutive_rejected.saturating_add(1);
+                if speaker.consecutive_rejected < 4 {
+                    // Duplicate or stale out-of-order packet
+                    return Vec::new();
+                }
+                // 4+ consecutive rejected packets indicate a sender sequence reset
+                // (e.g., mic hot-swap, reconnect, or sequence restart) — resync cleanly!
+                speaker.consecutive_rejected = 0;
+            } else {
+                speaker.consecutive_rejected = 0;
+                if diff == 2 || diff == 3 {
+                    // 1 or 2 dropped packets: conceal with Opus PLC before decoding this frame
+                    plc_frames = (diff - 1) as usize;
+                }
+                // Larger gaps (e.g. speaker paused and resumed later) resync cleanly without PLC spam
             }
-            // Larger gaps (e.g. speaker paused and resumed later) resync cleanly without PLC spam
+        } else {
+            speaker.consecutive_rejected = 0;
         }
         speaker.last_seq = Some(seq);
 
@@ -805,6 +818,40 @@ mod tests {
         let out2 = pool.decode_packet(LOCAL_LOOPBACK_SPEAKER_ID, 12, &pkt[..len2]);
         assert!((1750..=1780).contains(&out2.len()), "out2 len={}", out2.len());
         assert!(out2.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn voice_decoder_pool_auto_resyncs_after_sequence_reset_on_host_speaker_zero() {
+        let mut enc = OpusCodec::new().expect("encoder");
+        let mut pool = VoiceDecoderPool::new(48_000.0);
+        let mut pkt = [0u8; 512];
+        let mut pcm = [0.0f32; VOICE_FRAME_SAMPLES];
+
+        for (i, s) in pcm.iter_mut().enumerate() {
+            *s = (TAU * 320.0 * i as f32 / VOICE_SAMPLE_RATE as f32).sin() * 0.45;
+        }
+        let len = enc.encode_frame(&pcm, &mut pkt).expect("encode frame");
+
+        // Host (speaker_id == 0) is transmitting at sequence 500..=502
+        for seq in 500..=502 {
+            let out = pool.decode_packet(0, seq, &pkt[..len]);
+            assert_eq!(out.len(), VOICE_FRAME_SAMPLES);
+        }
+
+        // Host hot-swaps microphone or restarts stream at seq 0..=5 (diff > 32_768 relative to 502).
+        // First 3 packets are treated as potential out-of-order datagrams; 4th packet triggers resync!
+        assert!(pool.decode_packet(0, 0, &pkt[..len]).is_empty());
+        assert!(pool.decode_packet(0, 1, &pkt[..len]).is_empty());
+        assert!(pool.decode_packet(0, 2, &pkt[..len]).is_empty());
+
+        let resynced = pool.decode_packet(0, 3, &pkt[..len]);
+        assert_eq!(
+            resynced.len(),
+            VOICE_FRAME_SAMPLES,
+            "4th consecutive reset packet on speaker_id == 0 must auto-resync and decode"
+        );
+        let next = pool.decode_packet(0, 4, &pkt[..len]);
+        assert_eq!(next.len(), VOICE_FRAME_SAMPLES);
     }
 
     #[test]

@@ -404,7 +404,9 @@ impl CoopState {
 
     pub fn send_voice_frame(&self, seq: u16, opus_payload: Vec<u8>) {
         if let Some(ref s) = self.session {
-            let speaker_id = s.local_player_id().unwrap_or(0);
+            let Some(speaker_id) = s.local_player_id() else {
+                return;
+            };
             s.send_datagram(UnreliableDatagram::VoiceFrame {
                 speaker_id,
                 seq,
@@ -1150,6 +1152,7 @@ fn poll_network_events_system(
                             default_spawn,
                         );
                         coop.remote_players.insert(p.id, rp);
+                        remote_health.0.insert(p.id, LocalHealthPhase::Healthy);
                     }
                 }
 
@@ -1319,6 +1322,9 @@ fn poll_network_events_system(
                     );
                     if prev_phase != ElevatorPhase::ShedIdle && phase == ElevatorPhase::ShedIdle {
                         health.reset_for_shed();
+                        for status in remote_health.0.values_mut() {
+                            *status = LocalHealthPhase::Healthy;
+                        }
                         for ent in &stalker_ents_q {
                             commands.entity(ent).despawn();
                         }
@@ -1327,8 +1333,10 @@ fn poll_network_events_system(
             }
             NetEvent::RequestElevatorAction { depth_tier } => {
                 if coop.is_host_or_solo() {
-                    let tier = depth_tier.clamp(1, campaign.save.unlocked_depth_tier.max(1));
-                    campaign.save.selected_depth_tier = tier;
+                    if elevator.phase == ElevatorPhase::ShedIdle {
+                        let tier = depth_tier.clamp(1, campaign.save.unlocked_depth_tier.max(1));
+                        campaign.save.selected_depth_tier = tier;
+                    }
                     lever_writer.write(TriggerElevatorLeverEvent);
                 }
             }
@@ -1601,6 +1609,9 @@ fn poll_network_events_system(
                 ..
             } => {
                 if let Some(rp) = coop.remote_players.get_mut(&player_id) {
+                    if (feet_pos_m - rp.current_feet_m).length_squared() > 16.0 {
+                        rp.current_feet_m = feet_pos_m;
+                    }
                     rp.target_feet_m = feet_pos_m;
                     rp.target_yaw = yaw;
                     rp.target_pitch = pitch;
@@ -1750,7 +1761,9 @@ fn send_local_pose_system(
     coop.pose_tick = coop.pose_tick.wrapping_add(1);
     let tick = coop.pose_tick;
     if let Some(ref session) = coop.session {
-        let player_id = session.local_player_id().unwrap_or(0);
+        let Some(player_id) = session.local_player_id() else {
+            return;
+        };
         session.send_datagram(UnreliableDatagram::PlayerPose {
             player_id,
             tick,

@@ -884,10 +884,28 @@ async fn handle_incoming_guest(
     let dgram_handle = tokio::spawn(async move {
         while let Ok(raw) = conn_dgram.read_datagram().await {
             match decode_datagram(&raw) {
-                Ok(dgram) => {
-                    {
+                Ok(mut dgram) => {
+                    // Enforce authenticated sender ID on guest-sent voice & pose datagrams
+                    // so a guest can never spoof speaker_id = 0 (Host) or another player's ID.
+                    match dgram {
+                        UnreliableDatagram::VoiceFrame {
+                            ref mut speaker_id,
+                            ..
+                        } => {
+                            *speaker_id = player_id;
+                        }
+                        UnreliableDatagram::PlayerPose {
+                            player_id: ref mut pid,
+                            ..
+                        } => {
+                            *pid = player_id;
+                        }
+                        _ => {}
+                    }
+                    if let Ok(encoded) = encode_datagram(&dgram) {
+                        let auth_bytes = Bytes::from(encoded);
                         let guard = state_dgram.read().await;
-                        guard.broadcast_datagram_bytes(&raw, Some(player_id));
+                        guard.broadcast_datagram_bytes(&auth_bytes, Some(player_id));
                     }
                     emit_datagram_event(&events_dgram, dgram);
                 }

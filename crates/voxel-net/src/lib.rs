@@ -442,6 +442,46 @@ mod tests {
         assert!(host_got_delta, "host did not receive VoxelDelta");
         assert!(client_got_voice, "client did not receive VoiceFrame");
 
+        // 4a. Guest->Host VoiceFrame with spoofed speaker_id = 0 must be rewritten to guest's authenticated ID (1).
+        let guest_voice_payload = vec![0xAA, 0xBB, 0xCC];
+        client.send_datagram(UnreliableDatagram::VoiceFrame {
+            speaker_id: 0, // Spoofed as Host (0); Host must rewrite to 1
+            seq: 77,
+            opus_payload: guest_voice_payload.clone(),
+        });
+        let mut host_got_authenticated_guest_voice = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !host_got_authenticated_guest_voice {
+            for ev in host.poll_events() {
+                if let NetEvent::VoiceFrame {
+                    speaker_id,
+                    seq,
+                    opus_payload,
+                } = ev
+                    && seq == 77
+                    && opus_payload == guest_voice_payload
+                {
+                    assert_eq!(
+                        speaker_id, 1,
+                        "host must overwrite guest VoiceFrame speaker_id to authenticated PlayerId (1)"
+                    );
+                    host_got_authenticated_guest_voice = true;
+                }
+            }
+            if !host_got_authenticated_guest_voice {
+                client.send_datagram(UnreliableDatagram::VoiceFrame {
+                    speaker_id: 0,
+                    seq: 77,
+                    opus_payload: guest_voice_payload.clone(),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            host_got_authenticated_guest_voice,
+            "host did not receive authenticated guest VoiceFrame"
+        );
+
         // 4b. Live visor color & profile sync (Host -> Client and Client -> Host)
         let host_new_visor = [0.98, 0.24, 0.28];
         host.send_reliable(ReliableMessage::PlayerProfileSync {

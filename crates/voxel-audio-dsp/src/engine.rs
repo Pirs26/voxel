@@ -569,36 +569,54 @@ impl AudioEngine {
         let _ = self.tx.push(cmd);
     }
 
-    fn find_or_alloc_voice_slot(&mut self, speaker_id: u16) -> Option<usize> {
+    fn find_or_alloc_voice_slot(&mut self, speaker_id: u16) -> Option<(usize, bool)> {
         if let Some(slot) = self
             .voice_slots
             .iter()
             .position(|&id| id == Some(speaker_id))
         {
-            return Some(slot);
+            return Some((slot, false));
         }
         let free = self.voice_slots.iter().position(|id| id.is_none())?;
         self.voice_slots[free] = Some(speaker_id);
-        Some(free)
+        Some((free, true))
     }
 
     /// Allocates a streaming voice channel slot if new, ensures it is active, and updates
     /// its solved voxel-density occlusion, early reflections, and cavern reverb send.
     pub fn update_voice_acoustics(&mut self, speaker_id: u16, params: SourceAcousticParams) {
-        if let Some(slot) = self.find_or_alloc_voice_slot(speaker_id) {
+        if let Some((slot, _)) = self.find_or_alloc_voice_slot(speaker_id) {
             self.send(AudioCommand::UpdateVoiceChannel { slot, params });
         }
     }
 
     /// Pushes decoded PCM (already resampled to `self.sample_rate`) into the speaker's
     /// lock-free ring buffer, safely dropping excess samples if full.
+    ///
+    /// If the speaker's voice slot is newly allocated, immediately activates the channel
+    /// with unity direct gain so incoming speech (including Host `speaker_id == 0`) is
+    /// audible right away even before the 20 Hz acoustic worker completes its next pass.
     pub fn push_voice_pcm(&mut self, speaker_id: u16, pcm_at_output_rate: &[f32]) {
         if pcm_at_output_rate.is_empty() {
             return;
         }
-        let Some(slot) = self.find_or_alloc_voice_slot(speaker_id) else {
+        let Some((slot, newly_allocated)) = self.find_or_alloc_voice_slot(speaker_id) else {
             return;
         };
+        if newly_allocated {
+            self.send(AudioCommand::UpdateVoiceChannel {
+                slot,
+                params: SourceAcousticParams {
+                    id: u64::from(speaker_id),
+                    pos_m: Vec3::ZERO,
+                    direct_gain: Bands3::ONE,
+                    solid_thickness_m: 0.0,
+                    distance_m: 1.0,
+                    early_taps: [EarlyTap::default(); MAX_EARLY_TAPS],
+                    reverb_send: 0.18,
+                },
+            });
+        }
         let prod = &mut self.voice_txs[slot];
         let free = prod.slots();
         if free == 0 {
@@ -772,5 +790,58 @@ mod tests {
 
         // Device enumeration must never panic
         let _ = list_output_devices();
+    }
+
+    #[test]
+    fn push_voice_pcm_auto_activates_newly_allocated_host_channel() {
+        let sample_rate = 48_000.0;
+        let (tx, mut rx) = RingBuffer::<AudioCommand>::new(64);
+        let (voice_txs, voice_rxs) = create_voice_ring_pairs(VOICE_RING_CAPACITY);
+
+        let mut engine = AudioEngine {
+            _stream: None,
+            tx,
+            voice_txs,
+            voice_slots: [None; MAX_VOICE_CHANNELS],
+            sample_rate,
+        };
+
+        let voice_channels = voice_rxs
+            .into_iter()
+            .map(|vrx| VoiceChannel::new(sample_rate, vrx))
+            .collect();
+
+        let mut mixer = MixerState {
+            clips: Arc::new(Vec::new()),
+            voices: Vec::new(),
+            voice_channels,
+            fdn: FdnReverb::new(sample_rate),
+            listener_pos_m: Vec3::ZERO,
+            listener_right: Vec3::X,
+            reverb: ReverbEstimate::default(),
+            master_volume: 1.0,
+            voice_volume: 1.0,
+        };
+
+        // Push PCM for Host (speaker_id == 0) BEFORE update_voice_acoustics is ever called
+        let pcm: Vec<f32> = (0..960)
+            .map(|i| (TAU * 360.0 * i as f32 / sample_rate).sin() * 0.5)
+            .collect();
+        engine.push_voice_pcm(0, &pcm);
+
+        drain_commands(&mut rx, &mut mixer);
+        mixer.prepare_block(960);
+
+        let mut energy = 0.0f32;
+        for _ in 0..960 {
+            let (l, r) = mixer.render_frame();
+            assert!(l.is_finite() && r.is_finite());
+            energy += l * l + r * r;
+        }
+
+        assert!(
+            energy > 1.0,
+            "expected push_voice_pcm(0, ...) to auto-activate channel and produce audible output before update_voice_acoustics, got energy={energy}"
+        );
     }
 }
