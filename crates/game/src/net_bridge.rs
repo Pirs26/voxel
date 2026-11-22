@@ -116,6 +116,62 @@ impl RemotePlayerData {
     }
 }
 
+/// Snapshot of the last transmitted local player pose for delta-throttling + 2 Hz heartbeat.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LastSentPose {
+    pub feet_pos_m: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub crouching: bool,
+    pub flashlight_on: bool,
+    pub held_item: HeldItemNetKind,
+    pub pickaxe_swing: bool,
+}
+
+/// Pure helper determining whether a local `PlayerPose` datagram should be transmitted on this
+/// 15 Hz tick (either because pose/state changed above threshold or the 2 Hz stationary heartbeat fired).
+pub fn should_send_pose_update(
+    last_sent_pose: Option<&LastSentPose>,
+    current: &LastSentPose,
+    pose_heartbeat_s: f32,
+) -> bool {
+    let Some(last) = last_sent_pose else {
+        return true;
+    };
+    (current.feet_pos_m - last.feet_pos_m).length_squared() > 0.015_f32.powi(2)
+        || (current.yaw - last.yaw).abs() > 0.025
+        || (current.pitch - last.pitch).abs() > 0.025
+        || current.crouching != last.crouching
+        || current.flashlight_on != last.flashlight_on
+        || current.held_item != last.held_item
+        || current.pickaxe_swing != last.pickaxe_swing
+        || pose_heartbeat_s >= 0.50
+}
+
+/// Computes the safe extraction landing position in the Base Shed for a Guest when
+/// `ElevatorStateSync` transitions into `ElevatorPhase::ShedIdle`.
+pub fn resolve_guest_extraction_pos(
+    host_feet_opt: Option<Vec3>,
+    elevator: &ElevatorState,
+    info: &voxel_core::GeneratedLevelInfo,
+) -> Vec3 {
+    if let Some(host_pos) = host_feet_opt
+        && crate::relic::is_pos_in_shed(host_pos, info)
+    {
+        Vec3::new(
+            host_pos.x,
+            host_pos.y.max(info.shed_floor_y_m + 0.05),
+            host_pos.z,
+        )
+    } else {
+        Vec3::new(
+            elevator.center_xz_m.x,
+            info.shed_floor_y_m + 0.05,
+            elevator.center_xz_m.y,
+        )
+    }
+}
+
 #[derive(Resource)]
 pub struct CoopState {
     pub session: Option<NetSession>,
@@ -128,6 +184,8 @@ pub struct CoopState {
     pub remote_players: HashMap<PlayerId, RemotePlayerData>,
     pub pose_timer: Timer,
     pub pose_tick: u32,
+    pub last_sent_pose: Option<LastSentPose>,
+    pub pose_heartbeat_s: f32,
     /// Pending graceful disconnect flush timer (lets final Guest inventory sync transmit before drop).
     pub pending_disconnect_s: Option<f32>,
     /// Tracks last synced serialized inventory JSON for guest-to-host persistence.
@@ -146,8 +204,10 @@ impl Default for CoopState {
             join_code: None,
             local_edits: HashMap::new(),
             remote_players: HashMap::new(),
-            pose_timer: Timer::from_seconds(1.0 / 25.0, TimerMode::Repeating),
+            pose_timer: Timer::from_seconds(1.0 / 15.0, TimerMode::Repeating),
             pose_tick: 0,
+            last_sent_pose: None,
+            pose_heartbeat_s: 0.0,
             pending_disconnect_s: None,
             last_synced_inv_json: String::new(),
             inv_sync_timer: Timer::from_seconds(0.75, TimerMode::Repeating),
@@ -170,6 +230,13 @@ impl CoopState {
 
     pub fn is_host_or_solo(&self) -> bool {
         self.session.as_ref().is_none_or(|s| s.is_host())
+    }
+
+    /// Returns `true` only when connected AND there is at least one remote peer to receive
+    /// outbound sync traffic (prevents a Host waiting alone in the lobby from sending wasted
+    /// voice/pose/monster/item datagrams through the iroh relay).
+    pub fn has_peers_to_sync(&self) -> bool {
+        self.is_connected() && (!self.is_host_or_solo() || !self.remote_players.is_empty())
     }
 
     pub fn local_player_id(&self) -> u16 {
@@ -380,6 +447,9 @@ impl CoopState {
     }
 
     pub fn send_item_pose(&self, item_id: u32, pos_m: Vec3) {
+        if !self.has_peers_to_sync() {
+            return;
+        }
         if let Some(ref s) = self.session {
             s.send_datagram(UnreliableDatagram::ItemPose { item_id, pos_m });
         }
@@ -392,6 +462,9 @@ impl CoopState {
         yaw: f32,
         state: MonsterBehaviorState,
     ) {
+        if !self.has_peers_to_sync() {
+            return;
+        }
         if let Some(ref s) = self.session {
             s.send_datagram(UnreliableDatagram::MonsterPose {
                 monster_id,
@@ -403,6 +476,9 @@ impl CoopState {
     }
 
     pub fn send_voice_frame(&self, seq: u16, opus_payload: Vec<u8>) {
+        if !self.has_peers_to_sync() {
+            return;
+        }
         if let Some(ref s) = self.session {
             let Some(speaker_id) = s.local_player_id() else {
                 return;
@@ -419,6 +495,8 @@ impl CoopState {
         self.session = None;
         self.join_code = None;
         self.pending_disconnect_s = None;
+        self.last_sent_pose = None;
+        self.pose_heartbeat_s = 0.0;
         let edits_snapshot: Vec<(IVec3, VoxelId)> =
             self.local_edits.iter().map(|(&c, &m)| (c, m)).collect();
         match NetSession::start_host(
@@ -451,6 +529,8 @@ impl CoopState {
         self.session = None;
         self.join_code = None;
         self.pending_disconnect_s = None;
+        self.last_sent_pose = None;
+        self.pose_heartbeat_s = 0.0;
         self.last_synced_inv_json.clear();
         match NetSession::start_client(
             trimmed,
@@ -1112,6 +1192,9 @@ fn poll_network_events_system(
                     }
                 };
                 elevator.apply_network_sync(elevator_phase, plat_y, 0.0, tier, level_seed);
+                elevator.last_ridden_y_m = elevator.platform_y_m;
+                coop.last_sent_pose = None;
+                coop.pose_heartbeat_s = 0.0;
 
                 campaign.save.credits = credits;
                 campaign.save.selected_depth_tier = tier;
@@ -1184,6 +1267,8 @@ fn poll_network_events_system(
                 );
                 coop.remote_players.insert(info.id, rp);
                 remote_health.0.insert(info.id, LocalHealthPhase::Healthy);
+                coop.last_sent_pose = None;
+                coop.pose_heartbeat_s = 0.0;
                 coop.status_text = format!(
                     "{} joined! ({} players)",
                     info.name,
@@ -1321,6 +1406,22 @@ fn poll_network_events_system(
                         cave_seed,
                     );
                     if prev_phase != ElevatorPhase::ShedIdle && phase == ElevatorPhase::ShedIdle {
+                        let host_feet_opt = coop.remote_players.get(&0).map(|rp| {
+                            if crate::relic::is_pos_in_shed(rp.target_feet_m, &level_info.0) {
+                                rp.target_feet_m
+                            } else {
+                                rp.current_feet_m
+                            }
+                        });
+                        let landing =
+                            resolve_guest_extraction_pos(host_feet_opt, elevator, &level_info.0);
+                        if let Ok(mut pc) = player_q.single_mut() {
+                            pc.feet_pos_m = landing;
+                            pc.velocity_m = Vec3::ZERO;
+                            pc.grounded = true;
+                        }
+                        inv.carry_state = crate::inventory::CarryHandState::Free;
+                        elevator.last_ridden_y_m = elevator.platform_y_m;
                         health.reset_for_shed();
                         for status in remote_health.0.values_mut() {
                             *status = LocalHealthPhase::Healthy;
@@ -1728,9 +1829,10 @@ fn send_local_pose_system(
     player_q: Query<&PlayerController>,
     fl_q: Query<&PlayerFlashlight>,
 ) {
-    if *screen != AppScreen::InGame || !coop.is_connected() {
+    if *screen != AppScreen::InGame || !coop.has_peers_to_sync() {
         return;
     }
+    coop.pose_heartbeat_s += time.delta_secs();
     coop.pose_timer.tick(time.delta());
     if !coop.pose_timer.just_finished() {
         return;
@@ -1758,6 +1860,24 @@ fn send_local_pose_system(
     };
     let pickaxe_swing = vm_anim.as_ref().is_some_and(|a| a.swing_timer_s > 0.0);
 
+    let candidate = LastSentPose {
+        feet_pos_m: pc.feet_pos_m,
+        yaw: pc.yaw,
+        pitch: pc.pitch,
+        crouching: pc.crouching,
+        flashlight_on,
+        held_item,
+        pickaxe_swing,
+    };
+    if !should_send_pose_update(
+        coop.last_sent_pose.as_ref(),
+        &candidate,
+        coop.pose_heartbeat_s,
+    ) {
+        return;
+    }
+    coop.last_sent_pose = Some(candidate);
+    coop.pose_heartbeat_s = 0.0;
     coop.pose_tick = coop.pose_tick.wrapping_add(1);
     let tick = coop.pose_tick;
     if let Some(ref session) = coop.session {
@@ -1893,4 +2013,92 @@ pub fn remote_player_head_pos(rp: &RemotePlayerData) -> Vec3 {
         PLAYER_EYE_STAND_M
     };
     rp.current_feet_m + Vec3::Y * eye
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::UVec3;
+    use voxel_core::{VoxelConfig, generate_world_with_tier};
+
+    use super::*;
+
+    #[test]
+    fn guest_extraction_teleports_to_host_shed_pos_or_falls_back_to_cage() {
+        let cfg = VoxelConfig::half_player_scale(UVec3::splat(3));
+        let (_, info) = generate_world_with_tier(1337, 1, cfg);
+        let elevator = ElevatorState::from_level_info(&info, 1337);
+
+        // 1. When Host (`id == 0`) is already in the Base Shed, guest teleports directly to Host's Shed position.
+        let host_in_shed = Vec3::new(
+            info.spawn_pos_m.x + 1.25,
+            info.shed_floor_y_m + 0.02,
+            info.spawn_pos_m.z - 0.85,
+        );
+        let resolved = resolve_guest_extraction_pos(Some(host_in_shed), &elevator, &info);
+        assert!((resolved.x - host_in_shed.x).abs() < 1e-4);
+        assert!((resolved.z - host_in_shed.z).abs() < 1e-4);
+        assert!(
+            resolved.y >= info.shed_floor_y_m + 0.05 - 1e-4,
+            "landing y must be at least shed_floor_y_m + 0.05"
+        );
+
+        // 2. When Host's last known position is still down in the cave (or absent), falls back to Shed elevator cage center.
+        let host_in_cave = Vec3::new(elevator.center_xz_m.x, info.cave_floor_y_m, elevator.center_xz_m.y);
+        let fallback_from_cave = resolve_guest_extraction_pos(Some(host_in_cave), &elevator, &info);
+        assert!((fallback_from_cave.x - elevator.center_xz_m.x).abs() < 1e-4);
+        assert!((fallback_from_cave.y - (info.shed_floor_y_m + 0.05)).abs() < 1e-4);
+        assert!((fallback_from_cave.z - elevator.center_xz_m.y).abs() < 1e-4);
+
+        let fallback_none = resolve_guest_extraction_pos(None, &elevator, &info);
+        assert_eq!(fallback_from_cave, fallback_none);
+    }
+
+    #[test]
+    fn pose_delta_throttle_skips_idle_and_fires_on_move_or_heartbeat() {
+        let base = LastSentPose {
+            feet_pos_m: Vec3::new(10.0, 20.0, 30.0),
+            yaw: 1.0,
+            pitch: 0.0,
+            crouching: false,
+            flashlight_on: true,
+            held_item: HeldItemNetKind::Flashlight,
+            pickaxe_swing: false,
+        };
+
+        // First pose (`last_sent_pose == None`) always sends.
+        assert!(should_send_pose_update(None, &base, 0.0));
+
+        // Stationary player with sub-threshold jitter and `< 0.50s` heartbeat is skipped.
+        let tiny_jitter = LastSentPose {
+            feet_pos_m: base.feet_pos_m + Vec3::new(0.005, 0.0, -0.005),
+            yaw: base.yaw + 0.01,
+            pitch: base.pitch - 0.01,
+            ..base
+        };
+        assert!(!should_send_pose_update(Some(&base), &tiny_jitter, 0.20));
+
+        // 2 Hz stationary keepalive (`pose_heartbeat_s >= 0.50`) forces a send even when motionless.
+        assert!(should_send_pose_update(Some(&base), &base, 0.50));
+
+        // Position move > 1.5 cm fires immediately.
+        let moved = LastSentPose {
+            feet_pos_m: base.feet_pos_m + Vec3::new(0.02, 0.0, 0.0),
+            ..base
+        };
+        assert!(should_send_pose_update(Some(&base), &moved, 0.06));
+
+        // Look rotation > 0.025 rad fires immediately.
+        let turned = LastSentPose {
+            yaw: base.yaw + 0.03,
+            ..base
+        };
+        assert!(should_send_pose_update(Some(&base), &turned, 0.06));
+
+        // State changes (crouch, flashlight, held item, pickaxe swing) fire immediately.
+        let crouched = LastSentPose {
+            crouching: true,
+            ..base
+        };
+        assert!(should_send_pose_update(Some(&base), &crouched, 0.06));
+    }
 }

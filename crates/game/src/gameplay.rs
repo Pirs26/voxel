@@ -36,11 +36,12 @@ use crate::{
         ELEVATOR_WINCH_DURATION_S, ELEVATOR_WINCH_OVERDRIVE_DURATION_S, ElevatorArrivedCaveEvent,
         ElevatorBulbLight, ElevatorCageRoot, ElevatorDoorVisual, ElevatorReturnedShedEvent,
         ElevatorState, TriggerElevatorLeverEvent, compute_ambient_brightness_for_depth,
-        spawn_elevator_cage, step_elevator_state_with_boarding,
+        spawn_elevator_cage, step_elevator_state_with_boarding, step_guest_elevator_interpolation,
     },
     health::{
-        LocalHealthPhase, MonsterHitLocalPlayerEvent, PlayerHealthState, RESCUE_RANGE_M,
-        REVIVE_CHANNEL_S, RemoteHealthMap, ReviveCompletedEvent, TeamWipeEvent, check_team_wiped,
+        CRAWL_EYE_HEIGHT_M, LocalHealthPhase, MonsterHitLocalPlayerEvent, PlayerHealthState,
+        RESCUE_RANGE_M, REVIVE_CHANNEL_S, RemoteHealthMap, ReviveCompletedEvent, TeamWipeEvent,
+        check_team_wiped,
     },
     inventory::{
         BeltItem, CarryHandState, PlayerInventory, ShopCatalogItem, dynamic_shop_cost,
@@ -48,7 +49,9 @@ use crate::{
     },
     net_bridge::{CoopMenuOpen, CoopState, clear_remote_players, remote_player_head_pos},
     parkour_board::{spawn_parkour_billboard, update_parkour_billboard_system},
-    physics::{aabb_intersects_world, ray_aabb_intersect},
+    physics::{
+        PLAYER_EYE_CROUCH_M, PLAYER_EYE_STAND_M, aabb_intersects_world, ray_aabb_intersect,
+    },
     player::PlayerController,
     relic::{
         BODY_CARRY_SPEED_MULT, CHARGER_PAD_RADIUS_M, CHARGER_PAD_RATE_PER_S,
@@ -1776,6 +1779,63 @@ struct ElevatorEvents<'w, 's> {
     sound_writer: MessageWriter<'w, PlaySpatialSoundEvent>,
 }
 
+/// Rides a player inside the moving elevator cage by `delta_y = elevator.platform_y_m - prev_y`,
+/// glues grounded players cleanly to the fast-descending deck, clamps jumping players strictly
+/// below the `3.13 m` cross-beams & `3.28 m` steel roof plate (`max_feet_y = deck_y + 1.15`),
+/// and constrains horizontal motion inside closed cage doors.
+///
+/// Returns `true` if the player was inside the cage envelope and ridden/clamped.
+pub fn ride_player_in_elevator(
+    pc: &mut PlayerController,
+    elevator: &ElevatorState,
+    prev_y: f32,
+) -> bool {
+    let delta_y = elevator.platform_y_m - prev_y;
+    let deck_y = elevator.platform_y_m + 0.02;
+    let dx = pc.feet_pos_m.x - elevator.center_xz_m.x;
+    let dz = pc.feet_pos_m.z - elevator.center_xz_m.y;
+    let in_xz = dx.abs() <= ELEVATOR_CAGE_HALF_EXTENT_M + 0.15
+        && dz.abs() <= ELEVATOR_CAGE_HALF_EXTENT_M + 0.15;
+    let in_cage_y = if elevator.doors_closed {
+        pc.feet_pos_m.y >= prev_y - 1.5 && pc.feet_pos_m.y <= prev_y + 4.5
+    } else {
+        (pc.feet_pos_m.y - prev_y).abs() <= 1.25
+    };
+
+    if in_xz && in_cage_y {
+        if elevator.doors_closed
+            && delta_y < -1e-4
+            && pc.feet_pos_m.y <= prev_y + 0.45
+            && pc.velocity_m.y <= 0.5
+        {
+            pc.feet_pos_m.y = deck_y;
+            pc.velocity_m.y = 0.0;
+            pc.grounded = true;
+        } else {
+            pc.feet_pos_m.y = (pc.feet_pos_m.y + delta_y).max(deck_y);
+            if pc.velocity_m.y <= 0.0 && pc.feet_pos_m.y <= deck_y + 0.05 {
+                pc.feet_pos_m.y = deck_y;
+                pc.velocity_m.y = 0.0;
+                pc.grounded = true;
+            }
+        }
+
+        if elevator.doors_closed {
+            let max_feet_y = deck_y + 1.15;
+            if pc.feet_pos_m.y > max_feet_y {
+                pc.feet_pos_m.y = max_feet_y;
+                pc.velocity_m.y = pc.velocity_m.y.min(0.0);
+            }
+            let clamp_r = ELEVATOR_CAGE_HALF_EXTENT_M - 0.35;
+            pc.feet_pos_m.x = elevator.center_xz_m.x + dx.clamp(-clamp_r, clamp_r);
+            pc.feet_pos_m.z = elevator.center_xz_m.y + dz.clamp(-clamp_r, clamp_r);
+        }
+        true
+    } else {
+        false
+    }
+}
+
 /// Drives the seamless zero-loading elevator descent, async underground cave swap,
 /// 30s loud winch climax, cage visuals, player/relic platform riding, and Shed cash-in/save!
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -1786,13 +1846,20 @@ fn elevator_runtime_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut res: ElevatorWorldRes,
     mut evs: ElevatorEvents,
-    mut player_q: Query<&mut PlayerController>,
+    mut player_q: Query<
+        (&mut PlayerController, &mut Transform),
+        (Without<ElevatorCageRoot>, Without<ElevatorDoorVisual>),
+    >,
     mut cage_q: Query<&mut Transform, (With<ElevatorCageRoot>, Without<ElevatorDoorVisual>)>,
     mut door_q: Query<&mut Transform, (With<ElevatorDoorVisual>, Without<ElevatorCageRoot>)>,
     mut bulb_q: Query<&mut PointLight, With<ElevatorBulbLight>>,
     mut items_q: Query<
         (Entity, &mut WorldItemEntity, &mut Transform),
-        (Without<ElevatorCageRoot>, Without<ElevatorDoorVisual>),
+        (
+            Without<ElevatorCageRoot>,
+            Without<ElevatorDoorVisual>,
+            Without<PlayerController>,
+        ),
     >,
     stalkers_q: Query<Entity, Or<(With<BlindStalker>, With<RemoteSyncedStalker>)>>,
 ) {
@@ -1829,7 +1896,7 @@ fn elevator_runtime_system(
 
     let missing_outside = player_q
         .single()
-        .map(|pc| {
+        .map(|(pc, _)| {
             count_living_players_outside_cage(
                 elevator,
                 pc.feet_pos_m,
@@ -1921,12 +1988,12 @@ fn elevator_runtime_system(
         level_info.0 = new_info;
     }
 
-    // 3. Step authoritative elevator state machine on Host / Solo (guests apply network sync)
-    let prev_y = elevator.platform_y_m;
+    // 3. Step authoritative elevator state machine on Host / Solo (guests step smooth interpolation)
     let gen_ready = !elevator.is_gen_pending();
     let step_out = if coop.is_host_or_solo() {
         step_elevator_state_with_boarding(elevator, dt, gen_ready, missing_outside == 0)
     } else {
+        step_guest_elevator_interpolation(elevator, dt);
         Default::default()
     };
 
@@ -1940,29 +2007,24 @@ fn elevator_runtime_system(
         });
     }
 
+    let prev_y = elevator.last_ridden_y_m;
     let delta_y = elevator.platform_y_m - prev_y;
 
     // 4. Ride moving elevator cage smoothly (player + items inside cage!)
     let deck_y = elevator.platform_y_m + 0.02;
     let mut player_y = deck_y;
-    if let Ok(mut pc) = player_q.single_mut() {
-        let dx = pc.feet_pos_m.x - elevator.center_xz_m.x;
-        let dz = pc.feet_pos_m.z - elevator.center_xz_m.y;
-        let in_xz = dx.abs() <= ELEVATOR_CAGE_HALF_EXTENT_M + 0.15
-            && dz.abs() <= ELEVATOR_CAGE_HALF_EXTENT_M + 0.15;
-
-        if in_xz && (pc.feet_pos_m.y - prev_y).abs() <= 1.25 {
-            pc.feet_pos_m.y = (pc.feet_pos_m.y + delta_y).max(deck_y);
-            if pc.velocity_m.y <= 0.0 && pc.feet_pos_m.y <= deck_y + 0.05 {
-                pc.feet_pos_m.y = deck_y;
-                pc.velocity_m.y = 0.0;
-                pc.grounded = true;
-            }
-            if elevator.doors_closed {
-                let clamp_r = ELEVATOR_CAGE_HALF_EXTENT_M - 0.35;
-                pc.feet_pos_m.x = elevator.center_xz_m.x + dx.clamp(-clamp_r, clamp_r);
-                pc.feet_pos_m.z = elevator.center_xz_m.y + dz.clamp(-clamp_r, clamp_r);
-            }
+    if let Ok((mut pc, mut cam_tf)) = player_q.single_mut() {
+        if ride_player_in_elevator(&mut pc, elevator, prev_y) {
+            let eye_h = if health.is_downed() {
+                CRAWL_EYE_HEIGHT_M
+            } else if pc.crouching {
+                PLAYER_EYE_CROUCH_M
+            } else {
+                PLAYER_EYE_STAND_M
+            };
+            cam_tf.translation.x = pc.feet_pos_m.x;
+            cam_tf.translation.z = pc.feet_pos_m.z;
+            cam_tf.translation.y = pc.feet_pos_m.y + eye_h;
         }
         player_y = pc.feet_pos_m.y;
     }
@@ -1984,6 +2046,7 @@ fn elevator_runtime_system(
             }
         }
     }
+    elevator.last_ridden_y_m = elevator.platform_y_m;
 
     // 5. Update cage visuals, sliding door, flickering cage bulb, and ambient daylight falloff
     if let Ok(mut cage_tf) = cage_q.single_mut() {
@@ -2257,11 +2320,11 @@ fn elevator_runtime_system(
 
     // 8. Periodic host elevator sync while moving or winching
     if coop.is_host_or_solo()
-        && coop.is_connected()
+        && coop.has_peers_to_sync()
         && !matches!(elevator.phase, ElevatorPhase::ShedIdle | ElevatorPhase::CaveIdle)
     {
         elevator.sync_timer_s += dt;
-        if elevator.sync_timer_s >= 0.12 {
+        if elevator.sync_timer_s >= 0.30 {
             elevator.sync_timer_s = 0.0;
             coop.send_elevator_sync(elevator);
         }
@@ -2380,7 +2443,8 @@ fn world_items_runtime_system(
     item_reg.active_carry_is_scraping = false;
 
     timers.item_net_timer_s += dt;
-    let send_item_poses = coop.is_host_or_solo() && coop.is_connected() && timers.item_net_timer_s >= 0.08;
+    let send_item_poses =
+        coop.is_host_or_solo() && coop.has_peers_to_sync() && timers.item_net_timer_s >= 0.10;
     if send_item_poses {
         timers.item_net_timer_s = 0.0;
     }
@@ -2820,7 +2884,7 @@ fn blind_stalker_ai_system(
     }
 
     timers.monster_net_timer_s += dt;
-    let send_poses = coop.is_connected() && timers.monster_net_timer_s >= 0.07;
+    let send_poses = coop.has_peers_to_sync() && timers.monster_net_timer_s >= 0.125;
     if send_poses {
         timers.monster_net_timer_s = 0.0;
     }
@@ -3082,7 +3146,7 @@ fn health_and_wipe_system(
                 rp.target_feet_m = anchor;
             }
             timers.carry_net_timer_s += dt;
-            if timers.carry_net_timer_s >= 0.05 {
+            if coop.has_peers_to_sync() && timers.carry_net_timer_s >= 0.10 {
                 timers.carry_net_timer_s = 0.0;
                 coop.send_player_carry_sync(local_id, target_id, anchor, true);
             }
@@ -3653,6 +3717,59 @@ mod tests {
         assert_eq!(
             evaluate_returned_shed_item(&decoy, false, true, Some(4.0)),
             ReturnedShedItemAction::Despawn
+        );
+    }
+
+    #[test]
+    fn moving_elevator_clamps_player_between_deck_and_ceiling_on_descent() {
+        let cfg = VoxelConfig::half_player_scale(UVec3::splat(3));
+        let (_, info) = generate_world_with_tier(777, 1, cfg);
+        let mut elev = ElevatorState::from_level_info(&info, 777);
+        elev.phase = ElevatorPhase::Descending;
+        elev.doors_closed = true;
+
+        // 1. Grounded player riding a fast mid-descent step (`-1.8m` sync jump) stays glued to `deck_y`.
+        let prev_y = elev.platform_y_m;
+        elev.platform_y_m = prev_y - 1.80;
+        let deck_y = elev.platform_y_m + 0.02;
+
+        let mut pc = PlayerController {
+            yaw: 0.0,
+            pitch: 0.0,
+            velocity_m: Vec3::ZERO,
+            feet_pos_m: Vec3::new(elev.center_xz_m.x, prev_y + 0.02, elev.center_xz_m.y),
+            grounded: true,
+            crouching: false,
+            footstep_accum_m: 0.0,
+            step_counter: 0,
+        };
+        assert!(ride_player_in_elevator(&mut pc, &elev, prev_y));
+        assert!(
+            (pc.feet_pos_m.y - deck_y).abs() < 1e-4,
+            "grounded player must stay glued to descending deck_y ({deck_y}), got {}",
+            pc.feet_pos_m.y
+        );
+        assert!(pc.grounded);
+        assert_eq!(pc.velocity_m.y, 0.0);
+
+        // 2. Jumping player during fast descent NEVER exceeds `deck_y + 1.15` (head <= deck_y + 2.95, below 3.13m beams & 3.28m roof).
+        let prev_y2 = elev.platform_y_m;
+        elev.platform_y_m = prev_y2 - 0.65;
+        let deck_y2 = elev.platform_y_m + 0.02;
+        pc.feet_pos_m.y = prev_y2 + 2.10;
+        pc.velocity_m.y = 8.65;
+        pc.grounded = false;
+
+        assert!(ride_player_in_elevator(&mut pc, &elev, prev_y2));
+        assert!(
+            pc.feet_pos_m.y <= deck_y2 + 1.15 + 1e-4,
+            "jumping player feet ({}) must never exceed deck_y + 1.15 ({})",
+            pc.feet_pos_m.y,
+            deck_y2 + 1.15
+        );
+        assert!(
+            pc.velocity_m.y <= 0.0,
+            "upward jump velocity must be arrested on ceiling contact"
         );
     }
 }

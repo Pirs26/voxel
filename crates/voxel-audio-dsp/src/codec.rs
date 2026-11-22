@@ -6,8 +6,8 @@ pub const VOICE_SAMPLE_RATE: u32 = 48_000;
 /// Standard VoIP frame size: 20 ms at 48 kHz mono.
 pub const VOICE_FRAME_SAMPLES: usize = 960;
 
-/// Target VoIP bitrate (~28 kbps for crisp intelligible speech over P2P datagrams).
-const VOICE_BITRATE_BPS: i32 = 28_000;
+/// Target VoIP bitrate (~16 kbps for crisp intelligible speech at ~40 bytes/20ms frame over P2P datagrams).
+const VOICE_BITRATE_BPS: i32 = 16_000;
 
 /// Engine-agnostic low-latency VoIP codec abstraction.
 ///
@@ -19,14 +19,14 @@ pub trait VoiceCodec: Send {
     fn decode_plc(&mut self, out_pcm: &mut [f32]) -> Result<usize, String>;
 }
 
-/// Pure-Rust Opus VoIP codec (48 kHz, mono, VoIP mode, 28 kbps).
+/// Pure-Rust Opus VoIP codec (48 kHz, mono, VoIP mode, 16 kbps).
 pub struct OpusCodec {
     encoder: OpusEncoder,
     decoder: OpusDecoder,
 }
 
 impl OpusCodec {
-    /// Creates a new 48 kHz mono VoIP Opus encoder + decoder pair (~28 kbps).
+    /// Creates a new 48 kHz mono VoIP Opus encoder + decoder pair (~16 kbps).
     pub fn new() -> Result<Self, String> {
         let mut encoder = OpusEncoder::new(VOICE_SAMPLE_RATE as i32, 1, Application::Voip)
             .map_err(|e| format!("opus encoder init failed: {e}"))?;

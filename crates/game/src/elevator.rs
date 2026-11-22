@@ -75,6 +75,9 @@ pub struct ElevatorState {
     pub phase: ElevatorPhase,
     pub platform_y_m: f32,
     pub prev_platform_y_m: f32,
+    /// Platform elevation consumed by the last `elevator_runtime_system` frame so guest
+    /// network syncs and local interpolation never lose vertical platform displacement.
+    pub last_ridden_y_m: f32,
     pub phase_timer_s: f32,
     pub depth_tier: u8,
     pub cave_seed: u64,
@@ -97,6 +100,7 @@ impl ElevatorState {
             phase: ElevatorPhase::ShedIdle,
             platform_y_m: info.shed_floor_y_m,
             prev_platform_y_m: info.shed_floor_y_m,
+            last_ridden_y_m: info.shed_floor_y_m,
             phase_timer_s: 0.0,
             depth_tier: info.depth_tier.clamp(1, 3),
             cave_seed: seed,
@@ -270,6 +274,7 @@ impl ElevatorState {
         self.phase_timer_s = ELEVATOR_DESCENT_DURATION_S;
         self.creak_timer_s = 0.0;
         self.prev_platform_y_m = self.platform_y_m;
+        self.last_ridden_y_m = self.platform_y_m;
         self.depth_tier = tier;
         self.cave_seed = next_seed;
 
@@ -320,6 +325,9 @@ impl ElevatorState {
     }
 
     /// Applies an authoritative host network snapshot to a guest's local elevator state.
+    ///
+    /// Does NOT overwrite `last_ridden_y_m` during motion so `elevator_runtime_system`
+    /// always consumes the full `delta_y = platform_y_m - last_ridden_y_m` since the previous frame.
     pub fn apply_network_sync(
         &mut self,
         phase: ElevatorPhase,
@@ -350,6 +358,7 @@ impl ElevatorState {
         self.phase = ElevatorPhase::ShedIdle;
         self.platform_y_m = self.top_y_m;
         self.prev_platform_y_m = self.top_y_m;
+        self.last_ridden_y_m = self.top_y_m;
         self.phase_timer_s = 0.0;
         self.doors_closed = false;
         self.cable_shudder_active = false;
@@ -418,6 +427,35 @@ impl ElevatorState {
                 self.phase_timer_s.max(0.0)
             ),
         }
+    }
+}
+
+/// Smoothly advances a Guest's local elevator platform and countdown timer between authoritative
+/// Host `ElevatorStateSync` snapshots (`0.30s` cadence) so guests glide smoothly at 60+ fps.
+pub fn step_guest_elevator_interpolation(state: &mut ElevatorState, dt: f32) {
+    let dt = dt.max(0.0);
+    state.prev_platform_y_m = state.platform_y_m;
+    match state.phase {
+        ElevatorPhase::Descending => {
+            state.doors_closed = true;
+            state.phase_timer_s = (state.phase_timer_s - dt).max(0.0);
+            let progress =
+                (1.0 - state.phase_timer_s / ELEVATOR_DESCENT_DURATION_S).clamp(0.0, 1.0);
+            state.platform_y_m =
+                state.top_y_m + (state.bottom_y_m - state.top_y_m) * smoothstep(progress);
+        }
+        ElevatorPhase::Ascending => {
+            state.doors_closed = true;
+            state.phase_timer_s = (state.phase_timer_s - dt).max(0.0);
+            let progress =
+                (1.0 - state.phase_timer_s / ELEVATOR_ASCENT_DURATION_S).clamp(0.0, 1.0);
+            state.platform_y_m =
+                state.bottom_y_m + (state.top_y_m - state.bottom_y_m) * smoothstep(progress);
+        }
+        ElevatorPhase::WinchActive => {
+            state.phase_timer_s = (state.phase_timer_s - dt).max(0.0);
+        }
+        ElevatorPhase::ShedIdle | ElevatorPhase::CaveIdle => {}
     }
 }
 
@@ -1216,6 +1254,42 @@ mod tests {
         match liftoff.emit_sound {
             Some((SynthClip::DoorSlam, _, _, _)) => {}
             other => panic!("expected DoorSlam on winch liftoff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guest_elevator_interpolation_and_last_ridden_y_tracks_smooth_descent() {
+        let (_world_arc, info, mut state) = sample_world_and_state();
+        assert!((state.last_ridden_y_m - info.shed_floor_y_m).abs() < 1e-4);
+
+        // Simulate receiving an initial network sync at the start of descent (`t = 6.7s` left),
+        // which updates `platform_y_m` earlier in the frame without clobbering `last_ridden_y_m`.
+        let synced_y = info.shed_floor_y_m - 0.35;
+        state.apply_network_sync(ElevatorPhase::Descending, synced_y, 6.7, 1, 1337);
+        assert!(
+            (state.last_ridden_y_m - info.shed_floor_y_m).abs() < 1e-4,
+            "apply_network_sync must preserve last_ridden_y_m for elevator_runtime_system"
+        );
+
+        // Guest steps local interpolation by 16ms: platform_y_m advances smoothly and
+        // `platform_y_m - last_ridden_y_m` is strictly negative (non-zero descent delta).
+        step_guest_elevator_interpolation(&mut state, 1.0 / 60.0);
+        let delta_y = state.platform_y_m - state.last_ridden_y_m;
+        assert!(
+            delta_y < -0.1,
+            "expected negative descent delta_y after sync + interpolation, got {delta_y}"
+        );
+        state.last_ridden_y_m = state.platform_y_m;
+
+        // Between 0.30s Host syncs, each 60fps frame continues descending smoothly.
+        for _ in 0..18 {
+            step_guest_elevator_interpolation(&mut state, 1.0 / 60.0);
+            let frame_delta = state.platform_y_m - state.last_ridden_y_m;
+            assert!(
+                frame_delta < -1e-3,
+                "expected smooth per-frame guest descent delta, got {frame_delta}"
+            );
+            state.last_ridden_y_m = state.platform_y_m;
         }
     }
 }
