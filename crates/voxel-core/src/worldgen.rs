@@ -1297,16 +1297,6 @@ fn build_starter_shed(world: &mut VoxelWorld, cx: i32, cz: i32, shed_floor_y: i3
     for x in (cx + 5)..=(cx + 8) {
         world.set(IVec3::new(x, shed_floor_y + 1, cz + 7), VoxelId::Timber);
     }
-
-    // Bioluminescent worklights mounted near the Shed ceiling
-    world.set(
-        IVec3::new(cx - 6, shed_floor_y + 5, cz),
-        VoxelId::BiolumCrystal,
-    );
-    world.set(
-        IVec3::new(cx + 7, shed_floor_y + 5, cz),
-        VoxelId::BiolumCrystal,
-    );
 }
 
 #[cfg(test)]
