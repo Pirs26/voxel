@@ -76,6 +76,8 @@ enum SaveNamePromptMode {
 #[derive(Resource, Default)]
 struct SaveNamePromptState {
     open: bool,
+    focused: bool,
+    caret_reset_s: f32,
     mode: Option<SaveNamePromptMode>,
     buffer: String,
     default_hint: String,
@@ -159,6 +161,12 @@ struct SaveNameModalTitle;
 
 #[derive(Component)]
 struct SaveNameModalSubtitle;
+
+#[derive(Component)]
+struct SaveNameInputBox;
+
+#[derive(Component)]
+struct SaveNameFocusBadge;
 
 #[derive(Component)]
 struct SaveNameInputText;
@@ -399,6 +407,8 @@ enum UiAction {
     SaveListPage(i32),
     OpenNewSavePrompt,
     OpenRenameSavePrompt,
+    FocusSaveNameInput,
+    BlurSaveNameInput,
     ConfirmSaveNamePrompt,
     CancelSaveNamePrompt,
     RefreshSaveSlots,
@@ -3324,6 +3334,11 @@ fn setup_hud(mut commands: Commands) {
             Visibility::Hidden,
             UiPanelKind::SaveNameModal,
         ))
+        .observe(
+            |_click: On<PointerClick>, mut writer: MessageWriter<TriggerUiAction>| {
+                writer.write(TriggerUiAction(UiAction::BlurSaveNameInput));
+            },
+        )
         .with_children(|backdrop| {
             backdrop
                 .spawn((
@@ -3349,6 +3364,12 @@ fn setup_hud(mut commands: Commands) {
                         bottom: COL_BORDER_DIM,
                     },
                 ))
+                .observe(
+                    |mut click: On<PointerClick>, mut writer: MessageWriter<TriggerUiAction>| {
+                        click.propagate(false);
+                        writer.write(TriggerUiAction(UiAction::BlurSaveNameInput));
+                    },
+                )
                 .with_children(|modal| {
                     modal
                         .spawn(Node {
@@ -3382,22 +3403,45 @@ fn setup_hud(mut commands: Commands) {
                             Node {
                                 width: Val::Percent(100.0),
                                 padding: UiRect::axes(Val::Px(12.0), Val::Px(10.0)),
-                                border: UiRect::all(Val::Px(1.5)),
+                                border: UiRect::all(Val::Px(2.0)),
                                 border_radius: BorderRadius::all(Val::Px(6.0)),
+                                flex_direction: FlexDirection::Row,
+                                justify_content: JustifyContent::SpaceBetween,
+                                align_items: AlignItems::Center,
+                                column_gap: Val::Px(8.0),
                                 ..default()
                             },
-                            BackgroundColor(Color::srgba(0.05, 0.08, 0.12, 0.98)),
+                            BackgroundColor(Color::srgba(0.06, 0.14, 0.20, 0.98)),
                             BorderColor::all(COL_ACCENT_CYAN),
+                            SaveNameInputBox,
                         ))
+                        .observe(
+                            |mut click: On<PointerClick>,
+                             mut writer: MessageWriter<TriggerUiAction>| {
+                                click.propagate(false);
+                                writer.write(TriggerUiAction(UiAction::FocusSaveNameInput));
+                            },
+                        )
                         .with_children(|input_box| {
                             input_box.spawn((
-                                Text::new("_"),
+                                Text::new("|"),
                                 TextFont {
                                     font_size: FontSize::Px(15.0),
                                     ..default()
                                 },
                                 TextColor(COL_TEXT_BRIGHT),
+                                Pickable::IGNORE,
                                 SaveNameInputText,
+                            ));
+                            input_box.spawn((
+                                Text::new("TYPING"),
+                                TextFont {
+                                    font_size: FontSize::Px(10.5),
+                                    ..default()
+                                },
+                                TextColor(COL_ACCENT_CYAN),
+                                Pickable::IGNORE,
+                                SaveNameFocusBadge,
                             ));
                         });
 
@@ -3440,6 +3484,7 @@ fn setup_hud(mut commands: Commands) {
 
 #[allow(clippy::too_many_arguments)]
 fn handle_name_typing_system(
+    time: Res<Time>,
     screen: Res<AppScreen>,
     settings_open: Res<SettingsMenuOpen>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -3455,6 +3500,8 @@ fn handle_name_typing_system(
         return;
     }
 
+    let now_s = time.elapsed_secs();
+
     if save_prompt.open {
         let ctrl_held =
             keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
@@ -3463,37 +3510,45 @@ fn handle_name_typing_system(
                 continue;
             }
             match &ev.logical_key {
-                Key::Backspace => {
-                    if ctrl_held {
-                        save_prompt.buffer.clear();
-                    } else {
-                        save_prompt.buffer.pop();
-                    }
-                    save_prompt.error_text.clear();
-                }
-                Key::Delete => {
-                    save_prompt.buffer.clear();
-                    save_prompt.error_text.clear();
-                }
                 Key::Enter => {
                     ui_writer.write(TriggerUiAction(UiAction::ConfirmSaveNamePrompt));
                 }
                 Key::Escape => {
                     ui_writer.write(TriggerUiAction(UiAction::CancelSaveNamePrompt));
                 }
-                Key::Space => {
+                Key::Tab => {
+                    save_prompt.focused = true;
+                    save_prompt.caret_reset_s = now_s;
+                }
+                Key::Backspace if save_prompt.focused => {
+                    if ctrl_held {
+                        save_prompt.buffer.clear();
+                    } else {
+                        save_prompt.buffer.pop();
+                    }
+                    save_prompt.error_text.clear();
+                    save_prompt.caret_reset_s = now_s;
+                }
+                Key::Delete if save_prompt.focused => {
+                    save_prompt.buffer.clear();
+                    save_prompt.error_text.clear();
+                    save_prompt.caret_reset_s = now_s;
+                }
+                Key::Space if save_prompt.focused => {
                     if save_prompt.buffer.len() < MAX_SAVE_SLOT_NAME_LEN {
                         save_prompt.buffer.push(' ');
                         save_prompt.error_text.clear();
+                        save_prompt.caret_reset_s = now_s;
                     }
                 }
-                Key::Character(s) => {
+                Key::Character(s) if save_prompt.focused => {
                     for ch in s.chars() {
                         if save_prompt.buffer.len() < MAX_SAVE_SLOT_NAME_LEN
                             && (ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == ' ')
                         {
                             save_prompt.buffer.push(ch);
                             save_prompt.error_text.clear();
+                            save_prompt.caret_reset_s = now_s;
                         }
                     }
                 }
@@ -3609,6 +3664,7 @@ fn slider_current_frac(settings: &UserSettings, kind: SliderKind) -> f32 {
 
 #[derive(SystemParam)]
 struct ActionResources<'w> {
+    time: Res<'w, Time>,
     keys: Res<'w, ButtonInput<KeyCode>>,
     menu_open: ResMut<'w, CoopMenuOpen>,
     settings_open: ResMut<'w, SettingsMenuOpen>,
@@ -3703,6 +3759,8 @@ fn handle_ui_actions_system(
                 save_browser.refresh();
                 save_dropdown.open = false;
                 save_prompt.open = true;
+                save_prompt.focused = true;
+                save_prompt.caret_reset_s = res.time.elapsed_secs();
                 save_prompt.mode = Some(SaveNamePromptMode::Create);
                 save_prompt.buffer.clear();
                 save_prompt.default_hint = save_browser.next_default_new_slot_name();
@@ -3714,14 +3772,26 @@ fn handle_ui_actions_system(
                 save_dropdown.open = false;
                 let current = save_browser.selected_slot_name().to_string();
                 save_prompt.open = true;
+                save_prompt.focused = true;
+                save_prompt.caret_reset_s = res.time.elapsed_secs();
                 save_prompt.mode = Some(SaveNamePromptMode::Rename);
                 save_prompt.buffer = current.clone();
                 save_prompt.default_hint.clear();
                 save_prompt.target_old_name = current;
                 save_prompt.error_text.clear();
             }
+            UiAction::FocusSaveNameInput => {
+                if save_prompt.open {
+                    save_prompt.focused = true;
+                    save_prompt.caret_reset_s = res.time.elapsed_secs();
+                }
+            }
+            UiAction::BlurSaveNameInput => {
+                save_prompt.focused = false;
+            }
             UiAction::CancelSaveNamePrompt => {
                 save_prompt.open = false;
+                save_prompt.focused = false;
                 save_prompt.error_text.clear();
             }
             UiAction::ConfirmSaveNamePrompt => match save_prompt.mode {
@@ -3994,6 +4064,7 @@ struct MenuShopRead<'w> {
 
 #[allow(clippy::type_complexity)]
 fn update_menu_and_shop_system(
+    time: Res<Time>,
     st: MenuShopRead,
     mut texts: ParamSet<(
         Query<&mut Text, With<MainMenuNameText>>,
@@ -4005,7 +4076,7 @@ fn update_menu_and_shop_system(
         Query<&mut Text, With<ShopSaveTagText>>,
     )>,
     mut borders: ParamSet<(
-        Query<&mut BorderColor, With<MainMenuNameBox>>,
+        Query<(&mut BorderColor, &mut BackgroundColor), With<MainMenuNameBox>>,
         Query<(&VisorHelmetButton, &mut BorderColor)>,
         Query<(&ShopTierTab, &mut BorderColor, &mut BackgroundColor)>,
         Query<(&SaveTierPip, &mut BackgroundColor)>,
@@ -4017,8 +4088,14 @@ fn update_menu_and_shop_system(
     let campaign = &st.campaign;
     let save_browser = &st.save_browser;
 
+    let blink_on = ((time.elapsed_secs() / 0.50).floor() as u64).is_multiple_of(2);
+
     if let Ok(mut t) = texts.p0().single_mut() {
-        let cursor = if name_focused.0 { "_" } else { "" };
+        let cursor = if name_focused.0 {
+            if blink_on { "|" } else { " " }
+        } else {
+            ""
+        };
         t.0 = format!("{}{}", user_settings.player_name, cursor);
     }
     if let Ok(mut t) = texts.p1().single_mut() {
@@ -4113,11 +4190,16 @@ fn update_menu_and_shop_system(
         );
     }
 
-    if let Ok(mut b) = borders.p0().single_mut() {
+    if let Ok((mut b, mut bg)) = borders.p0().single_mut() {
         *b = BorderColor::all(if name_focused.0 {
             COL_ACCENT_CYAN
         } else {
             COL_BORDER_DIM
+        });
+        *bg = BackgroundColor(if name_focused.0 {
+            Color::srgba(0.06, 0.14, 0.20, 0.98)
+        } else {
+            Color::srgba(0.05, 0.08, 0.12, 0.98)
         });
     }
     let active_visor = coop.visor_idx % VISOR_PALETTE.len();
@@ -4241,13 +4323,16 @@ fn update_save_dropdown_system(
 
 #[allow(clippy::type_complexity)]
 fn update_save_name_modal_system(
+    time: Res<Time>,
     prompt: Res<SaveNamePromptState>,
+    mut box_q: Query<(&mut BorderColor, &mut BackgroundColor), With<SaveNameInputBox>>,
     mut texts: ParamSet<(
         Query<&mut Text, With<SaveNameModalTitle>>,
         Query<&mut Text, With<SaveNameModalSubtitle>>,
         Query<(&mut Text, &mut TextColor), With<SaveNameInputText>>,
         Query<(&mut Text, &mut TextColor), With<SaveNameHintText>>,
         Query<&mut Text, With<SaveNameConfirmLabel>>,
+        Query<(&mut Text, &mut TextColor), With<SaveNameFocusBadge>>,
     )>,
 ) {
     if !prompt.open {
@@ -4255,6 +4340,18 @@ fn update_save_name_modal_system(
     }
 
     let is_rename = prompt.mode == Some(SaveNamePromptMode::Rename);
+    let blink_elapsed = (time.elapsed_secs() - prompt.caret_reset_s).max(0.0);
+    let caret_visible = ((blink_elapsed / 0.50).floor() as u64).is_multiple_of(2);
+
+    if let Ok((mut border, mut bg)) = box_q.single_mut() {
+        if prompt.focused {
+            *border = BorderColor::all(COL_ACCENT_CYAN);
+            *bg = BackgroundColor(Color::srgba(0.06, 0.14, 0.20, 0.98));
+        } else {
+            *border = BorderColor::all(COL_BORDER_DIM);
+            *bg = BackgroundColor(Color::srgba(0.04, 0.06, 0.09, 0.96));
+        }
+    }
 
     if let Ok(mut t) = texts.p0().single_mut() {
         t.0 = if is_rename {
@@ -4273,12 +4370,25 @@ fn update_save_name_modal_system(
     }
 
     if let Ok((mut t, mut col)) = texts.p2().single_mut() {
+        let caret = if prompt.focused {
+            if caret_visible { "|" } else { " " }
+        } else {
+            ""
+        };
         if prompt.buffer.is_empty() && !is_rename {
-            t.0 = format!("Type name... (Enter for '{}')", prompt.default_hint);
+            if prompt.focused {
+                t.0 = format!("{caret} Type name... (Enter for '{}')", prompt.default_hint);
+            } else {
+                t.0 = format!("Click here to type... (Enter for '{}')", prompt.default_hint);
+            }
             *col = TextColor(COL_TEXT_MUTED);
         } else {
-            t.0 = format!("{}_", prompt.buffer);
-            *col = TextColor(COL_TEXT_BRIGHT);
+            t.0 = format!("{}{caret}", prompt.buffer);
+            *col = TextColor(if prompt.focused {
+                COL_TEXT_BRIGHT
+            } else {
+                COL_TEXT_MUTED
+            });
         }
     }
 
@@ -4306,6 +4416,16 @@ fn update_save_name_modal_system(
         } else {
             "Create Save".to_string()
         };
+    }
+
+    if let Ok((mut t, mut col)) = texts.p5().single_mut() {
+        if prompt.focused {
+            t.0 = "TYPING".to_string();
+            *col = TextColor(COL_ACCENT_CYAN);
+        } else {
+            t.0 = "CLICK TO TYPE".to_string();
+            *col = TextColor(COL_TEXT_MUTED);
+        }
     }
 }
 
