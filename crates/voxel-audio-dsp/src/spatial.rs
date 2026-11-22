@@ -22,7 +22,7 @@ pub struct EarlyReflectionLine {
 impl EarlyReflectionLine {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.max(1.0);
-        let max_len = ((sr * 0.25) as usize).max(1024);
+        let max_len = ((sr * 0.32) as usize).max(1024);
         let hp_alpha = 1.0 - (-std::f32::consts::TAU * 95.0 / sr).exp();
         Self {
             sample_rate: sr,
@@ -51,8 +51,9 @@ impl EarlyReflectionLine {
             let delay_samps = ((tap.delay_sec * self.sample_rate) as usize).clamp(1, max_delay);
             // Weight early reflection gain toward Mid/High frequencies so tunnel slap-back echoes
             // sound crisp and directional without adding low-frequency mud.
-            let gain = (tap.gain.0[0] * 0.20 + tap.gain.0[1] * 0.50 + tap.gain.0[2] * 0.30)
-                .clamp(0.0, 1.15);
+            let gain = ((tap.gain.0[0] * 0.20 + tap.gain.0[1] * 0.50 + tap.gain.0[2] * 0.30)
+                * 1.18)
+                .clamp(0.0, 1.35);
             let (gl, gr) = stereo_pan_gains(tap.direction, listener_right);
             out[count] = (gain * gl, gain * gr, delay_samps);
             count += 1;

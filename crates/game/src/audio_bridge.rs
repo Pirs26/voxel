@@ -21,6 +21,7 @@ use crate::{
 
 const BEACON_SOURCE_ID: u64 = 1;
 const DRIP_SOURCE_ID: u64 = 2;
+const SELF_ECHO_SOURCE_ID: u64 = 3;
 const VOICE_SOURCE_BASE_ID: u64 = 10_000;
 
 /// One-shot spatial sound trigger message (also carries an `AcousticEvent` for Week-3 blind AI).
@@ -371,7 +372,7 @@ fn submit_and_poll_acoustics(
     // 1. Submit non-blocking work request at 20 Hz (overwrites any unstarted pending request)
     if beacon.solve_timer.just_finished() {
         beacon.frame_counter = beacon.frame_counter.wrapping_add(1);
-        let mut sources = Vec::with_capacity(2 + coop.remote_players.len());
+        let mut sources = Vec::with_capacity(3 + coop.remote_players.len());
         sources.push(AcousticSourceQuery {
             id: BEACON_SOURCE_ID,
             pos_m: beacon.pos_m,
@@ -385,12 +386,21 @@ fn submit_and_poll_acoustics(
             max_distance_m: 70.0,
         });
 
+        if settings.self_echo_test && !beacon.enabled {
+            sources.push(AcousticSourceQuery {
+                id: SELF_ECHO_SOURCE_ID,
+                pos_m: listener_pos + listener_fwd * 2.0,
+                ref_distance_m: 7.5,
+                max_distance_m: 110.0,
+            });
+        }
+
         for (&player_id, rp) in &coop.remote_players {
             sources.push(AcousticSourceQuery {
                 id: VOICE_SOURCE_BASE_ID + player_id as u64,
                 pos_m: remote_player_head_pos(rp),
-                ref_distance_m: 2.2,
-                max_distance_m: 55.0,
+                ref_distance_m: 7.5,
+                max_distance_m: 110.0,
             });
         }
 
@@ -421,6 +431,12 @@ fn submit_and_poll_acoustics(
             } else if src.id == DRIP_SOURCE_ID {
                 telemetry.drip_params = Some(src);
                 audio.engine.send(AudioCommand::UpdateSource(src));
+            } else if src.id == SELF_ECHO_SOURCE_ID {
+                if settings.self_echo_test && !beacon.enabled {
+                    audio
+                        .engine
+                        .update_voice_acoustics(LOCAL_LOOPBACK_SPEAKER_ID, src);
+                }
             } else if src.id >= VOICE_SOURCE_BASE_ID {
                 let speaker_id = (src.id - VOICE_SOURCE_BASE_ID) as u16;
                 audio.engine.update_voice_acoustics(speaker_id, src);
@@ -430,6 +446,7 @@ fn submit_and_poll_acoustics(
         }
 
         if settings.self_echo_test
+            && beacon.enabled
             && let Some(beacon_params) = telemetry.beacon_params
         {
             audio

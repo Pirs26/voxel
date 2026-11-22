@@ -28,8 +28,8 @@ impl Default for PathTraceConfig {
         Self {
             reverb_rays: 72,
             max_bounces: 4,
-            max_ray_dist_m: 65.0,
-            early_reflection_rays: 28,
+            max_ray_dist_m: 85.0,
+            early_reflection_rays: 32,
         }
     }
 }
@@ -208,7 +208,7 @@ pub fn trace_listener_reverb(
 
     let mean_r = mean_refl.mean();
     let size_wet_scale = (0.72 + 0.28 * ((mfp - 2.5) / 12.0).clamp(0.0, 1.0)).clamp(0.72, 1.0);
-    let wet_mix = (enclosure * mean_r * 0.72 * size_wet_scale).clamp(0.04, 0.70);
+    let wet_mix = (enclosure * mean_r * 0.94 * size_wet_scale).clamp(0.04, 0.88);
 
     ReverbEstimate {
         rt60_sec: Bands3(rt60),
@@ -247,7 +247,7 @@ pub fn trace_early_reflections(
         let dir = Vec3::new(theta.cos() * r, y, theta.sin() * r).normalize();
 
         // Cast from listener to find a reflecting wall surface
-        let Some(hit) = raycast_solid(world, listener_pos_m, dir, cfg.max_ray_dist_m * 0.65) else {
+        let Some(hit) = raycast_solid(world, listener_pos_m, dir, cfg.max_ray_dist_m * 0.72) else {
             continue;
         };
         if hit.distance_m < 0.35 {
@@ -264,7 +264,7 @@ pub fn trace_early_reflections(
 
         let total_path = hit.distance_m + leg2_dist;
         let delay_sec = total_path / SPEED_OF_SOUND_M_S;
-        if delay_sec > 0.22 {
+        if delay_sec > 0.28 {
             continue;
         }
 
@@ -287,7 +287,7 @@ pub fn trace_early_reflections(
 
         // Close tunnel walls (< 3.5m from listener) deliver crisp slap-back reflections
         let wall_proximity =
-            1.0 + 0.45 * ((3.5 - hit.distance_m).clamp(0.0, 3.5) / 3.5);
+            1.0 + 0.55 * ((3.5 - hit.distance_m).clamp(0.0, 3.5) / 3.5);
 
         // Remove leg2's own distance falloff so we apply a single unified total-path distance
         // attenuation across `total_path = hit.distance_m + leg2_dist` while keeping any partial
@@ -296,11 +296,11 @@ pub fn trace_early_reflections(
         let leg2_dist_atten = (leg2_ref / (leg2_ref + (leg2_dist - leg2_ref).max(0.0))).max(1e-3);
         let leg2_trans = leg2_occ.direct_gain.scale(1.0 / leg2_dist_atten).clamp(0.0, 1.0);
 
-        let total_path_atten = (1.8 / (1.8 + (total_path - 1.2).max(0.0))).clamp(0.0, 1.0);
+        let total_path_atten = (4.5 / (4.5 + (total_path - 1.2).max(0.0))).clamp(0.0, 1.0);
         let tap_gain = mat_refl
             .mul(leg2_trans)
-            .scale(total_path_atten * brdf * wall_proximity * 0.58)
-            .clamp(0.0, 0.95);
+            .scale(total_path_atten * brdf * wall_proximity * 0.86)
+            .clamp(0.0, 1.10);
 
         if tap_gain.mean() > 0.01 {
             candidates.push(EarlyTap {
@@ -335,7 +335,7 @@ pub fn trace_early_reflections(
             .iter()
             .any(|t| (t.delay_sec - cand.delay_sec).abs() < 0.0025)
         {
-            cand.delay_sec = (cand.delay_sec + 0.0028).min(0.22);
+            cand.delay_sec = (cand.delay_sec + 0.0028).min(0.28);
         }
         taps[out_idx] = cand;
         out_idx += 1;

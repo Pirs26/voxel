@@ -77,16 +77,16 @@ pub fn solve_single_source(
 
     // Reverb send increases with distance & room enclosure, damped if heavily walled off
     // unless strong early reflections wrap through a breached doorway or tunnel corner.
-    let dist_factor = (occ.distance_m / 12.0).clamp(0.15, 1.0);
+    let dist_factor = (occ.distance_m / 10.0).clamp(0.32, 1.0);
     let direct_openness = occ.direct_gain.0[0] * 0.7 + occ.direct_gain.0[1] * 0.3;
     let bounce_openness = early_taps
         .iter()
         .filter(|t| t.active)
         .map(|t| t.gain.mean())
         .fold(0.0f32, f32::max);
-    let wall_damp = direct_openness.max(bounce_openness * 0.85).clamp(0.05, 1.0);
+    let wall_damp = direct_openness.max(bounce_openness * 1.15).clamp(0.08, 1.0);
     let reverb_send =
-        (reverb.wet_mix * (0.35 + 0.65 * dist_factor) * wall_damp.sqrt()).clamp(0.0, 0.85);
+        (reverb.wet_mix * (0.58 + 0.42 * dist_factor) * wall_damp.sqrt()).clamp(0.0, 1.0);
 
     SourceAcousticParams {
         id: source.id,
@@ -262,5 +262,65 @@ mod tests {
         assert!(params.direct_gain.mean() > 0.0);
         assert!(params.reverb_send > 0.0);
         assert!(params.early_taps.iter().all(|t| !t.active));
+    }
+
+    #[test]
+    fn proximity_voice_carries_across_20m_stone_room_with_strong_echo_and_reverb() {
+        let cfg = VoxelConfig::half_player_scale(UVec3::splat(2));
+        let mut world = VoxelWorld::new(cfg);
+        let start = IVec3::splat(3);
+        let end = IVec3::splat(30);
+        for y in start.y..=end.y {
+            for z in start.z..=end.z {
+                for x in start.x..=end.x {
+                    let shell = x == start.x
+                        || x == end.x
+                        || y == start.y
+                        || y == end.y
+                        || z == start.z
+                        || z == end.z;
+                    if shell {
+                        world.set(IVec3::new(x, y, z), VoxelId::CaveStone);
+                    }
+                }
+            }
+        }
+
+        // 22 voxels apart at 0.90 m/voxel = 19.8 m across an enclosed stone room
+        let listener_pos = cfg.voxel_to_world_center(IVec3::new(6, 10, 16));
+        let speaker_pos = cfg.voxel_to_world_center(IVec3::new(28, 10, 16));
+        let voice_query = AcousticSourceQuery {
+            id: 10_001,
+            pos_m: speaker_pos,
+            ref_distance_m: 7.5,
+            max_distance_m: 110.0,
+        };
+
+        let pt_cfg = PathTraceConfig::default();
+        let snap = solve_acoustics(
+            &world,
+            listener_pos,
+            Vec3::X,
+            Vec3::Z,
+            &[voice_query],
+            pt_cfg,
+            777,
+        );
+        let params = snap.sources[0];
+
+        assert!(
+            params.direct_gain.mean() > 0.30,
+            "expected clear proximity voice across ~20m stone room (direct_gain.mean() > 0.30), got {:?}",
+            params.direct_gain
+        );
+        assert!(
+            params.reverb_send > 0.35,
+            "expected strong cavern reverb send (> 0.35), got {}",
+            params.reverb_send
+        );
+        assert!(
+            params.early_taps.iter().any(|t| t.active),
+            "expected active early reflection echo taps across ~20m stone room"
+        );
     }
 }

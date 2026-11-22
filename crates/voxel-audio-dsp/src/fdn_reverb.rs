@@ -125,7 +125,7 @@ impl FdnReverb {
             self.hp_state[ch] += (hf_damped - self.hp_state[ch]) * hp_alpha;
             let clean = hf_damped - self.hp_state[ch] * 0.28;
 
-            let inj = if ch % 2 == 0 { in_l } else { in_r } * 0.35;
+            let inj = if ch % 2 == 0 { in_l } else { in_r } * 0.44;
             let next = (clean * self.fb_gains[ch] + inj).clamp(-8.0, 8.0);
 
             let w = self.write_idx[ch];
@@ -141,7 +141,7 @@ impl FdnReverb {
             }
         }
 
-        (out_l * 0.32, out_r * 0.32)
+        (out_l * 0.48, out_r * 0.48)
     }
 
     /// Backwards-compatible single-sample entry point. Prefer calling `prepare_block` once

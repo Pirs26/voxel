@@ -22,6 +22,9 @@ pub const MAX_VOICE_CHANNELS: usize = 6;
 /// Lock-free PCM ring buffer capacity per live voice channel (~200 ms @ 48 kHz).
 const VOICE_RING_CAPACITY: usize = 9_600;
 
+/// Presence boost applied to proximity VoIP channels so speech cuts cleanly through cave ambience.
+const VOICE_PRESENCE_BOOST: f32 = 1.35;
+
 /// Lock-free commands sent from the simulation thread to the real-time `cpal` callback.
 #[derive(Clone, Debug)]
 pub enum AudioCommand {
@@ -362,8 +365,8 @@ impl MixerState {
 
             // 3. Shared cavern FDN late reverb send (pre-diffused by early taps & muffled behind walls)
             let send = v.reverb_send;
-            rev_in_l += (muffled * gl * 0.62 + el * 0.38) * send;
-            rev_in_r += (muffled * gr * 0.62 + er * 0.38) * send;
+            rev_in_l += (muffled * gl * 0.80 + el * 0.60) * send;
+            rev_in_r += (muffled * gr * 0.80 + er * 0.60) * send;
         }
 
         // Mix up to MAX_VOICE_CHANNELS concurrent live VoIP streams through the exact same acoustic chain
@@ -390,7 +393,8 @@ impl MixerState {
                     }
                     vc.last_sample
                 }
-            } * self.voice_volume;
+            } * self.voice_volume
+                * VOICE_PRESENCE_BOOST;
 
             // 2. Direct path: 3-band voxel density muffling filter + cached stereo equal-power panning
             let muffled = vc.filter.process(raw, vc.direct_gain);
@@ -408,8 +412,8 @@ impl MixerState {
 
             // 4. Shared cavern FDN late reverb send (pre-diffused by early taps & muffled behind walls)
             let send = vc.reverb_send;
-            rev_in_l += (muffled * gl * 0.62 + el * 0.38) * send;
-            rev_in_r += (muffled * gr * 0.62 + er * 0.38) * send;
+            rev_in_l += (muffled * gl * 0.80 + el * 0.60) * send;
+            rev_in_r += (muffled * gr * 0.80 + er * 0.60) * send;
         }
 
         let (wet_l, wet_r) = self.fdn.process_stereo_sample(rev_in_l, rev_in_r);
@@ -613,7 +617,7 @@ impl AudioEngine {
                     solid_thickness_m: 0.0,
                     distance_m: 1.0,
                     early_taps: [EarlyTap::default(); MAX_EARLY_TAPS],
-                    reverb_send: 0.18,
+                    reverb_send: 0.32,
                 },
             });
         }
