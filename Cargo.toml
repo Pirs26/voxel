@@ -5,6 +5,7 @@ members = [
     "crates/voxel-acoustics",
     "crates/voxel-audio-dsp",
     "crates/voxel-net",
+    "crates/voxel-updater",
     "crates/game",
 ]
 
@@ -27,6 +28,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 bytes = "1"
 data-encoding = "2"
 rusty-opus = "1.2"
+ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
+sha2 = "0.11"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
 bevy = { version = "0.20", default-features = false, features = [
     "std",
     "async_executor",
@@ -63,6 +69,7 @@ voxel-core = { path = "crates/voxel-core" }
 voxel-acoustics = { path = "crates/voxel-acoustics" }
 voxel-audio-dsp = { path = "crates/voxel-audio-dsp" }
 voxel-net = { path = "crates/voxel-net" }
+voxel-updater = { path = "crates/voxel-updater" }
 
 # Fast runtime performance & compact dev binaries (avoids >2GB PE limit on windows-gnu!)
 [profile.dev]
