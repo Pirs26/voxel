@@ -1,4 +1,5 @@
 use bevy::{
+    ecs::system::SystemParam,
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
@@ -7,13 +8,14 @@ use voxel_audio_dsp::SynthClip;
 use voxel_core::{Destructibility, VoxelId, raycast_solid};
 
 use crate::{
+    ai_blind::{BlindStalker, RemoteSyncedStalker, stalker_hit_aabb},
     audio_bridge::{AcousticBeaconState, PlaySpatialSoundEvent},
     gameplay::GameplayToast,
     health::PlayerHealthState,
     inventory::PlayerInventory,
     net_bridge::{CoopMenuOpen, CoopState},
     physics::{
-        PLAYER_HEIGHT_CROUCH_M, PLAYER_HEIGHT_STAND_M, aabb_intersects_world,
+        PLAYER_HEIGHT_CROUCH_M, PLAYER_HEIGHT_STAND_M, aabb_intersects_world, ray_aabb_intersect,
         voxel_overlaps_player_aabb,
     },
     player::PlayerController,
@@ -21,6 +23,18 @@ use crate::{
     shed::ShopOverlayOpen,
     voxel_render::WorldResource,
 };
+
+/// Emitted when the local player lands a pickaxe strike (`[LMB]`) or direct flare flash (`[G]`)
+/// on a Blind Acoustic Stalker.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct StrikeStalkerEvent {
+    pub monster_id: u16,
+    pub damage: u8,
+    pub stun_s: f32,
+    pub knockback_dir: Vec3,
+    #[allow(dead_code)]
+    pub hit_pos_m: Vec3,
+}
 
 #[derive(Message, Clone, Copy, Debug)]
 pub struct SpawnFlareEvent {
@@ -49,6 +63,7 @@ pub struct ToolsPlugin;
 impl Plugin for ToolsPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<SpawnFlareEvent>()
+            .add_message::<StrikeStalkerEvent>()
             .add_systems(Startup, setup_flare_assets)
             .add_systems(
                 Update,
@@ -79,32 +94,43 @@ fn setup_flare_assets(
     });
 }
 
-/// Left click: Break `CrackedRock` or `AcousticFoam` (breaching shortcuts / opening sound paths!).
+#[derive(SystemParam)]
+struct ToolGateRes<'w> {
+    screen: Res<'w, AppScreen>,
+    menu_open: Res<'w, CoopMenuOpen>,
+    shop_open: Res<'w, ShopOverlayOpen>,
+    settings_open: Res<'w, SettingsMenuOpen>,
+    health: Res<'w, PlayerHealthState>,
+}
+
+/// Left click: Strike a Stalker in crosshair melee range (`3.2m`, stuns & damages!) OR break
+/// `CrackedRock` / `AcousticFoam` (breaching shortcuts & uncovering tunnels!).
 /// Right click: Spray/place `AcousticFoam` (consumes 1 charge from belt AcousticFoam canister!).
 #[allow(clippy::too_many_arguments)]
 fn voxel_interact_system(
+    time: Res<Time>,
+    mut melee_cd_s: Local<f32>,
     mouse: Res<ButtonInput<MouseButton>>,
-    screen: Res<AppScreen>,
-    menu_open: Res<CoopMenuOpen>,
-    shop_open: Res<ShopOverlayOpen>,
-    settings_open: Res<SettingsMenuOpen>,
-    health: Res<PlayerHealthState>,
+    gate: ToolGateRes,
     mut inv: ResMut<PlayerInventory>,
     mut toast: ResMut<GameplayToast>,
     cursor_q: Query<&CursorOptions, With<PrimaryWindow>>,
     player_q: Query<(&PlayerController, &Transform)>,
+    stalkers_q: Query<(&Transform, Option<&BlindStalker>, Option<&RemoteSyncedStalker>)>,
     world_res: Res<WorldResource>,
     mut coop: ResMut<CoopState>,
+    mut strike_writer: MessageWriter<StrikeStalkerEvent>,
     mut sound_writer: MessageWriter<PlaySpatialSoundEvent>,
 ) {
+    *melee_cd_s = (*melee_cd_s - time.delta_secs()).max(0.0);
     let Ok(cursor) = cursor_q.single() else {
         return;
     };
-    if *screen != AppScreen::InGame
-        || menu_open.0
-        || shop_open.0
-        || settings_open.0
-        || !health.is_healthy()
+    if *gate.screen != AppScreen::InGame
+        || gate.menu_open.0
+        || gate.shop_open.0
+        || gate.settings_open.0
+        || !gate.health.is_healthy()
         || inv.is_hands_occupied()
         || cursor.grab_mode == CursorGrabMode::None
     {
@@ -126,6 +152,52 @@ fn voxel_interact_system(
         let world = world_res.read();
         raycast_solid(&world, origin, dir, 5.2)
     };
+
+    // Priority on `[LMB]`: Check crosshair melee pickaxe strike against Blind Stalkers first!
+    if break_pressed && *melee_cd_s <= 0.0 {
+        let max_melee_m = hit.as_ref().map_or(3.2f32, |h| h.distance_m.min(3.2));
+        let mut best_stalker: Option<(f32, u16, Vec3)> = None;
+        for (stf, host_s, remote_s) in &stalkers_q {
+            let monster_id = if let Some(s) = host_s {
+                s.monster_id
+            } else if let Some(rs) = remote_s {
+                rs.monster_id
+            } else {
+                continue;
+            };
+            let (mn, mx) = stalker_hit_aabb(stf.translation);
+            if let Some(t) = ray_aabb_intersect(origin, dir, mn, mx, max_melee_m)
+                && best_stalker.as_ref().is_none_or(|(bd, _, _)| t < *bd)
+            {
+                best_stalker = Some((t, monster_id, origin + dir * t));
+            }
+        }
+
+        if let Some((_, monster_id, hit_pos_m)) = best_stalker {
+            *melee_cd_s = 0.42;
+            strike_writer.write(StrikeStalkerEvent {
+                monster_id,
+                damage: 1,
+                stun_s: 3.2,
+                knockback_dir: dir,
+                hit_pos_m,
+            });
+            sound_writer.write(PlaySpatialSoundEvent {
+                pos_m: hit_pos_m,
+                clip: SynthClip::HeavyImpact,
+                volume: 0.92,
+                pitch: 1.08,
+                ai_event: Some(AcousticEvent {
+                    pos_m: hit_pos_m,
+                    energy: Bands3::new(2.0, 2.8, 3.0),
+                    sharpness: 0.9,
+                    kind: AcousticEventKind::ItemImpact,
+                }),
+            });
+            return;
+        }
+    }
+
     let Some(hit) = hit else {
         return;
     };
@@ -315,12 +387,18 @@ fn spawn_flare_entities_system(
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_flares_system(
     time: Res<Time>,
     mut commands: Commands,
     world_res: Res<WorldResource>,
     mut flares_q: Query<(Entity, &mut Transform, &mut ThrownFlare, &Children)>,
+    stalkers_q: Query<
+        (&Transform, Option<&BlindStalker>, Option<&RemoteSyncedStalker>),
+        Without<ThrownFlare>,
+    >,
     mut lights_q: Query<&mut PointLight, With<FlareLight>>,
+    mut strike_writer: MessageWriter<StrikeStalkerEvent>,
     mut sound_writer: MessageWriter<PlaySpatialSoundEvent>,
 ) {
     let dt = time.delta_secs().min(0.05);
@@ -363,6 +441,33 @@ fn update_flares_system(
             }
         }
         tf.translation = pos;
+
+        // Direct/close flare impact flashes & stuns Blind Stalkers (gives ranged escape counterplay!)
+        if impact_speed > 2.5 {
+            for (stf, host_s, remote_s) in &stalkers_q {
+                let monster_id = if let Some(s) = host_s {
+                    s.monster_id
+                } else if let Some(rs) = remote_s {
+                    rs.monster_id
+                } else {
+                    continue;
+                };
+                let stalker_center = stf.translation + Vec3::Y * 1.1;
+                if pos.distance(stalker_center) <= 1.75 {
+                    let knock = flare.velocity_m.normalize_or_zero();
+                    strike_writer.write(StrikeStalkerEvent {
+                        monster_id,
+                        damage: 0,
+                        stun_s: 4.0,
+                        knockback_dir: knock,
+                        hit_pos_m: pos,
+                    });
+                    flare.velocity_m *= -0.25;
+                    flare.settled = true;
+                    break;
+                }
+            }
+        }
 
         if bounced && impact_speed > 2.2 {
             let vol = (impact_speed / 12.0).clamp(0.18, 0.75);

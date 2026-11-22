@@ -13,14 +13,16 @@ use bevy::{
 };
 use voxel_acoustics::{AcousticEvent, AcousticEventKind, Bands3};
 use voxel_audio_dsp::SynthClip;
+use voxel_core::{Destructibility, raycast_solid};
 use voxel_net::{
     ElevatorPhase, MonsterBehaviorState, PlayerHealthStatus, WorldItemKind, WorldItemNetState,
 };
 
 use crate::{
     ai_blind::{
-        BlindStalker, RemoteSyncedStalker, StalkerReaction, StalkerState,
-        process_acoustic_event_for_stalker, spawn_stalker_visual, step_stalker_ai,
+        BlindStalker, RemoteSyncedStalker, StalkerHitResult, StalkerReaction, StalkerState,
+        apply_stalker_hit, process_acoustic_event_for_stalker, spawn_stalker_visual,
+        stalker_hit_aabb, step_stalker_ai,
     },
     audio_bridge::{
         AcousticBeaconState, AcousticTelemetry, PlaySpatialSoundEvent, RemoveVoiceSpeakerEvent,
@@ -37,23 +39,25 @@ use crate::{
     },
     inventory::{CarryHandState, PlayerInventory, ShopCatalogItem, purchase_shop_item},
     net_bridge::{CoopMenuOpen, CoopState, clear_remote_players},
-    physics::aabb_intersects_world,
+    physics::{aabb_intersects_world, ray_aabb_intersect},
     player::PlayerController,
     relic::{
         CHARGER_PAD_RADIUS_M, CHARGER_PAD_RATE_PER_S, DECOY_ACTIVE_DURATION_S,
-        DECOY_PULSE_INTERVAL_S, ITEM_INTERACT_RANGE_M, RELIC_SCRAPE_INTERVAL_S,
-        RemoveWorldItemEvent, SpawnWorldItemEvent, WorldItemEntity, WorldItemRegistry,
-        belt_item_to_world_kind, create_cave_relic_states, default_starter_shed_items,
-        is_heavy_relic, is_pos_in_shed, relic_carry_speed_mult, relic_is_scraping,
-        saved_to_world_kind, spawn_world_item_visual, to_net_state,
-        try_pickup_world_item_into_inventory, world_item_display_name, world_kind_to_saved,
+        DECOY_PULSE_INTERVAL_S, RELIC_SCRAPE_INTERVAL_S, RemoveWorldItemEvent,
+        SpawnWorldItemEvent, WorldItemEntity, WorldItemRegistry, belt_item_to_world_kind,
+        create_cave_relic_states, default_starter_shed_items, is_heavy_relic, is_pos_in_shed,
+        relic_carry_speed_mult, relic_is_scraping, saved_to_world_kind, spawn_world_item_visual,
+        to_net_state, try_pickup_world_item_into_inventory, world_item_display_name,
+        world_kind_to_saved,
     },
     save::{CampaignState, SaveSlotBrowser, SavedPlayerProfile, SavedWorldItem},
     settings::{AppScreen, SettingsMenuOpen},
     shed::{
-        ShedStation, ShedStationState, ShopOverlayOpen, detect_nearest_station,
+        CrosshairTargetState, INTERACT_RAY_MAX_DIST_M, LookTargetKind, ShedStation,
+        ShedStationState, ShopOverlayOpen, TargetAccent, raycast_shed_station,
         spawn_shed_landmarks,
     },
+    tools::StrikeStalkerEvent,
     voxel_render::{LevelInfoResource, WorldResource},
 };
 
@@ -127,6 +131,7 @@ impl Plugin for GameplayPlugin {
             .init_resource::<RemoteHealthMap>()
             .init_resource::<WorldItemRegistry>()
             .init_resource::<ShedStationState>()
+            .init_resource::<CrosshairTargetState>()
             .init_resource::<ShopOverlayOpen>()
             .init_resource::<SaveSlotBrowser>()
             .init_resource::<GameplayToast>()
@@ -790,6 +795,7 @@ struct InteractMenus<'w> {
 
 #[derive(SystemParam)]
 struct InteractState<'w> {
+    world_res: Res<'w, WorldResource>,
     level_info: Res<'w, LevelInfoResource>,
     elevator: Res<'w, ElevatorState>,
     campaign: Res<'w, CampaignState>,
@@ -798,13 +804,15 @@ struct InteractState<'w> {
     health: ResMut<'w, PlayerHealthState>,
     remote_health: ResMut<'w, RemoteHealthMap>,
     station_state: ResMut<'w, ShedStationState>,
+    crosshair_target: ResMut<'w, CrosshairTargetState>,
     item_reg: ResMut<'w, WorldItemRegistry>,
     toast: ResMut<'w, GameplayToast>,
 }
 
-/// Contextual `[E]` interaction for Shed stations, Cave winch, physical items, Heavy Relics,
-/// downed teammates, `[B]` Shed Shop shortcut, and `[H]` 4s Aid Kit revive channel.
-#[allow(clippy::too_many_arguments)]
+/// Center-of-screen crosshair raycast interaction for Shed stations, interior Elevator Lever,
+/// physical items, Heavy Relics, downed teammates, Stalker target readout, `[B]` Shed Shop
+/// shortcut, and `[H]` 4s Aid Kit revive channel.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn station_and_item_interact_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -813,6 +821,7 @@ fn station_and_item_interact_system(
     mut st: InteractState,
     player_q: Query<(&PlayerController, &Transform)>,
     mut items_q: Query<(&mut WorldItemEntity, &Transform)>,
+    stalkers_q: Query<(&Transform, Option<&BlindStalker>, Option<&RemoteSyncedStalker>)>,
     mut lever_writer: MessageWriter<TriggerElevatorLeverEvent>,
     mut remove_item_writer: MessageWriter<RemoveWorldItemEvent>,
     mut revive_writer: MessageWriter<ReviveCompletedEvent>,
@@ -822,6 +831,7 @@ fn station_and_item_interact_system(
     let menu_open = &menus.menu_open;
     let shop_open = &mut menus.shop_open;
     let settings_open = &menus.settings_open;
+    let world_res = &st.world_res;
     let level_info = &st.level_info;
     let elevator = &st.elevator;
     let campaign = &st.campaign;
@@ -830,13 +840,16 @@ fn station_and_item_interact_system(
     let health = &mut st.health;
     let remote_health = &mut st.remote_health;
     let station_state = &mut st.station_state;
+    let crosshair_target = &mut st.crosshair_target;
     let item_reg = &mut st.item_reg;
     let toast = &mut st.toast;
     if **screen != AppScreen::InGame || menu_open.0 || settings_open.0 {
+        crosshair_target.clear();
         return;
     }
 
     let Ok((pc, cam_tf)) = player_q.single() else {
+        crosshair_target.clear();
         return;
     };
     let player_pos = pc.feet_pos_m;
@@ -858,6 +871,7 @@ fn station_and_item_interact_system(
     }
 
     if shop_open.0 {
+        crosshair_target.clear();
         if keys.just_pressed(KeyCode::Escape) {
             shop_open.0 = false;
             if let Ok(mut cursor) = cursor_q.single_mut() {
@@ -872,10 +886,22 @@ fn station_and_item_interact_system(
         station_state.nearest = None;
         station_state.prompt = None;
         item_reg.nearest_item_prompt = None;
+        crosshair_target.clear();
         return;
     }
 
-    // 1. Detect nearest Shed station or interior Elevator Lever
+    // 1. Cast voxel-occluded center-of-screen crosshair ray!
+    let cam_origin = cam_tf.translation;
+    let cam_dir = cam_tf.forward().as_vec3();
+    let local_id = coop.local_player_id();
+    let voxel_hit = {
+        let world = world_res.read();
+        raycast_solid(&world, cam_origin, cam_dir, INTERACT_RAY_MAX_DIST_M)
+    };
+    let ray_limit_m = voxel_hit
+        .as_ref()
+        .map_or(INTERACT_RAY_MAX_DIST_M, |h| (h.distance_m + 0.08).min(INTERACT_RAY_MAX_DIST_M));
+
     let missing_outside = count_living_players_outside_cage(
         elevator,
         player_pos,
@@ -883,97 +909,228 @@ fn station_and_item_interact_system(
         coop,
         remote_health,
     );
-    let nearest_station = detect_nearest_station(
-        player_pos,
+
+    // Compete EVERY interactable object strictly by crosshair ray intersection distance `t_hit`!
+    struct RayCandidate {
+        t: f32,
+        target: LookTargetKind,
+        key_badge: String,
+        label: String,
+        sublabel: String,
+        accent: TargetAccent,
+    }
+    let mut best: Option<RayCandidate> = None;
+    let mut consider = |cand: RayCandidate| {
+        if best.as_ref().is_none_or(|b| cand.t < b.t) {
+            best = Some(cand);
+        }
+    };
+
+    // 1a. Shed stations & interior Elevator Lever (exact AABB raycast)
+    if let Some((st_kind, label, sublabel, t_hit, blocked)) = raycast_shed_station(
+        cam_origin,
+        cam_dir,
+        ray_limit_m,
         &level_info.0,
         elevator.lever_world_pos_m(),
         elevator.phase,
         campaign.save.selected_depth_tier,
         missing_outside,
-    );
-    if let Some((st, prompt, dist_m)) = nearest_station {
-        station_state.nearest = Some(st);
-        station_state.nearest_dist_m = dist_m;
-        station_state.prompt = Some(prompt);
-    } else {
-        station_state.nearest = None;
-        station_state.nearest_dist_m = f32::MAX;
-        station_state.prompt = None;
+    ) {
+        consider(RayCandidate {
+            t: t_hit,
+            target: LookTargetKind::Station(st_kind),
+            key_badge: if blocked { "WAIT" } else { "E" }.to_string(),
+            label,
+            sublabel,
+            accent: if blocked {
+                TargetAccent::Blocked
+            } else {
+                TargetAccent::Interact
+            },
+        });
     }
 
-    // 2. Detect nearest interactable world item (excluding already-active thrown decoys)
-    let local_id = coop.local_player_id();
-    let cam_fwd = cam_tf.forward().as_vec3();
-    let mut best_item: Option<(f32, u32, WorldItemKind, usize, f32)> = None;
+    // 1b. Physical World Items (exact AABB raycast; picking an item resting on a bench wins naturally!)
     for (item, tf) in &items_q {
-        if item.active_timer_s.is_some() {
+        if item.active_timer_s.is_some() || item.carried_by.contains(&local_id) {
             continue;
         }
-        if item.carried_by.contains(&local_id) {
-            continue;
-        }
-        let d = tf.translation.distance(cam_tf.translation);
-        if d <= ITEM_INTERACT_RANGE_M && best_item.as_ref().is_none_or(|(bd, _, _, _, _)| d < *bd)
+        let half = if is_heavy_relic(&item.kind) {
+            Vec3::splat(0.42)
+        } else {
+            Vec3::splat(0.26)
+        };
+        if let Some(t_hit) =
+            ray_aabb_intersect(cam_origin, cam_dir, tf.translation - half, tf.translation + half, ray_limit_m)
         {
-            let to_item = (tf.translation - cam_tf.translation).normalize_or_zero();
-            let aim_dot = to_item.dot(cam_fwd);
-            best_item = Some((d, item.id, item.kind.clone(), item.carried_by.len(), aim_dot));
+            let label = world_item_display_name(&item.kind);
+            let carriers = item.carried_by.len();
+            let sublabel = if is_heavy_relic(&item.kind) {
+                if carriers == 0 {
+                    "Solo drag (loud) • 2P lift (quiet)".to_string()
+                } else {
+                    "Assist Duo-Lift (quiet)".to_string()
+                }
+            } else {
+                "Pick up".to_string()
+            };
+            consider(RayCandidate {
+                t: t_hit,
+                target: LookTargetKind::WorldItem {
+                    item_id: item.id,
+                    kind: item.kind.clone(),
+                    carriers,
+                },
+                key_badge: "E".to_string(),
+                label,
+                sublabel,
+                accent: TargetAccent::Interact,
+            });
         }
     }
 
-    // If a physical dropped item is next to/behind the Shop Terminal or Charger Bench and
-    // either closer to the player or directly aimed at, prefer picking up the item over the bench!
-    let prefer_item_over_bench = best_item.as_ref().is_some_and(|(item_d, _, _, _, aim_dot)| {
-        matches!(
-            station_state.nearest,
-            Some(ShedStation::ShopTerminal | ShedStation::ChargerBench)
-        ) && (*item_d < station_state.nearest_dist_m + 0.35 || *aim_dot > 0.88)
-    });
-    if prefer_item_over_bench {
-        station_state.prompt = None;
-    }
-
-    // 3. Detect nearest downed remote teammate within rescue range
-    let mut nearest_downed: Option<(f32, u16, String)> = None;
+    // 1c. Downed remote teammates (raycast target + close-range Aid Kit revive fallback)
+    let mut nearby_downed_for_revive: Option<(f32, u16, String)> = None;
     for (&pid, rp) in &coop.remote_players {
         if matches!(
             remote_health.0.get(&pid),
             Some(LocalHealthPhase::Downed { .. })
         ) {
             let d = rp.current_feet_m.distance(player_pos);
-            if d <= RESCUE_RANGE_M && nearest_downed.as_ref().is_none_or(|(bd, _, _)| d < *bd) {
-                nearest_downed = Some((d, pid, rp.info.name.clone()));
+            if d <= RESCUE_RANGE_M
+                && nearby_downed_for_revive
+                    .as_ref()
+                    .is_none_or(|(bd, _, _)| d < *bd)
+            {
+                nearby_downed_for_revive = Some((d, pid, rp.info.name.clone()));
+            }
+            let center = rp.current_feet_m + Vec3::Y * 0.45;
+            let half = Vec3::new(0.48, 0.50, 0.48);
+            if let Some(t_hit) =
+                ray_aabb_intersect(cam_origin, cam_dir, center - half, center + half, ray_limit_m)
+            {
+                consider(RayCandidate {
+                    t: t_hit,
+                    target: LookTargetKind::DownedPlayer {
+                        player_id: pid,
+                        name: rp.info.name.clone(),
+                    },
+                    key_badge: "E / H".to_string(),
+                    label: format!("Rescue {}", rp.info.name),
+                    sublabel: "[E] Drag • Hold [H] Aid Kit (4s)".to_string(),
+                    accent: TargetAccent::Interact,
+                });
             }
         }
     }
 
-    // Build contextual HUD prompt
-    item_reg.nearest_item_prompt = if let CarryHandState::HeavyRelic { .. } = inv.carry_state {
-        Some("[E / Q] Release Heavy Relic".to_string())
-    } else if let CarryHandState::DraggingPlayer { .. } = inv.carry_state {
-        Some("[E / Q] Release Downed Teammate".to_string())
-    } else if let Some((_, _, ref name)) = nearest_downed {
-        Some(format!(
-            "[E] Drag {name} to safety  |  Hold [H] Revive with Aid Kit (4s)"
-        ))
-    } else if let Some((_, _, ref kind, carriers, _)) = best_item {
-        let label = world_item_display_name(kind);
-        if is_heavy_relic(kind) {
-            if carriers == 0 {
-                Some(format!("[E] Drag {label} (Solo = loud scrape; 2P = quiet lift)"))
-            } else {
-                Some(format!("[E] Assist Duo-Lift {label} (Quiet 75% speed!)"))
-            }
+    // 1d. Blind Acoustic Stalkers within melee `[LMB]` pickaxe strike range (`3.2m`)
+    let melee_limit = ray_limit_m.min(3.2);
+    for (stf, host_s, remote_s) in &stalkers_q {
+        let (monster_id, hp, max_hp, stunned) = if let Some(s) = host_s {
+            (s.monster_id, s.hp, s.max_hp, s.state == StalkerState::Stunned)
+        } else if let Some(rs) = remote_s {
+            (rs.monster_id, 3, 3, rs.state == StalkerState::Stunned)
         } else {
-            Some(format!("[E] Pick up {label}"))
+            continue;
+        };
+        let (mn, mx) = stalker_hit_aabb(stf.translation);
+        if let Some(t_hit) = ray_aabb_intersect(cam_origin, cam_dir, mn, mx, melee_limit) {
+            let pips: String = (0..max_hp)
+                .map(|i| if i < hp { '●' } else { '○' })
+                .collect();
+            let sublabel = if stunned {
+                format!("HP {pips} • STUNNED!")
+            } else {
+                format!("HP {pips} • Stuns & knocks back")
+            };
+            consider(RayCandidate {
+                t: t_hit,
+                target: LookTargetKind::Stalker {
+                    monster_id,
+                    hp,
+                    max_hp,
+                    stunned,
+                },
+                key_badge: "LMB".to_string(),
+                label: "Strike Stalker".to_string(),
+                sublabel,
+                accent: TargetAccent::Danger,
+            });
         }
-    } else {
-        None
-    };
+    }
 
-    // 4. Hold `[H]` to channel consumable Aid Kit revive on a downed teammate
+    drop(consider);
+    // 1e. Breakable voxel hint (`CrackedRock` / `AcousticFoam`) if no closer entity was hit
+    if best.is_none()
+        && !inv.is_hands_occupied()
+        && let Some(ref vh) = voxel_hit
+        && matches!(
+            vh.material.def().destructibility,
+            Destructibility::BreakableCracked | Destructibility::PlaceableTool
+        )
+    {
+        let label = match vh.material {
+            voxel_core::VoxelId::CrackedRock => "Break Cracked Wall",
+            voxel_core::VoxelId::AcousticFoam => "Clear Acoustic Foam",
+            _ => "Break Block",
+        };
+        best = Some(RayCandidate {
+            t: vh.distance_m,
+            target: LookTargetKind::BreakableVoxel,
+            key_badge: "LMB".to_string(),
+            label: label.to_string(),
+            sublabel: "Opens passage (LOUD)".to_string(),
+            accent: TargetAccent::Interact,
+        });
+    }
+
+    // Update `CrosshairTargetState` (and legacy compatibility prompts)
+    station_state.nearest = None;
+    station_state.nearest_dist_m = f32::MAX;
+    station_state.prompt = None;
+    item_reg.nearest_item_prompt = None;
+
+    if let CarryHandState::HeavyRelic { .. } = inv.carry_state {
+        crosshair_target.target = None;
+        crosshair_target.key_badge = "E / Q".to_string();
+        crosshair_target.label = "Drop Heavy Relic".to_string();
+        crosshair_target.sublabel = if item_reg.active_carry_is_scraping {
+            "SCRAPING LOUDLY".to_string()
+        } else {
+            "Duo-lift (quiet)".to_string()
+        };
+        crosshair_target.accent = TargetAccent::Interact;
+    } else if let CarryHandState::DraggingPlayer { .. } = inv.carry_state {
+        crosshair_target.target = None;
+        crosshair_target.key_badge = "E / Q".to_string();
+        crosshair_target.label = "Release Teammate".to_string();
+        crosshair_target.sublabel.clear();
+        crosshair_target.accent = TargetAccent::Interact;
+    } else if let Some(cand) = best {
+        if let LookTargetKind::Station(st_kind) = cand.target {
+            station_state.nearest = Some(st_kind);
+            station_state.nearest_dist_m = cand.t;
+        }
+        crosshair_target.target = Some(cand.target);
+        crosshair_target.key_badge = cand.key_badge;
+        crosshair_target.label = cand.label;
+        crosshair_target.sublabel = cand.sublabel;
+        crosshair_target.accent = cand.accent;
+    } else {
+        crosshair_target.clear();
+    }
+
+    // 2. Hold `[H]` to channel consumable Aid Kit revive on aimed/nearby downed teammate
+    let revive_target = match &crosshair_target.target {
+        Some(LookTargetKind::DownedPlayer { player_id, name }) => {
+            Some((*player_id, name.clone()))
+        }
+        _ => nearby_downed_for_revive.map(|(_, pid, name)| (pid, name)),
+    };
     if keys.pressed(KeyCode::KeyH) && !inv.is_hands_occupied() {
-        if let Some((_, target_pid, ref name)) = nearest_downed {
+        if let Some((target_pid, name)) = revive_target {
             let has_aid = inv
                 .belt
                 .iter()
@@ -1020,18 +1177,18 @@ fn station_and_item_interact_system(
         health.reviving_target = None;
     }
 
-    // 5. Contextual `[E]` press
+    // 3. Contextual `[E]` press acts strictly on what the center crosshair is pointing at!
     if !keys.just_pressed(KeyCode::KeyE) || inv.battery_selector.open {
         return;
     }
 
-    // Priority 1: release carried Heavy Relic or dragged teammate
+    // Release carried Heavy Relic or dragged teammate first
     match inv.carry_state {
         CarryHandState::HeavyRelic { item_id } => {
             release_carried_relic(
                 item_id,
                 local_id,
-                cam_tf.forward().as_vec3() * 1.4,
+                cam_dir * 1.4,
                 inv,
                 &mut items_q,
                 coop,
@@ -1046,11 +1203,12 @@ fn station_and_item_interact_system(
         CarryHandState::Free => {}
     }
 
-    // Priority 2: Shed / Cave interactive stations (skipped for Shop/Charger if aiming at a dropped item)
-    if let Some(st) = station_state.nearest
-        && !prefer_item_over_bench
-    {
-        match st {
+    let Some(target) = crosshair_target.target.clone() else {
+        return;
+    };
+
+    match target {
+        LookTargetKind::Station(st_kind) => match st_kind {
             ShedStation::ElevatorLeverShed | ShedStation::ElevatorWinchCave => {
                 if missing_outside > 0 {
                     toast.show(
@@ -1067,7 +1225,6 @@ fn station_and_item_interact_system(
                     coop.send_request_elevator_action(campaign.save.selected_depth_tier);
                     toast.show("Requested elevator activation from Host...", 2.0);
                 }
-                return;
             }
             ShedStation::ShopTerminal => {
                 shop_open.0 = true;
@@ -1075,12 +1232,11 @@ fn station_and_item_interact_system(
                     cursor.grab_mode = CursorGrabMode::None;
                     cursor.visible = true;
                 }
-                return;
             }
             ShedStation::ChargerBench => {
                 let charged = inv.recharge_all_batteries(1.0);
                 if charged {
-                    toast.show("All pouch & loaded batteries recharged to 100%!", 2.5);
+                    toast.show("All batteries recharged to 100%!", 2.5);
                 } else {
                     toast.show("All carried batteries are already at 100%", 2.0);
                 }
@@ -1091,59 +1247,54 @@ fn station_and_item_interact_system(
                     pitch: 1.25,
                     ai_event: None,
                 });
-                return;
             }
+        },
+        LookTargetKind::DownedPlayer { player_id, name } => {
+            inv.carry_state = CarryHandState::DraggingPlayer {
+                target_id: player_id,
+            };
+            toast.show(format!("Dragging {name} — move behind cover/foam!"), 2.4);
         }
-    }
-
-    // Priority 3: Start dragging a nearby downed teammate
-    if let Some((_, target_pid, ref name)) = nearest_downed {
-        inv.carry_state = CarryHandState::DraggingPlayer {
-            target_id: target_pid,
-        };
-        toast.show(format!("Dragging {name} — move behind cover/foam!"), 2.4);
-        return;
-    }
-
-    // Priority 4: Grab Heavy Relic or pick up world item
-    if let Some((_, item_id, kind, _, _)) = best_item {
-        if is_heavy_relic(&kind) {
-            for (mut item, tf) in &mut items_q {
-                if item.id == item_id {
-                    if !item.carried_by.contains(&local_id) {
-                        item.carried_by.push(local_id);
+        LookTargetKind::WorldItem { item_id, kind, .. } => {
+            if is_heavy_relic(&kind) {
+                for (mut item, tf) in &mut items_q {
+                    if item.id == item_id {
+                        if !item.carried_by.contains(&local_id) {
+                            item.carried_by.push(local_id);
+                        }
+                        item.settled = false;
+                        inv.carry_state = CarryHandState::HeavyRelic { item_id };
+                        coop.send_world_item_update(to_net_state(&item, tf.translation));
+                        let msg = if item.carried_by.len() >= 2 {
+                            "Duo-Lifting Heavy Relic! (Quiet 75% speed)"
+                        } else {
+                            "Dragging Heavy Relic solo (LOUD stone scraping!)"
+                        };
+                        toast.show(msg, 2.5);
+                        break;
                     }
-                    item.settled = false;
-                    inv.carry_state = CarryHandState::HeavyRelic { item_id };
-                    coop.send_world_item_update(to_net_state(&item, tf.translation));
-                    let msg = if item.carried_by.len() >= 2 {
-                        "Duo-Lifting Heavy Relic! (Quiet 75% speed)"
-                    } else {
-                        "Dragging Heavy Relic solo (LOUD stone scraping!)"
-                    };
-                    toast.show(msg, 2.5);
-                    break;
                 }
-            }
-        } else {
-            match try_pickup_world_item_into_inventory(inv, &kind) {
-                Ok(msg) => {
-                    toast.show(msg, 2.0);
-                    coop.send_world_item_remove(item_id);
-                    remove_item_writer.write(RemoveWorldItemEvent { item_id });
-                    sound_writer.write(PlaySpatialSoundEvent {
-                        pos_m: cam_tf.translation,
-                        clip: SynthClip::BatteryClick,
-                        volume: 0.5,
-                        pitch: 1.1,
-                        ai_event: None,
-                    });
-                }
-                Err(err) => {
-                    toast.show(err, 2.4);
+            } else {
+                match try_pickup_world_item_into_inventory(inv, &kind) {
+                    Ok(msg) => {
+                        toast.show(msg, 2.0);
+                        coop.send_world_item_remove(item_id);
+                        remove_item_writer.write(RemoveWorldItemEvent { item_id });
+                        sound_writer.write(PlaySpatialSoundEvent {
+                            pos_m: cam_origin,
+                            clip: SynthClip::BatteryClick,
+                            volume: 0.5,
+                            pitch: 1.1,
+                            ai_event: None,
+                        });
+                    }
+                    Err(err) => {
+                        toast.show(err, 2.4);
+                    }
                 }
             }
         }
+        LookTargetKind::Stalker { .. } | LookTargetKind::BreakableVoxel => {}
     }
 }
 
@@ -1623,12 +1774,14 @@ fn world_items_runtime_system(
                 sound_writer.write(PlaySpatialSoundEvent {
                     pos_m: pos,
                     clip: SynthClip::DecoyBuzz,
-                    volume: 0.95,
+                    volume: 1.0,
                     pitch: 1.0 + ((remaining * 3.0).sin() * 0.08),
                     ai_event: Some(AcousticEvent {
                         pos_m: pos,
-                        energy: Bands3::new(2.4, 4.4, 4.8),
-                        sharpness: 0.95,
+                        // Overwhelmingly louder across all 3 bands than Heavy Relic scraping
+                        // so players can reliably lure Stalkers away while escaping with a relic!
+                        energy: Bands3::new(4.2, 7.5, 8.5),
+                        sharpness: 1.0,
                         kind: AcousticEventKind::DecoyNoise,
                     }),
                 });
@@ -1682,11 +1835,12 @@ fn world_items_runtime_system(
                         sound_writer.write(PlaySpatialSoundEvent {
                             pos_m: tf.translation,
                             clip: SynthClip::RelicScrape,
-                            volume: 0.85,
+                            volume: 0.78,
                             pitch: 0.94,
                             ai_event: Some(AcousticEvent {
                                 pos_m: tf.translation,
-                                energy: Bands3::new(2.8, 2.4, 1.8),
+                                // Clearly audible, yet strictly quieter than a Noise Decoy lure
+                                energy: Bands3::new(2.1, 1.9, 1.4),
                                 sharpness: 0.45,
                                 kind: AcousticEventKind::RelicScrape,
                             }),
@@ -1778,41 +1932,74 @@ fn world_items_runtime_system(
     }
 }
 
+#[derive(SystemParam)]
+struct StalkerAiRes<'w> {
+    time: Res<'w, Time>,
+    screen: Res<'w, AppScreen>,
+    world_res: Res<'w, WorldResource>,
+    telemetry: Res<'w, AcousticTelemetry>,
+    coop: Res<'w, CoopState>,
+    health: Res<'w, PlayerHealthState>,
+    remote_health: Res<'w, RemoteHealthMap>,
+    timers: ResMut<'w, GameplayTimers>,
+    item_reg: ResMut<'w, WorldItemRegistry>,
+    toast: ResMut<'w, GameplayToast>,
+}
+
 /// Evaluates all acoustic events (SFX + real mic voice above whisper curve) through
-/// `voxel_acoustics::evaluate_ai_hearing` to drive Blind Acoustic Stalkers!
+/// `voxel_acoustics::evaluate_ai_hearing` to drive Blind Acoustic Stalkers, and handles
+/// pickaxe/flare stun & kill strikes!
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn blind_stalker_ai_system(
-    time: Res<Time>,
-    screen: Res<AppScreen>,
-    world_res: Res<WorldResource>,
-    telemetry: Res<AcousticTelemetry>,
-    coop: Res<CoopState>,
-    health: Res<PlayerHealthState>,
-    remote_health: Res<RemoteHealthMap>,
-    mut timers: ResMut<GameplayTimers>,
+    mut commands: Commands,
+    mut res: StalkerAiRes,
     mut sound_io: ParamSet<(
         MessageReader<PlaySpatialSoundEvent>,
         MessageWriter<PlaySpatialSoundEvent>,
     )>,
+    mut strike_events: MessageReader<StrikeStalkerEvent>,
     mut hit_writer: MessageWriter<MonsterHitLocalPlayerEvent>,
+    mut spawn_item_writer: MessageWriter<SpawnWorldItemEvent>,
     player_q: Query<(&PlayerController, &Transform)>,
-    mut stalkers_q: Query<(&mut BlindStalker, &mut Transform), Without<PlayerController>>,
+    mut stalkers_q: Query<
+        (Entity, &mut BlindStalker, &mut Transform),
+        (Without<PlayerController>, Without<RemoteSyncedStalker>),
+    >,
     mut remote_stalkers_q: Query<
         (&RemoteSyncedStalker, &mut Transform),
         (Without<BlindStalker>, Without<PlayerController>),
     >,
 ) {
-    if *screen != AppScreen::InGame {
+    let time = &res.time;
+    let screen = &res.screen;
+    let world_res = &res.world_res;
+    let telemetry = &res.telemetry;
+    let coop = &res.coop;
+    let health = &res.health;
+    let remote_health = &res.remote_health;
+    let timers = &mut res.timers;
+    let item_reg = &mut res.item_reg;
+    let toast = &mut res.toast;
+
+    if **screen != AppScreen::InGame {
         sound_io.p0().clear();
+        strike_events.clear();
         return;
     }
     let dt = time.delta_secs().min(0.05);
+    let elapsed = time.elapsed_secs();
 
-    // Guest-side smooth interpolation of host-simulated Blind Stalkers
+    // Guest-side smooth interpolation + stunned shudder animation
     let alpha = (dt * 12.0).clamp(0.0, 1.0);
     for (rs, mut tf) in &mut remote_stalkers_q {
         tf.translation = tf.translation.lerp(rs.target_pos_m, alpha);
-        tf.rotation = Quat::from_rotation_y(rs.target_yaw);
+        tf.rotation = if rs.state == StalkerState::Stunned {
+            Quat::from_rotation_y(rs.target_yaw)
+                * Quat::from_rotation_z((elapsed * 26.0).sin() * 0.22)
+                * Quat::from_rotation_x(-0.24)
+        } else {
+            Quat::from_rotation_y(rs.target_yaw)
+        };
     }
 
     // Collect acoustic events emitted this frame
@@ -1821,6 +2008,20 @@ fn blind_stalker_ai_system(
         .read()
         .filter_map(|ev| ev.ai_event)
         .collect();
+
+    // Collect player stun/kill strikes (guests forward to Host; Host applies authoritatively)
+    let incoming_strikes: Vec<StrikeStalkerEvent> = strike_events.read().copied().collect();
+    if !coop.is_host_or_solo() {
+        for ev in incoming_strikes {
+            coop.send_monster_damaged(ev.monster_id, ev.damage, ev.stun_s, ev.knockback_dir);
+            if ev.damage > 0 {
+                toast.show("Struck Stalker! (Stunned)", 1.6);
+            } else {
+                toast.show("Flash-Stunned Stalker!", 1.8);
+            }
+        }
+        return;
+    }
 
     // Emit periodic VoiceSpeech AcousticEvent whenever player mic exceeds whisper-safe curve!
     timers.voice_ai_timer_s += dt;
@@ -1842,7 +2043,7 @@ fn blind_stalker_ai_system(
         }
     }
 
-    if !coop.is_host_or_solo() || stalkers_q.is_empty() {
+    if stalkers_q.is_empty() {
         return;
     }
 
@@ -1871,7 +2072,74 @@ fn blind_stalker_ai_system(
 
     let mut sound_writer = sound_io.p1();
     let world = world_res.read();
-    for (mut stalker, mut tf) in &mut stalkers_q {
+    for (ent, mut stalker, mut tf) in &mut stalkers_q {
+        // 1. Apply any pickaxe melee or flare flash-stun strikes hitting this stalker
+        let mut killed = false;
+        for ev in &incoming_strikes {
+            if ev.monster_id != stalker.monster_id {
+                continue;
+            }
+            match apply_stalker_hit(&world, &mut stalker, ev.damage, ev.stun_s, ev.knockback_dir) {
+                StalkerHitResult::Stunned {
+                    remaining_hp,
+                    max_hp,
+                } => {
+                    sound_writer.write(PlaySpatialSoundEvent {
+                        pos_m: stalker.feet_pos_m + Vec3::Y * 1.5,
+                        clip: SynthClip::MonsterScreech,
+                        volume: 0.90,
+                        pitch: 1.28,
+                        ai_event: None,
+                    });
+                    if ev.damage > 0 {
+                        toast.show(
+                            format!(
+                                "STUNNED Stalker ({:.1}s)! HP {remaining_hp}/{max_hp}",
+                                ev.stun_s
+                            ),
+                            2.2,
+                        );
+                    } else {
+                        toast.show(
+                            format!("FLASH-STUNNED Stalker ({:.1}s)!", ev.stun_s),
+                            2.4,
+                        );
+                    }
+                }
+                StalkerHitResult::Killed => {
+                    killed = true;
+                    let drop_pos = stalker.feet_pos_m + Vec3::Y * 0.65;
+                    coop.send_monster_killed(stalker.monster_id, drop_pos);
+                    sound_writer.write(PlaySpatialSoundEvent {
+                        pos_m: drop_pos,
+                        clip: SynthClip::MonsterScreech,
+                        volume: 1.0,
+                        pitch: 0.68,
+                        ai_event: None,
+                    });
+                    let loot_id = item_reg.alloc_id();
+                    let loot_state = WorldItemNetState {
+                        id: loot_id,
+                        kind: WorldItemKind::BonusLoot { value: 45 },
+                        pos_m: drop_pos,
+                        vel_m: Vec3::new(0.0, 2.2, 0.0),
+                        in_shed: false,
+                        carried_by: Vec::new(),
+                        active_timer_s: None,
+                    };
+                    coop.send_world_item_spawn(loot_state.clone());
+                    spawn_item_writer.write(SpawnWorldItemEvent(loot_state));
+                    commands.entity(ent).despawn();
+                    toast.show("Stalker ELIMINATED! Dropped Crystal (+45 cr)", 3.2);
+                    break;
+                }
+            }
+        }
+        if killed {
+            continue;
+        }
+
+        // 2. Feed acoustic events into unified AI hearing
         for &ev in &ai_events {
             if let Some(StalkerReaction::AlertHunt) =
                 process_acoustic_event_for_stalker(&world, &mut stalker, ev)
@@ -1888,7 +2156,13 @@ fn blind_stalker_ai_system(
 
         let out = step_stalker_ai(&world, &mut stalker, &living_players, dt);
         tf.translation = stalker.feet_pos_m;
-        tf.rotation = Quat::from_rotation_y(stalker.yaw);
+        tf.rotation = if stalker.state == StalkerState::Stunned {
+            Quat::from_rotation_y(stalker.yaw)
+                * Quat::from_rotation_z((elapsed * 26.0).sin() * 0.22)
+                * Quat::from_rotation_x(-0.24)
+        } else {
+            Quat::from_rotation_y(stalker.yaw)
+        };
 
         if let Some((clip, vol, pitch)) = out.emit_vocal {
             sound_writer.write(PlaySpatialSoundEvent {
@@ -1924,6 +2198,7 @@ fn blind_stalker_ai_system(
                 StalkerState::Investigate => MonsterBehaviorState::Investigate,
                 StalkerState::Hunt => MonsterBehaviorState::Hunt,
                 StalkerState::AttackCooldown => MonsterBehaviorState::Attack,
+                StalkerState::Stunned => MonsterBehaviorState::Stunned,
             };
             coop.send_monster_pose(stalker.monster_id, stalker.feet_pos_m, stalker.yaw, net_state);
         }
@@ -2083,7 +2358,7 @@ pub fn upsert_remote_stalker(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    remote_q: &mut Query<&mut RemoteSyncedStalker>,
+    remote_q: &mut Query<(Entity, &mut RemoteSyncedStalker)>,
     monster_id: u16,
     pos_m: Vec3,
     yaw: f32,
@@ -2094,8 +2369,9 @@ pub fn upsert_remote_stalker(
         MonsterBehaviorState::Investigate => StalkerState::Investigate,
         MonsterBehaviorState::Hunt => StalkerState::Hunt,
         MonsterBehaviorState::Attack => StalkerState::AttackCooldown,
+        MonsterBehaviorState::Stunned => StalkerState::Stunned,
     };
-    for mut rs in remote_q.iter_mut() {
+    for (_, mut rs) in remote_q.iter_mut() {
         if rs.monster_id == monster_id {
             rs.target_pos_m = pos_m;
             rs.target_yaw = yaw;

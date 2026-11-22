@@ -83,6 +83,7 @@ pub enum BeltItem {
 
 impl BeltItem {
     /// Concise display label for HUD hotbar & interaction prompts.
+    #[allow(dead_code)]
     pub fn display_label(&self) -> String {
         match self {
             BeltItem::Flashlight => "Flashlight".to_string(),
@@ -681,6 +682,7 @@ impl PlayerInventory {
     }
 
     /// Formats the active belt bar & passive gear status for the HUD.
+    #[allow(dead_code)]
     pub fn format_belt_hud(&self) -> String {
         let mut parts = Vec::with_capacity(self.belt_capacity);
         let occupied = self.is_hands_occupied();
@@ -735,6 +737,7 @@ impl PlayerInventory {
     }
 
     /// Formats the Subnautica-style `[R]` battery pouch selector HUD overlay.
+    #[allow(dead_code)]
     pub fn format_battery_selector_hud(&self) -> String {
         let loaded = match self.loaded_battery {
             Some(cell) => format!("{}%", cell.charge_pct()),

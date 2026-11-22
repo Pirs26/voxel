@@ -137,6 +137,7 @@ impl PlayerHealthState {
     }
 
     /// Formats a concise HUD status label for the current health/revive state.
+    #[allow(dead_code)]
     pub fn hud_label(&self) -> String {
         match self.phase {
             LocalHealthPhase::Healthy => {

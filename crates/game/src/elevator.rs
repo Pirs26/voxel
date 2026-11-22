@@ -252,6 +252,7 @@ impl ElevatorState {
     }
 
     /// Human-readable status banner for the gameplay HUD.
+    #[allow(dead_code)]
     pub fn hud_status(&self) -> String {
         match self.phase {
             ElevatorPhase::ShedIdle => "Base Shed — Elevator Ready".to_string(),

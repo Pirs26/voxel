@@ -9,35 +9,70 @@ use bevy::{
     prelude::*,
 };
 use voxel_acoustics::linear_to_db;
+use voxel_net::ElevatorPhase;
 
 use crate::{
     audio_bridge::{
         AcousticTelemetry, AudioDeviceCatalog, RemoveVoiceSpeakerEvent, VoiceSettings,
     },
-    elevator::ElevatorState,
+    elevator::{
+        ELEVATOR_ASCENT_DURATION_S, ELEVATOR_DESCENT_DURATION_S, ELEVATOR_WINCH_DURATION_S,
+        ElevatorState,
+    },
     gameplay::{GameplayToast, SessionLifecycleEvent, ShopActionEvent},
-    health::PlayerHealthState,
-    inventory::{PlayerInventory, SHOP_CATALOG, ShopCatalogItem},
+    health::{BLEEDOUT_DURATION_S, LocalHealthPhase, PlayerHealthState},
+    inventory::{
+        BeltItem, MAX_BELT_CAPACITY, MAX_POUCH_CAPACITY, PlayerInventory, SHOP_CATALOG,
+        ShopCatalogItem,
+    },
     net_bridge::{
         CoopMenuOpen, CoopState, VISOR_PALETTE, clear_remote_players, copy_to_clipboard,
         paste_from_clipboard,
     },
     player::PlayerFlashlight,
-    relic::WorldItemRegistry,
     save::{CampaignState, SaveSlotBrowser},
     settings::{AppScreen, FOV_MAX_DEG, FOV_MIN_DEG, SettingsMenuOpen, UserSettings},
-    shed::{ShedStationState, ShopOverlayOpen},
+    shed::{CrosshairTargetState, ShopOverlayOpen, TargetAccent},
 };
 
 const SLIDER_SEGMENTS: usize = 12;
+const MIC_LED_BARS: usize = 10;
+
+// ---- Color Palette (Subterranean Tactical Dive UI) ----
+const COL_PANEL_BG: Color = Color::srgba(0.04, 0.06, 0.09, 0.94);
+const COL_CARD_BG: Color = Color::srgba(0.07, 0.10, 0.15, 0.95);
+const COL_HUD_POD_BG: Color = Color::srgba(0.04, 0.06, 0.09, 0.84);
+const COL_BORDER_DIM: Color = Color::srgba(0.20, 0.28, 0.36, 0.85);
+const COL_ACCENT_CYAN: Color = Color::srgb(0.22, 0.92, 0.86);
+const COL_ACCENT_AMBER: Color = Color::srgb(1.0, 0.74, 0.22);
+const COL_ACCENT_GREEN: Color = Color::srgb(0.24, 0.92, 0.56);
+const COL_ACCENT_RED: Color = Color::srgb(0.96, 0.26, 0.28);
+const COL_TEXT_BRIGHT: Color = Color::srgb(0.94, 0.97, 0.99);
+const COL_TEXT_MUTED: Color = Color::srgb(0.62, 0.72, 0.80);
 
 #[derive(Resource, Default)]
 struct NameInputFocused(bool);
 
-// ---- UI Root & Dynamic Text Markers ----
+#[derive(Resource, Default)]
+struct DiagnosticsDrawerOpen(bool);
 
-#[derive(Component)]
-struct MainMenuRoot;
+// ---- Unified Panel Visibility Marker (Zero B0001 conflicts!) ----
+
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+enum UiPanelKind {
+    MainMenu,
+    Settings,
+    InGameHud,
+    CoopMenu,
+    ShopOverlay,
+    Crosshair,
+    TargetCard,
+    ToastCard,
+    BatteryTray,
+    DiagDrawer,
+}
+
+// ---- Main Menu / Pause / Shop Markers ----
 
 #[derive(Component)]
 struct MainMenuNameBox;
@@ -49,13 +84,30 @@ struct MainMenuNameText;
 struct MainMenuStatusText;
 
 #[derive(Component)]
-struct MainMenuSaveText;
+struct MainMenuSaveNameText;
 
 #[derive(Component)]
-struct VisorSwatchButton(usize);
+struct MainMenuSaveMetaText;
+
+#[derive(Component, Clone, Copy)]
+struct SaveTierPip(u8);
+
+#[derive(Component, Clone, Copy)]
+struct VisorHelmetButton(usize);
 
 #[derive(Component)]
-struct SettingsPanelRoot;
+struct CoopPanelStatusText;
+
+#[derive(Component)]
+struct ShopCreditsText;
+
+#[derive(Component)]
+struct ShopSaveTagText;
+
+#[derive(Component, Clone, Copy)]
+struct ShopTierTab(u8);
+
+// ---- Settings Markers ----
 
 #[derive(Component)]
 struct OutputDeviceLabel;
@@ -67,46 +119,106 @@ struct InputDeviceLabel;
 struct FullscreenButtonLabel;
 
 #[derive(Component)]
-struct SettingsMicStatusText;
+struct SettingsMicBadgeText;
 
-#[derive(Component)]
-struct InGameHudRoot;
+#[derive(Component, Clone, Copy)]
+struct SettingsMicLed(usize);
 
-#[derive(Component)]
-struct CrosshairNode;
-
-#[derive(Component)]
-struct HudText;
-
-#[derive(Component)]
-struct PromptText;
-
-#[derive(Component)]
-struct ToastText;
-
-#[derive(Component)]
-struct BatterySelectorBox;
-
-#[derive(Component)]
-struct BatterySelectorText;
-
-#[derive(Component)]
-struct BeltHudText;
+// ---- In-Game Graphical HUD Markers ----
 
 #[derive(Component)]
 struct DamageFlashOverlay;
 
 #[derive(Component)]
-struct CoopPanelRoot;
+struct HudTierBadgeText;
 
 #[derive(Component)]
-struct CoopPanelStatusText;
+struct HudCreditsText;
 
 #[derive(Component)]
-struct ShopPanelRoot;
+struct HudPhaseText;
 
 #[derive(Component)]
-struct ShopHeaderText;
+struct HudElevatorProgressFill;
+
+#[derive(Component)]
+struct HudHealthFill;
+
+#[derive(Component)]
+struct HudHealthBadgeText;
+
+#[derive(Component, Clone, Copy)]
+struct HudMicLed(usize);
+
+#[derive(Component)]
+struct HudMicStateDot;
+
+#[derive(Component)]
+struct HudBatteryFill;
+
+#[derive(Component)]
+struct HudBatteryLampDot;
+
+#[derive(Component)]
+struct CrosshairCenterDot;
+
+#[derive(Component)]
+struct CrosshairBracket;
+
+#[derive(Component)]
+struct TargetCardFrame;
+
+#[derive(Component)]
+struct TargetKeyBadgeBg;
+
+#[derive(Component)]
+struct TargetKeyBadgeText;
+
+#[derive(Component)]
+struct TargetLabelText;
+
+#[derive(Component)]
+struct TargetSublabelText;
+
+#[derive(Component)]
+struct ToastText;
+
+#[derive(Component)]
+struct DiagText;
+
+// ---- Graphical Hotbar, Pouch & Battery Tray Markers ----
+
+#[derive(Component, Clone, Copy)]
+struct HotbarSlotCard(usize);
+
+#[derive(Component, Clone, Copy)]
+struct HotbarIconPrimary(usize);
+
+#[derive(Component, Clone, Copy)]
+struct HotbarIconSecondary(usize);
+
+#[derive(Component, Clone, Copy)]
+struct HotbarCountText(usize);
+
+#[derive(Component, Clone, Copy)]
+struct HotbarChargeFill(usize);
+
+#[derive(Component, Clone, Copy)]
+struct PouchGaugeFill(usize);
+
+#[derive(Component, Clone, Copy)]
+struct WearableBadge {
+    is_headlamp: bool,
+}
+
+#[derive(Component, Clone, Copy)]
+struct TrayCellCard(usize);
+
+#[derive(Component, Clone, Copy)]
+struct TrayCellFill(usize);
+
+#[derive(Component, Clone, Copy)]
+struct TrayCellPctText(usize);
 
 // ---- Interactive Slider & Button Actions ----
 
@@ -130,7 +242,6 @@ struct SliderSegment {
 
 #[derive(Component, Clone, Copy, Debug)]
 enum UiAction {
-    // Main menu
     PlaySolo,
     HostLobby,
     PasteAndJoin,
@@ -145,7 +256,6 @@ enum UiAction {
     CloseSettings,
     QuitGame,
 
-    // Pause / Co-op menu
     CopyJoinCode,
     DisconnectToMenu,
     CycleVisor,
@@ -153,7 +263,6 @@ enum UiAction {
     ToggleSelfEcho,
     ResumeGame,
 
-    // Settings controls
     ToggleFullscreen,
     PrevOutputDevice,
     NextOutputDevice,
@@ -163,7 +272,6 @@ enum UiAction {
     SliderStep(SliderKind, f32),
     SliderSetFrac(SliderKind, f32),
 
-    // Shed shop
     ShopBuy(ShopCatalogItem),
     ShopTier(u8),
     ShopManualSave,
@@ -178,6 +286,7 @@ pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NameInputFocused>()
+            .init_resource::<DiagnosticsDrawerOpen>()
             .add_message::<TriggerUiAction>()
             .add_systems(Startup, setup_hud)
             .add_systems(
@@ -186,33 +295,44 @@ impl Plugin for HudPlugin {
                     handle_name_typing_system,
                     handle_ui_actions_system,
                     update_panel_visibility_system,
-                    update_menu_hud_texts_system,
-                    update_ingame_hud_texts_system,
+                    update_menu_and_shop_system,
+                    update_ingame_bars_system,
+                    update_crosshair_and_target_system,
+                    update_hotbar_and_pouch_system,
+                    update_battery_tray_system,
                     update_settings_widgets_system,
+                    update_diagnostics_drawer_system,
                 )
                     .chain(),
             );
     }
 }
 
-fn spawn_button(
+// =============================================================================
+// UI BUILDER HELPERS
+// =============================================================================
+
+fn spawn_pill_button(
     parent: &mut ChildSpawnerCommands,
     label: &str,
     action: UiAction,
     base_color: Color,
     hover_color: Color,
+    border_color: Color,
 ) -> Entity {
-    let mut ent = Entity::PLACEHOLDER;
+    let mut text_ent = Entity::PLACEHOLDER;
     parent
         .spawn((
             Node {
                 padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
-                margin: UiRect::all(Val::Px(2.0)),
+                border: UiRect::all(Val::Px(1.5)),
+                border_radius: BorderRadius::all(Val::Px(6.0)),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 ..default()
             },
             BackgroundColor(base_color),
+            BorderColor::all(border_color),
             action,
         ))
         .observe(
@@ -235,48 +355,125 @@ fn spawn_button(
             },
         )
         .with_children(|btn| {
-            ent = btn
+            text_ent = btn
                 .spawn((
                     Text::new(label),
                     TextFont {
-                        font_size: FontSize::Px(13.5),
+                        font_size: FontSize::Px(13.0),
                         ..default()
                     },
-                    TextColor(Color::srgb(0.94, 0.97, 0.96)),
+                    TextColor(COL_TEXT_BRIGHT),
                 ))
                 .id();
         });
-    ent
+    text_ent
 }
 
-fn spawn_std_button(parent: &mut ChildSpawnerCommands, label: &str, action: UiAction) -> Entity {
-    spawn_button(
+fn spawn_std_btn(parent: &mut ChildSpawnerCommands, label: &str, action: UiAction) -> Entity {
+    spawn_pill_button(
         parent,
         label,
         action,
-        Color::srgba(0.15, 0.21, 0.27, 0.96),
-        Color::srgba(0.24, 0.38, 0.46, 0.98),
+        Color::srgba(0.11, 0.16, 0.22, 0.96),
+        Color::srgba(0.18, 0.28, 0.36, 0.98),
+        Color::srgba(0.26, 0.36, 0.46, 0.85),
     )
 }
 
-fn spawn_accent_button(parent: &mut ChildSpawnerCommands, label: &str, action: UiAction) -> Entity {
-    spawn_button(
+fn spawn_accent_btn(parent: &mut ChildSpawnerCommands, label: &str, action: UiAction) -> Entity {
+    spawn_pill_button(
         parent,
         label,
         action,
-        Color::srgba(0.11, 0.36, 0.35, 0.96),
-        Color::srgba(0.16, 0.52, 0.50, 0.98),
+        Color::srgba(0.09, 0.30, 0.32, 0.96),
+        Color::srgba(0.14, 0.45, 0.47, 0.98),
+        Color::srgba(0.24, 0.86, 0.80, 0.90),
     )
 }
 
-fn spawn_danger_button(parent: &mut ChildSpawnerCommands, label: &str, action: UiAction) -> Entity {
-    spawn_button(
+fn spawn_danger_btn(parent: &mut ChildSpawnerCommands, label: &str, action: UiAction) -> Entity {
+    spawn_pill_button(
         parent,
         label,
         action,
-        Color::srgba(0.38, 0.14, 0.15, 0.96),
-        Color::srgba(0.55, 0.20, 0.22, 0.98),
+        Color::srgba(0.32, 0.11, 0.13, 0.96),
+        Color::srgba(0.48, 0.17, 0.19, 0.98),
+        Color::srgba(0.88, 0.30, 0.32, 0.85),
     )
+}
+
+/// Big graphical Main Menu action tile with a bright colored left accent bar & subtle subtitle.
+fn spawn_menu_action_tile(
+    parent: &mut ChildSpawnerCommands,
+    title: &str,
+    subtitle: &str,
+    accent: Color,
+    action: UiAction,
+) {
+    let base_bg = Color::srgba(0.08, 0.12, 0.18, 0.96);
+    let hover_bg = Color::srgba(0.13, 0.20, 0.28, 0.98);
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                padding: UiRect::axes(Val::Px(14.0), Val::Px(11.0)),
+                border: UiRect {
+                    left: Val::Px(4.0),
+                    top: Val::Px(1.0),
+                    right: Val::Px(1.0),
+                    bottom: Val::Px(1.0),
+                },
+                border_radius: BorderRadius::all(Val::Px(7.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(2.0),
+                ..default()
+            },
+            BackgroundColor(base_bg),
+            BorderColor {
+                left: accent,
+                top: COL_BORDER_DIM,
+                right: COL_BORDER_DIM,
+                bottom: COL_BORDER_DIM,
+            },
+            action,
+        ))
+        .observe(
+            move |_click: On<PointerClick>, mut writer: MessageWriter<TriggerUiAction>| {
+                writer.write(TriggerUiAction(action));
+            },
+        )
+        .observe(
+            move |over: On<PointerOver>, mut bg_q: Query<&mut BackgroundColor>| {
+                if let Ok(mut bg) = bg_q.get_mut(over.entity) {
+                    *bg = BackgroundColor(hover_bg);
+                }
+            },
+        )
+        .observe(
+            move |out: On<PointerOut>, mut bg_q: Query<&mut BackgroundColor>| {
+                if let Ok(mut bg) = bg_q.get_mut(out.entity) {
+                    *bg = BackgroundColor(base_bg);
+                }
+            },
+        )
+        .with_children(|tile| {
+            tile.spawn((
+                Text::new(title),
+                TextFont {
+                    font_size: FontSize::Px(15.0),
+                    ..default()
+                },
+                TextColor(COL_TEXT_BRIGHT),
+            ));
+            tile.spawn((
+                Text::new(subtitle),
+                TextFont {
+                    font_size: FontSize::Px(11.5),
+                    ..default()
+                },
+                TextColor(COL_TEXT_MUTED),
+            ));
+        });
 }
 
 fn spawn_slider_row(parent: &mut ChildSpawnerCommands, title: &str, kind: SliderKind) {
@@ -293,12 +490,12 @@ fn spawn_slider_row(parent: &mut ChildSpawnerCommands, title: &str, kind: Slider
             row.spawn((
                 Text::new(title),
                 TextFont {
-                    font_size: FontSize::Px(13.5),
+                    font_size: FontSize::Px(13.0),
                     ..default()
                 },
-                TextColor(Color::srgb(0.86, 0.91, 0.94)),
+                TextColor(COL_TEXT_BRIGHT),
                 Node {
-                    width: Val::Px(150.0),
+                    width: Val::Px(148.0),
                     ..default()
                 },
             ));
@@ -310,17 +507,18 @@ fn spawn_slider_row(parent: &mut ChildSpawnerCommands, title: &str, kind: Slider
                 ..default()
             })
             .with_children(|ctrl| {
-                spawn_std_button(ctrl, "-", UiAction::SliderStep(kind, -1.0));
+                spawn_std_btn(ctrl, "-", UiAction::SliderStep(kind, -1.0));
 
                 for idx in 0..SLIDER_SEGMENTS {
                     let frac = idx as f32 / (SLIDER_SEGMENTS - 1) as f32;
                     ctrl.spawn((
                         Node {
-                            width: Val::Px(16.0),
+                            width: Val::Px(17.0),
                             height: Val::Px(18.0),
+                            border_radius: BorderRadius::all(Val::Px(3.0)),
                             ..default()
                         },
-                        BackgroundColor(Color::srgba(0.18, 0.23, 0.28, 0.95)),
+                        BackgroundColor(Color::srgba(0.14, 0.19, 0.25, 0.95)),
                         SliderSegment { kind, idx },
                     ))
                     .observe(
@@ -331,18 +529,18 @@ fn spawn_slider_row(parent: &mut ChildSpawnerCommands, title: &str, kind: Slider
                     );
                 }
 
-                spawn_std_button(ctrl, "+", UiAction::SliderStep(kind, 1.0));
+                spawn_std_btn(ctrl, "+", UiAction::SliderStep(kind, 1.0));
             });
 
             row.spawn((
                 Text::new("--"),
                 TextFont {
-                    font_size: FontSize::Px(13.5),
+                    font_size: FontSize::Px(13.0),
                     ..default()
                 },
-                TextColor(Color::srgb(0.32, 0.94, 0.86)),
+                TextColor(COL_ACCENT_CYAN),
                 Node {
-                    width: Val::Px(72.0),
+                    width: Val::Px(64.0),
                     justify_content: JustifyContent::FlexEnd,
                     ..default()
                 },
@@ -351,9 +549,27 @@ fn spawn_slider_row(parent: &mut ChildSpawnerCommands, title: &str, kind: Slider
         });
 }
 
+fn shop_item_visual_accent(item: ShopCatalogItem) -> (Color, &'static str) {
+    match item {
+        ShopCatalogItem::BatteryCell => (Color::srgb(0.20, 0.92, 0.96), "BAT"),
+        ShopCatalogItem::FlarePack => (Color::srgb(1.0, 0.42, 0.18), "FLR"),
+        ShopCatalogItem::FoamCanister => (Color::srgb(0.32, 0.88, 0.72), "FOM"),
+        ShopCatalogItem::NoiseDecoys => (Color::srgb(1.0, 0.78, 0.22), "DCY"),
+        ShopCatalogItem::AidKit => (Color::srgb(0.98, 0.30, 0.34), "AID"),
+        ShopCatalogItem::ToolBeltUpgrade => (Color::srgb(0.55, 0.72, 1.0), "BLT"),
+        ShopCatalogItem::BatteryPouchUpgrade => (Color::srgb(0.32, 0.84, 1.0), "PCH"),
+        ShopCatalogItem::Headlamp => (Color::srgb(1.0, 0.92, 0.48), "HLP"),
+        ShopCatalogItem::StealthBoots => (Color::srgb(0.56, 0.42, 0.98), "BTS"),
+    }
+}
+
+// =============================================================================
+// SETUP HUD (GRAPHICAL OVERHAUL)
+// =============================================================================
+
 fn setup_hud(mut commands: Commands) {
     // =========================================================================
-    // 1. MAIN MENU OVERLAY (Shown on startup & after disconnecting)
+    // 1. MAIN MENU DASHBOARD (2-Column Graphical Subterranean Card)
     // =========================================================================
     commands
         .spawn((
@@ -365,257 +581,411 @@ fn setup_hud(mut commands: Commands) {
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.02, 0.03, 0.05, 0.72)),
+            BackgroundColor(Color::srgba(0.015, 0.025, 0.04, 0.76)),
             Visibility::Visible,
-            MainMenuRoot,
+            UiPanelKind::MainMenu,
         ))
         .with_children(|backdrop| {
             backdrop
                 .spawn((
                     Node {
-                        width: Val::Px(590.0),
-                        padding: UiRect::all(Val::Px(22.0)),
+                        width: Val::Px(760.0),
+                        padding: UiRect::all(Val::Px(24.0)),
+                        border: UiRect {
+                            top: Val::Px(3.0),
+                            left: Val::Px(1.5),
+                            right: Val::Px(1.5),
+                            bottom: Val::Px(1.5),
+                        },
+                        border_radius: BorderRadius::all(Val::Px(12.0)),
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(10.0),
+                        row_gap: Val::Px(16.0),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.05, 0.07, 0.11, 0.95)),
+                    BackgroundColor(COL_PANEL_BG),
+                    BorderColor {
+                        top: COL_ACCENT_CYAN,
+                        left: COL_BORDER_DIM,
+                        right: COL_BORDER_DIM,
+                        bottom: COL_BORDER_DIM,
+                    },
                 ))
                 .with_children(|card| {
-                    card.spawn((
-                        Text::new("ECHOES BELOW"),
-                        TextFont {
-                            font_size: FontSize::Px(32.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.28, 0.94, 0.86)),
-                    ));
-                    card.spawn((
-                        Text::new("Co-op Voxel Acoustic Cave-Extraction  •  Zero-API Iroh P2P"),
-                        TextFont {
-                            font_size: FontSize::Px(13.5),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.68, 0.76, 0.82)),
-                    ));
-
-                    // Player Name Input (host saves per-player inventory keyed by this name!)
+                    // Header Banner
                     card.spawn(Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(4.0),
-                        margin: UiRect::top(Val::Px(6.0)),
+                        flex_direction: FlexDirection::Row,
+                        justify_content: JustifyContent::SpaceBetween,
+                        align_items: AlignItems::Center,
+                        width: Val::Percent(100.0),
                         ..default()
                     })
-                    .with_children(|sec| {
-                        sec.spawn((
-                            Text::new("MINER NAME (Host saves your inventory under this name):"),
-                            TextFont {
-                                font_size: FontSize::Px(12.0),
-                                ..default()
-                            },
-                            TextColor(Color::srgb(0.75, 0.82, 0.86)),
-                        ));
-                        sec.spawn((
-                            Node {
-                                width: Val::Percent(100.0),
-                                padding: UiRect::axes(Val::Px(12.0), Val::Px(9.0)),
-                                ..default()
-                            },
-                            BackgroundColor(Color::srgba(0.11, 0.15, 0.21, 0.98)),
-                            MainMenuNameBox,
-                        ))
-                        .observe(
-                            |_click: On<PointerClick>,
-                             mut writer: MessageWriter<TriggerUiAction>| {
-                                writer.write(TriggerUiAction(UiAction::FocusNameInput));
-                            },
-                        )
-                        .with_children(|box_node| {
-                            box_node.spawn((
-                                Text::new("Miner"),
+                    .with_children(|hdr| {
+                        hdr.spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: Val::Px(3.0),
+                            ..default()
+                        })
+                        .with_children(|left| {
+                            left.spawn((
+                                Text::new("ECHOES BELOW"),
                                 TextFont {
-                                    font_size: FontSize::Px(15.0),
+                                    font_size: FontSize::Px(34.0),
                                     ..default()
                                 },
-                                TextColor(Color::srgb(0.96, 0.98, 1.0)),
-                                MainMenuNameText,
+                                TextColor(COL_ACCENT_CYAN),
+                            ));
+                            left.spawn((
+                                Node {
+                                    width: Val::Px(130.0),
+                                    height: Val::Px(3.0),
+                                    border_radius: BorderRadius::all(Val::Px(2.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.22, 0.92, 0.86, 0.65)),
+                            ));
+                        });
+
+                        hdr.spawn((
+                            Node {
+                                padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
+                                border: UiRect::all(Val::Px(1.0)),
+                                border_radius: BorderRadius::all(Val::Px(12.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgba(0.08, 0.16, 0.22, 0.92)),
+                            BorderColor::all(Color::srgba(0.22, 0.92, 0.86, 0.45)),
+                        ))
+                        .with_children(|pill| {
+                            pill.spawn((
+                                Text::new("P2P • ACOUSTIC CO-OP"),
+                                TextFont {
+                                    font_size: FontSize::Px(11.5),
+                                    ..default()
+                                },
+                                TextColor(COL_ACCENT_CYAN),
                             ));
                         });
                     });
 
-                    // Visor Color Swatch Picker
+                    // 2-Column Body
                     card.spawn(Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(5.0),
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(18.0),
+                        width: Val::Percent(100.0),
                         ..default()
                     })
-                    .with_children(|sec| {
-                        sec.spawn((
-                            Text::new("VISOR COLOR (Visible to teammates on helmet front & back):"),
-                            TextFont {
-                                font_size: FontSize::Px(12.0),
-                                ..default()
-                            },
-                            TextColor(Color::srgb(0.75, 0.82, 0.86)),
-                        ));
-                        sec.spawn(Node {
-                            flex_direction: FlexDirection::Row,
-                            flex_wrap: FlexWrap::Wrap,
-                            column_gap: Val::Px(6.0),
-                            row_gap: Val::Px(4.0),
+                    .with_children(|cols| {
+                        // LEFT COLUMN: Miner Profile, Visual Helmet Swatches, Save Slot Card
+                        cols.spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: Val::Px(12.0),
+                            width: Val::Px(410.0),
                             ..default()
                         })
-                        .with_children(|row| {
-                            for (idx, (name, rgb)) in VISOR_PALETTE.iter().enumerate() {
-                                let swatch_col = Color::srgb(rgb[0], rgb[1], rgb[2]);
-                                row.spawn((
-                                    Node {
-                                        padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
-                                        flex_direction: FlexDirection::Row,
-                                        align_items: AlignItems::Center,
-                                        column_gap: Val::Px(6.0),
-                                        ..default()
-                                    },
-                                    BackgroundColor(Color::srgba(0.14, 0.19, 0.25, 0.95)),
-                                    VisorSwatchButton(idx),
-                                ))
-                                .observe(
-                                    move |_click: On<PointerClick>,
-                                          mut writer: MessageWriter<TriggerUiAction>| {
-                                        writer.write(TriggerUiAction(UiAction::SelectVisor(idx)));
-                                    },
-                                )
-                                .with_children(|btn| {
-                                    btn.spawn((
-                                        Node {
-                                            width: Val::Px(12.0),
-                                            height: Val::Px(12.0),
-                                            ..default()
-                                        },
-                                        BackgroundColor(swatch_col),
-                                    ));
-                                    btn.spawn((
-                                        Text::new(*name),
-                                        TextFont {
-                                            font_size: FontSize::Px(12.5),
-                                            ..default()
-                                        },
-                                        TextColor(Color::srgb(0.92, 0.96, 0.98)),
-                                    ));
-                                });
-                            }
-                        });
-                    });
-
-                    // Campaign Save Slot Selector (Load Existing or Create New)
-                    card.spawn(Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(5.0),
-                        margin: UiRect::top(Val::Px(2.0)),
-                        ..default()
-                    })
-                    .with_children(|sec| {
-                        sec.spawn((
-                            Text::new(
-                                "CAMPAIGN SAVE SLOT (Load existing save or create a new expedition):",
-                            ),
-                            TextFont {
-                                font_size: FontSize::Px(12.0),
-                                ..default()
-                            },
-                            TextColor(Color::srgb(0.75, 0.82, 0.86)),
-                        ));
-                        sec.spawn(Node {
-                            flex_direction: FlexDirection::Row,
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::SpaceBetween,
-                            column_gap: Val::Px(6.0),
-                            width: Val::Percent(100.0),
-                            ..default()
-                        })
-                        .with_children(|row| {
-                            spawn_std_button(row, "<", UiAction::PrevSaveSlot);
-                            row.spawn((
+                        .with_children(|left| {
+                            // Miner Name Box
+                            left.spawn((
                                 Node {
-                                    flex_grow: 1.0,
-                                    padding: UiRect::axes(Val::Px(10.0), Val::Px(7.0)),
+                                    padding: UiRect::all(Val::Px(12.0)),
+                                    border: UiRect::all(Val::Px(1.0)),
+                                    border_radius: BorderRadius::all(Val::Px(8.0)),
+                                    flex_direction: FlexDirection::Column,
+                                    row_gap: Val::Px(6.0),
                                     ..default()
                                 },
-                                BackgroundColor(Color::srgba(0.10, 0.14, 0.20, 0.96)),
+                                BackgroundColor(COL_CARD_BG),
+                                BorderColor::all(COL_BORDER_DIM),
                             ))
-                            .with_children(|box_node| {
-                                box_node.spawn((
-                                    Text::new("Slot: default (New Campaign)"),
+                            .with_children(|sec| {
+                                sec.spawn((
+                                    Text::new("MINER CALLSIGN"),
                                     TextFont {
-                                        font_size: FontSize::Px(13.0),
+                                        font_size: FontSize::Px(11.0),
                                         ..default()
                                     },
-                                    TextColor(Color::srgb(0.32, 0.94, 0.86)),
-                                    MainMenuSaveText,
+                                    TextColor(COL_TEXT_MUTED),
                                 ));
+                                sec.spawn((
+                                    Node {
+                                        width: Val::Percent(100.0),
+                                        padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
+                                        border: UiRect::all(Val::Px(1.5)),
+                                        border_radius: BorderRadius::all(Val::Px(6.0)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgba(0.05, 0.08, 0.12, 0.98)),
+                                    BorderColor::all(COL_BORDER_DIM),
+                                    MainMenuNameBox,
+                                ))
+                                .observe(
+                                    |_click: On<PointerClick>,
+                                     mut writer: MessageWriter<TriggerUiAction>| {
+                                        writer.write(TriggerUiAction(UiAction::FocusNameInput));
+                                    },
+                                )
+                                .with_children(|box_node| {
+                                    box_node.spawn((
+                                        Text::new("Miner"),
+                                        TextFont {
+                                            font_size: FontSize::Px(15.0),
+                                            ..default()
+                                        },
+                                        TextColor(COL_TEXT_BRIGHT),
+                                        MainMenuNameText,
+                                    ));
+                                });
+
+                                // Visual Helmet Visor Picker (6 mini-helmet tiles!)
+                                sec.spawn((
+                                    Text::new("HELMET VISOR"),
+                                    TextFont {
+                                        font_size: FontSize::Px(11.0),
+                                        ..default()
+                                    },
+                                    TextColor(COL_TEXT_MUTED),
+                                    Node {
+                                        margin: UiRect::top(Val::Px(4.0)),
+                                        ..default()
+                                    },
+                                ));
+                                sec.spawn(Node {
+                                    flex_direction: FlexDirection::Row,
+                                    column_gap: Val::Px(8.0),
+                                    ..default()
+                                })
+                                .with_children(|row| {
+                                    for (idx, (_name, rgb)) in VISOR_PALETTE.iter().enumerate() {
+                                        let visor_col = Color::srgb(rgb[0], rgb[1], rgb[2]);
+                                        row.spawn((
+                                            Node {
+                                                width: Val::Px(54.0),
+                                                height: Val::Px(44.0),
+                                                border: UiRect::all(Val::Px(2.0)),
+                                                border_radius: BorderRadius::all(Val::Px(8.0)),
+                                                justify_content: JustifyContent::Center,
+                                                align_items: AlignItems::Center,
+                                                ..default()
+                                            },
+                                            BackgroundColor(Color::srgba(0.11, 0.14, 0.19, 0.96)),
+                                            BorderColor::all(COL_BORDER_DIM),
+                                            VisorHelmetButton(idx),
+                                        ))
+                                        .observe(
+                                            move |_click: On<PointerClick>,
+                                                  mut writer: MessageWriter<TriggerUiAction>| {
+                                                writer.write(TriggerUiAction(
+                                                    UiAction::SelectVisor(idx),
+                                                ));
+                                            },
+                                        )
+                                        .with_children(|tile| {
+                                            // Mini helmet shell graphic with glowing visor bar
+                                            tile.spawn((
+                                                Node {
+                                                    width: Val::Px(32.0),
+                                                    height: Val::Px(26.0),
+                                                    border_radius: BorderRadius::all(Val::Px(7.0)),
+                                                    justify_content: JustifyContent::Center,
+                                                    align_items: AlignItems::Center,
+                                                    ..default()
+                                                },
+                                                BackgroundColor(Color::srgb(0.18, 0.21, 0.26)),
+                                            ))
+                                            .with_children(|helm| {
+                                                helm.spawn((
+                                                    Node {
+                                                        width: Val::Px(24.0),
+                                                        height: Val::Px(9.0),
+                                                        border_radius: BorderRadius::all(
+                                                            Val::Px(3.0),
+                                                        ),
+                                                        ..default()
+                                                    },
+                                                    BackgroundColor(visor_col),
+                                                ));
+                                            });
+                                        });
+                                    }
+                                });
                             });
-                            spawn_std_button(row, ">", UiAction::NextSaveSlot);
+
+                            // Graphical Campaign Save Card
+                            left.spawn((
+                                Node {
+                                    padding: UiRect::all(Val::Px(12.0)),
+                                    border: UiRect::all(Val::Px(1.0)),
+                                    border_radius: BorderRadius::all(Val::Px(8.0)),
+                                    flex_direction: FlexDirection::Column,
+                                    row_gap: Val::Px(8.0),
+                                    ..default()
+                                },
+                                BackgroundColor(COL_CARD_BG),
+                                BorderColor::all(COL_BORDER_DIM),
+                            ))
+                            .with_children(|sec| {
+                                sec.spawn(Node {
+                                    flex_direction: FlexDirection::Row,
+                                    justify_content: JustifyContent::SpaceBetween,
+                                    align_items: AlignItems::Center,
+                                    width: Val::Percent(100.0),
+                                    ..default()
+                                })
+                                .with_children(|top| {
+                                    top.spawn((
+                                        Text::new("EXPEDITION SAVE"),
+                                        TextFont {
+                                            font_size: FontSize::Px(11.0),
+                                            ..default()
+                                        },
+                                        TextColor(COL_TEXT_MUTED),
+                                    ));
+                                    // 3 Tier Unlock Pips
+                                    top.spawn(Node {
+                                        flex_direction: FlexDirection::Row,
+                                        column_gap: Val::Px(4.0),
+                                        ..default()
+                                    })
+                                    .with_children(|pips| {
+                                        for tier in 1..=3u8 {
+                                            pips.spawn((
+                                                Node {
+                                                    width: Val::Px(10.0),
+                                                    height: Val::Px(10.0),
+                                                    border_radius: BorderRadius::all(Val::Px(5.0)),
+                                                    ..default()
+                                                },
+                                                BackgroundColor(COL_BORDER_DIM),
+                                                SaveTierPip(tier),
+                                            ));
+                                        }
+                                    });
+                                });
+
+                                sec.spawn(Node {
+                                    flex_direction: FlexDirection::Row,
+                                    align_items: AlignItems::Center,
+                                    column_gap: Val::Px(6.0),
+                                    width: Val::Percent(100.0),
+                                    ..default()
+                                })
+                                .with_children(|row| {
+                                    spawn_std_btn(row, "<", UiAction::PrevSaveSlot);
+                                    row.spawn((
+                                        Node {
+                                            flex_grow: 1.0,
+                                            padding: UiRect::axes(Val::Px(10.0), Val::Px(7.0)),
+                                            border_radius: BorderRadius::all(Val::Px(6.0)),
+                                            flex_direction: FlexDirection::Column,
+                                            row_gap: Val::Px(2.0),
+                                            ..default()
+                                        },
+                                        BackgroundColor(Color::srgba(0.05, 0.08, 0.12, 0.96)),
+                                    ))
+                                    .with_children(|slot_box| {
+                                        slot_box.spawn((
+                                            Text::new("default"),
+                                            TextFont {
+                                                font_size: FontSize::Px(14.0),
+                                                ..default()
+                                            },
+                                            TextColor(COL_ACCENT_CYAN),
+                                            MainMenuSaveNameText,
+                                        ));
+                                        slot_box.spawn((
+                                            Text::new("New Campaign • 100 cr"),
+                                            TextFont {
+                                                font_size: FontSize::Px(11.5),
+                                                ..default()
+                                            },
+                                            TextColor(COL_TEXT_MUTED),
+                                            MainMenuSaveMetaText,
+                                        ));
+                                    });
+                                    spawn_std_btn(row, ">", UiAction::NextSaveSlot);
+                                });
+
+                                sec.spawn(Node {
+                                    flex_direction: FlexDirection::Row,
+                                    column_gap: Val::Px(6.0),
+                                    ..default()
+                                })
+                                .with_children(|row| {
+                                    spawn_std_btn(row, "+ New Slot", UiAction::NewSaveSlot);
+                                    spawn_std_btn(row, "Refresh", UiAction::RefreshSaveSlots);
+                                });
+                            });
                         });
-                        sec.spawn(Node {
-                            flex_direction: FlexDirection::Row,
-                            column_gap: Val::Px(6.0),
+
+                        // RIGHT COLUMN: Big Visual Action Tiles
+                        cols.spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: Val::Px(9.0),
+                            flex_grow: 1.0,
                             ..default()
                         })
-                        .with_children(|row| {
-                            spawn_std_button(row, "+ New Save Slot", UiAction::NewSaveSlot);
-                            spawn_std_button(row, "Refresh Saves", UiAction::RefreshSaveSlots);
+                        .with_children(|right| {
+                            spawn_menu_action_tile(
+                                right,
+                                "PLAY SOLO",
+                                "Load selected save offline",
+                                COL_ACCENT_CYAN,
+                                UiAction::PlaySolo,
+                            );
+                            spawn_menu_action_tile(
+                                right,
+                                "HOST CO-OP",
+                                "Generate ECHO-... P2P code",
+                                COL_ACCENT_GREEN,
+                                UiAction::HostLobby,
+                            );
+                            spawn_menu_action_tile(
+                                right,
+                                "JOIN BY CODE",
+                                "Paste friend's clipboard code",
+                                COL_ACCENT_AMBER,
+                                UiAction::PasteAndJoin,
+                            );
+                            right
+                                .spawn(Node {
+                                    flex_direction: FlexDirection::Row,
+                                    column_gap: Val::Px(6.0),
+                                    margin: UiRect::top(Val::Px(4.0)),
+                                    ..default()
+                                })
+                                .with_children(|row| {
+                                    spawn_std_btn(row, "Settings", UiAction::OpenSettings);
+                                    spawn_std_btn(row, "Cancel", UiAction::CancelConnecting);
+                                    spawn_danger_btn(row, "Quit", UiAction::QuitGame);
+                                });
                         });
                     });
 
-                    // Primary Lobby Actions
-                    card.spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        flex_wrap: FlexWrap::Wrap,
-                        column_gap: Val::Px(8.0),
-                        row_gap: Val::Px(6.0),
-                        margin: UiRect::top(Val::Px(4.0)),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        spawn_accent_button(row, "Play Solo (Load)", UiAction::PlaySolo);
-                        spawn_accent_button(row, "Host Co-op (Load)", UiAction::HostLobby);
-                        spawn_std_button(
-                            row,
-                            "Paste & Join Code",
-                            UiAction::PasteAndJoin,
-                        );
-                        spawn_std_button(row, "Cancel", UiAction::CancelConnecting);
-                    });
-
-                    card.spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        column_gap: Val::Px(8.0),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        spawn_std_button(
-                            row,
-                            "Settings (FOV / Fullscreen / Audio)",
-                            UiAction::OpenSettings,
-                        );
-                        spawn_danger_button(row, "Quit Game", UiAction::QuitGame);
-                    });
-
-                    // Status Line
+                    // Bottom Status Pill
                     card.spawn((
-                        Text::new("Ready — Play Solo, Host, or Paste a friend's ECHO-... code"),
-                        TextFont {
-                            font_size: FontSize::Px(13.0),
+                        Node {
+                            width: Val::Percent(100.0),
+                            padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
+                            border_radius: BorderRadius::all(Val::Px(6.0)),
                             ..default()
                         },
-                        TextColor(Color::srgb(0.95, 0.84, 0.42)),
-                        MainMenuStatusText,
-                    ));
+                        BackgroundColor(Color::srgba(0.07, 0.09, 0.13, 0.92)),
+                    ))
+                    .with_children(|bar| {
+                        bar.spawn((
+                            Text::new("Ready — Select a save slot and dive in"),
+                            TextFont {
+                                font_size: FontSize::Px(12.5),
+                                ..default()
+                            },
+                            TextColor(COL_ACCENT_AMBER),
+                            MainMenuStatusText,
+                        ));
+                    });
                 });
         });
 
     // =========================================================================
-    // 2. UNIFIED SETTINGS PANEL (FOV, Fullscreen, Audio I/O Devices & Sliders)
+    // 2. GRAPHICAL SETTINGS PANEL (Video + Audio + 10-Bar LED Mic Meter)
     // =========================================================================
     commands
         .spawn((
@@ -627,34 +997,46 @@ fn setup_hud(mut commands: Commands) {
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.02, 0.03, 0.05, 0.78)),
+            BackgroundColor(Color::srgba(0.015, 0.025, 0.04, 0.80)),
             Visibility::Hidden,
-            SettingsPanelRoot,
+            UiPanelKind::Settings,
         ))
         .with_children(|backdrop| {
             backdrop
                 .spawn((
                     Node {
-                        width: Val::Px(620.0),
+                        width: Val::Px(640.0),
                         padding: UiRect::all(Val::Px(22.0)),
+                        border: UiRect {
+                            top: Val::Px(3.0),
+                            left: Val::Px(1.5),
+                            right: Val::Px(1.5),
+                            bottom: Val::Px(1.5),
+                        },
+                        border_radius: BorderRadius::all(Val::Px(12.0)),
                         flex_direction: FlexDirection::Column,
                         row_gap: Val::Px(10.0),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.05, 0.08, 0.12, 0.97)),
+                    BackgroundColor(COL_PANEL_BG),
+                    BorderColor {
+                        top: COL_ACCENT_CYAN,
+                        left: COL_BORDER_DIM,
+                        right: COL_BORDER_DIM,
+                        bottom: COL_BORDER_DIM,
+                    },
                 ))
                 .with_children(|panel| {
                     panel.spawn((
-                        Text::new("SETTINGS — VIDEO & AUDIO"),
+                        Text::new("SETTINGS"),
                         TextFont {
-                            font_size: FontSize::Px(18.0),
+                            font_size: FontSize::Px(20.0),
                             ..default()
                         },
-                        TextColor(Color::srgb(0.30, 0.92, 0.86)),
+                        TextColor(COL_ACCENT_CYAN),
                     ));
 
-                    // Video section
-                    spawn_slider_row(panel, "Field of View (FOV)", SliderKind::Fov);
+                    spawn_slider_row(panel, "Field of View", SliderKind::Fov);
 
                     panel
                         .spawn(Node {
@@ -668,42 +1050,34 @@ fn setup_hud(mut commands: Commands) {
                             row.spawn((
                                 Text::new("Display Mode"),
                                 TextFont {
-                                    font_size: FontSize::Px(13.5),
+                                    font_size: FontSize::Px(13.0),
                                     ..default()
                                 },
-                                TextColor(Color::srgb(0.86, 0.91, 0.94)),
+                                TextColor(COL_TEXT_BRIGHT),
                             ));
-                            let lbl_ent = spawn_std_button(
-                                row,
-                                "Windowed",
-                                UiAction::ToggleFullscreen,
-                            );
+                            let lbl_ent =
+                                spawn_std_btn(row, "Windowed", UiAction::ToggleFullscreen);
                             row.commands().entity(lbl_ent).insert(FullscreenButtonLabel);
                         });
 
-                    // Audio Output Device row
+                    // Audio Output row
                     panel
                         .spawn(Node {
                             flex_direction: FlexDirection::Row,
                             align_items: AlignItems::Center,
                             justify_content: JustifyContent::SpaceBetween,
-                            column_gap: Val::Px(6.0),
                             width: Val::Percent(100.0),
-                            margin: UiRect::top(Val::Px(6.0)),
+                            margin: UiRect::top(Val::Px(4.0)),
                             ..default()
                         })
                         .with_children(|row| {
                             row.spawn((
-                                Text::new("Audio Output"),
+                                Text::new("Output Device"),
                                 TextFont {
-                                    font_size: FontSize::Px(13.5),
+                                    font_size: FontSize::Px(13.0),
                                     ..default()
                                 },
-                                TextColor(Color::srgb(0.86, 0.91, 0.94)),
-                                Node {
-                                    width: Val::Px(120.0),
-                                    ..default()
-                                },
+                                TextColor(COL_TEXT_BRIGHT),
                             ));
                             row.spawn(Node {
                                 flex_direction: FlexDirection::Row,
@@ -712,50 +1086,45 @@ fn setup_hud(mut commands: Commands) {
                                 ..default()
                             })
                             .with_children(|ctrl| {
-                                spawn_std_button(ctrl, "<", UiAction::PrevOutputDevice);
+                                spawn_std_btn(ctrl, "<", UiAction::PrevOutputDevice);
                                 ctrl.spawn((
                                     Text::new("System Default"),
                                     TextFont {
                                         font_size: FontSize::Px(12.5),
                                         ..default()
                                     },
-                                    TextColor(Color::srgb(0.95, 0.96, 0.98)),
+                                    TextColor(COL_TEXT_BRIGHT),
                                     Node {
-                                        width: Val::Px(280.0),
+                                        width: Val::Px(270.0),
                                         ..default()
                                     },
                                     OutputDeviceLabel,
                                 ));
-                                spawn_std_button(ctrl, ">", UiAction::NextOutputDevice);
+                                spawn_std_btn(ctrl, ">", UiAction::NextOutputDevice);
                             });
                         });
 
-                    spawn_slider_row(panel, "Master Output Vol", SliderKind::MasterVolume);
-                    spawn_slider_row(panel, "Voice Chat Vol", SliderKind::VoiceVolume);
+                    spawn_slider_row(panel, "Master Volume", SliderKind::MasterVolume);
+                    spawn_slider_row(panel, "Voice Volume", SliderKind::VoiceVolume);
 
-                    // Audio Input Device row
+                    // Audio Input row
                     panel
                         .spawn(Node {
                             flex_direction: FlexDirection::Row,
                             align_items: AlignItems::Center,
                             justify_content: JustifyContent::SpaceBetween,
-                            column_gap: Val::Px(6.0),
                             width: Val::Percent(100.0),
-                            margin: UiRect::top(Val::Px(6.0)),
+                            margin: UiRect::top(Val::Px(4.0)),
                             ..default()
                         })
                         .with_children(|row| {
                             row.spawn((
-                                Text::new("Mic Input"),
+                                Text::new("Microphone"),
                                 TextFont {
-                                    font_size: FontSize::Px(13.5),
+                                    font_size: FontSize::Px(13.0),
                                     ..default()
                                 },
-                                TextColor(Color::srgb(0.86, 0.91, 0.94)),
-                                Node {
-                                    width: Val::Px(120.0),
-                                    ..default()
-                                },
+                                TextColor(COL_TEXT_BRIGHT),
                             ));
                             row.spawn(Node {
                                 flex_direction: FlexDirection::Row,
@@ -764,60 +1133,101 @@ fn setup_hud(mut commands: Commands) {
                                 ..default()
                             })
                             .with_children(|ctrl| {
-                                spawn_std_button(ctrl, "<", UiAction::PrevInputDevice);
+                                spawn_std_btn(ctrl, "<", UiAction::PrevInputDevice);
                                 ctrl.spawn((
                                     Text::new("System Default"),
                                     TextFont {
                                         font_size: FontSize::Px(12.5),
                                         ..default()
                                     },
-                                    TextColor(Color::srgb(0.95, 0.96, 0.98)),
+                                    TextColor(COL_TEXT_BRIGHT),
                                     Node {
-                                        width: Val::Px(280.0),
+                                        width: Val::Px(270.0),
                                         ..default()
                                     },
                                     InputDeviceLabel,
                                 ));
-                                spawn_std_button(ctrl, ">", UiAction::NextInputDevice);
+                                spawn_std_btn(ctrl, ">", UiAction::NextInputDevice);
                             });
                         });
 
-                    spawn_slider_row(panel, "Mic Input Gain", SliderKind::MicGain);
-                    spawn_slider_row(panel, "Mic Noise Gate", SliderKind::MicGate);
+                    spawn_slider_row(panel, "Mic Gain", SliderKind::MicGain);
+                    spawn_slider_row(panel, "Noise Gate", SliderKind::MicGate);
 
-                    panel.spawn((
-                        Text::new("Mic Meter: ..."),
-                        TextFont {
-                            font_size: FontSize::Px(13.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.88, 0.94, 0.92)),
-                        SettingsMicStatusText,
-                    ));
+                    // Graphical 10-Bar LED Mic Meter inside Settings
+                    panel
+                        .spawn((
+                            Node {
+                                flex_direction: FlexDirection::Row,
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::SpaceBetween,
+                                padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
+                                border_radius: BorderRadius::all(Val::Px(7.0)),
+                                width: Val::Percent(100.0),
+                                ..default()
+                            },
+                            BackgroundColor(COL_CARD_BG),
+                        ))
+                        .with_children(|bar| {
+                            bar.spawn(Node {
+                                flex_direction: FlexDirection::Row,
+                                align_items: AlignItems::FlexEnd,
+                                column_gap: Val::Px(4.0),
+                                height: Val::Px(22.0),
+                                ..default()
+                            })
+                            .with_children(|leds| {
+                                for i in 0..MIC_LED_BARS {
+                                    let h = 8.0 + (i as f32 * 1.4);
+                                    leds.spawn((
+                                        Node {
+                                            width: Val::Px(12.0),
+                                            height: Val::Px(h),
+                                            border_radius: BorderRadius::all(Val::Px(2.0)),
+                                            ..default()
+                                        },
+                                        BackgroundColor(Color::srgba(0.14, 0.19, 0.24, 0.9)),
+                                        SettingsMicLed(i),
+                                    ));
+                                }
+                            });
+                            bar.spawn((
+                                Text::new("SILENT"),
+                                TextFont {
+                                    font_size: FontSize::Px(12.5),
+                                    ..default()
+                                },
+                                TextColor(COL_ACCENT_CYAN),
+                                SettingsMicBadgeText,
+                            ));
+                        });
 
                     panel
                         .spawn(Node {
                             flex_direction: FlexDirection::Row,
-                            flex_wrap: FlexWrap::Wrap,
-                            column_gap: Val::Px(6.0),
-                            margin: UiRect::top(Val::Px(6.0)),
+                            justify_content: JustifyContent::SpaceBetween,
+                            width: Val::Percent(100.0),
+                            margin: UiRect::top(Val::Px(4.0)),
                             ..default()
                         })
                         .with_children(|row| {
-                            spawn_std_button(
-                                row,
-                                "Refresh Audio Devices",
-                                UiAction::RefreshAudioDevices,
-                            );
-                            spawn_std_button(row, "Mute Mic", UiAction::ToggleMute);
-                            spawn_std_button(row, "Self-Echo Test", UiAction::ToggleSelfEcho);
-                            spawn_accent_button(row, "Back / Done", UiAction::CloseSettings);
+                            row.spawn(Node {
+                                flex_direction: FlexDirection::Row,
+                                column_gap: Val::Px(6.0),
+                                ..default()
+                            })
+                            .with_children(|left| {
+                                spawn_std_btn(left, "Refresh Devices", UiAction::RefreshAudioDevices);
+                                spawn_std_btn(left, "Mute Mic", UiAction::ToggleMute);
+                                spawn_std_btn(left, "Self-Echo", UiAction::ToggleSelfEcho);
+                            });
+                            spawn_accent_btn(row, "Done", UiAction::CloseSettings);
                         });
                 });
         });
 
     // =========================================================================
-    // 3. IN-GAME HUD (Hidden on Main Menu)
+    // 3. IN-GAME GRAPHICAL HUD (Diegetic Pods, Bars, Morphing Reticle, Hotbar)
     // =========================================================================
     commands
         .spawn((
@@ -828,10 +1238,10 @@ fn setup_hud(mut commands: Commands) {
                 ..default()
             },
             Visibility::Hidden,
-            InGameHudRoot,
+            UiPanelKind::InGameHud,
         ))
         .with_children(|hud| {
-            // Damage / Downed subtle red screen tint overlay
+            // Damage / Downed subtle red screen vignette
             hud.spawn((
                 Node {
                     position_type: PositionType::Absolute,
@@ -843,43 +1253,501 @@ fn setup_hud(mut commands: Commands) {
                 DamageFlashOverlay,
             ));
 
-            // Top-left live mission, health, mic & acoustic telemetry
+            // -----------------------------------------------------------------
+            // TOP-LEFT DIVE TELEMETRY POD (Tier + Credits + Elevator Bar + HP Bar)
+            // -----------------------------------------------------------------
             hud.spawn((
-                Text::new("Initializing..."),
-                TextFont {
-                    font_size: FontSize::Px(13.0),
-                    ..default()
-                },
-                TextColor(Color::srgba(0.86, 0.94, 0.92, 0.92)),
                 Node {
                     position_type: PositionType::Absolute,
-                    top: Val::Px(12.0),
-                    left: Val::Px(14.0),
+                    top: Val::Px(16.0),
+                    left: Val::Px(16.0),
+                    width: Val::Px(246.0),
+                    padding: UiRect::all(Val::Px(11.0)),
+                    border: UiRect {
+                        left: Val::Px(3.0),
+                        top: Val::Px(1.0),
+                        right: Val::Px(1.0),
+                        bottom: Val::Px(1.0),
+                    },
+                    border_radius: BorderRadius::all(Val::Px(8.0)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(8.0),
                     ..default()
                 },
-                HudText,
-            ));
+                BackgroundColor(COL_HUD_POD_BG),
+                BorderColor {
+                    left: COL_ACCENT_CYAN,
+                    top: COL_BORDER_DIM,
+                    right: COL_BORDER_DIM,
+                    bottom: COL_BORDER_DIM,
+                },
+            ))
+            .with_children(|pod| {
+                // Row 1: Tier Pill + Credits Pill + Elevator Phase Tag
+                pod.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::SpaceBetween,
+                    width: Val::Percent(100.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(6.0),
+                        ..default()
+                    })
+                    .with_children(|badges| {
+                        badges
+                            .spawn((
+                                Node {
+                                    padding: UiRect::axes(Val::Px(7.0), Val::Px(2.0)),
+                                    border_radius: BorderRadius::all(Val::Px(4.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.11, 0.34, 0.36, 0.95)),
+                            ))
+                            .with_children(|b| {
+                                b.spawn((
+                                    Text::new("T1"),
+                                    TextFont {
+                                        font_size: FontSize::Px(12.0),
+                                        ..default()
+                                    },
+                                    TextColor(COL_ACCENT_CYAN),
+                                    HudTierBadgeText,
+                                ));
+                            });
 
-            // Center crosshair dot
+                        badges.spawn((
+                            Text::new("100 cr"),
+                            TextFont {
+                                font_size: FontSize::Px(13.5),
+                                ..default()
+                            },
+                            TextColor(COL_ACCENT_AMBER),
+                            HudCreditsText,
+                        ));
+                    });
+
+                    row.spawn((
+                        Text::new("SHED"),
+                        TextFont {
+                            font_size: FontSize::Px(11.5),
+                            ..default()
+                        },
+                        TextColor(COL_TEXT_MUTED),
+                        HudPhaseText,
+                    ));
+                });
+
+                // Elevator / Winch Graphical Progress Bar
+                pod.spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(5.0),
+                        border_radius: BorderRadius::all(Val::Px(3.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.12, 0.17, 0.22, 0.95)),
+                ))
+                .with_children(|track| {
+                    track.spawn((
+                        Node {
+                            width: Val::Percent(0.0),
+                            height: Val::Percent(100.0),
+                            border_radius: BorderRadius::all(Val::Px(3.0)),
+                            ..default()
+                        },
+                        BackgroundColor(COL_ACCENT_AMBER),
+                        HudElevatorProgressFill,
+                    ));
+                });
+
+                // Health Bar Row (Heart/Cross Icon + Fill Bar + Tag)
+                pod.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(8.0),
+                    width: Val::Percent(100.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    // Mini visual cross icon
+                    row.spawn((
+                        Node {
+                            width: Val::Px(14.0),
+                            height: Val::Px(14.0),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            border_radius: BorderRadius::all(Val::Px(3.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.16, 0.42, 0.28, 0.95)),
+                    ))
+                    .with_children(|icon| {
+                        icon.spawn((
+                            Text::new("+"),
+                            TextFont {
+                                font_size: FontSize::Px(12.0),
+                                ..default()
+                            },
+                            TextColor(COL_ACCENT_GREEN),
+                        ));
+                    });
+
+                    row.spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            height: Val::Px(9.0),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.12, 0.16, 0.20, 0.95)),
+                    ))
+                    .with_children(|track| {
+                        track.spawn((
+                            Node {
+                                width: Val::Percent(100.0),
+                                height: Val::Percent(100.0),
+                                border_radius: BorderRadius::all(Val::Px(4.0)),
+                                ..default()
+                            },
+                            BackgroundColor(COL_ACCENT_GREEN),
+                            HudHealthFill,
+                        ));
+                    });
+
+                    row.spawn((
+                        Text::new("OK"),
+                        TextFont {
+                            font_size: FontSize::Px(11.0),
+                            ..default()
+                        },
+                        TextColor(COL_ACCENT_GREEN),
+                        HudHealthBadgeText,
+                    ));
+                });
+            });
+
+            // -----------------------------------------------------------------
+            // TOP-RIGHT SENSOR POD (10-Bar LED Mic Meter + Visual Battery Cell)
+            // -----------------------------------------------------------------
+            hud.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(16.0),
+                    right: Val::Px(16.0),
+                    padding: UiRect::axes(Val::Px(12.0), Val::Px(10.0)),
+                    border: UiRect {
+                        right: Val::Px(3.0),
+                        top: Val::Px(1.0),
+                        left: Val::Px(1.0),
+                        bottom: Val::Px(1.0),
+                    },
+                    border_radius: BorderRadius::all(Val::Px(8.0)),
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(14.0),
+                    ..default()
+                },
+                BackgroundColor(COL_HUD_POD_BG),
+                BorderColor {
+                    right: COL_ACCENT_CYAN,
+                    top: COL_BORDER_DIM,
+                    left: COL_BORDER_DIM,
+                    bottom: COL_BORDER_DIM,
+                },
+            ))
+            .with_children(|pod| {
+                // 10-Bar Graphical Voice LED Meter
+                pod.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(6.0),
+                    ..default()
+                })
+                .with_children(|mic_grp| {
+                    // Mic status indicator dot
+                    mic_grp.spawn((
+                        Node {
+                            width: Val::Px(9.0),
+                            height: Val::Px(9.0),
+                            border_radius: BorderRadius::all(Val::Px(5.0)),
+                            ..default()
+                        },
+                        BackgroundColor(COL_ACCENT_GREEN),
+                        HudMicStateDot,
+                    ));
+                    mic_grp
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::FlexEnd,
+                            column_gap: Val::Px(3.0),
+                            height: Val::Px(22.0),
+                            ..default()
+                        })
+                        .with_children(|leds| {
+                            for i in 0..MIC_LED_BARS {
+                                let h = 6.0 + (i as f32 * 1.6);
+                                leds.spawn((
+                                    Node {
+                                        width: Val::Px(5.0),
+                                        height: Val::Px(h),
+                                        border_radius: BorderRadius::all(Val::Px(2.0)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgba(0.14, 0.19, 0.25, 0.85)),
+                                    HudMicLed(i),
+                                ));
+                            }
+                        });
+                });
+
+                // Divider line
+                pod.spawn((
+                    Node {
+                        width: Val::Px(1.0),
+                        height: Val::Px(22.0),
+                        ..default()
+                    },
+                    BackgroundColor(COL_BORDER_DIM),
+                ));
+
+                // Visual Flashlight Battery Cell Graphic
+                pod.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(5.0),
+                    ..default()
+                })
+                .with_children(|bat_grp| {
+                    // Lamp ON/OFF glow dot
+                    bat_grp.spawn((
+                        Node {
+                            width: Val::Px(10.0),
+                            height: Val::Px(10.0),
+                            border_radius: BorderRadius::all(Val::Px(5.0)),
+                            ..default()
+                        },
+                        BackgroundColor(COL_ACCENT_AMBER),
+                        HudBatteryLampDot,
+                    ));
+                    // Battery body shell + terminal cap
+                    bat_grp
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            ..default()
+                        })
+                        .with_children(|cell| {
+                            cell.spawn((
+                                Node {
+                                    width: Val::Px(46.0),
+                                    height: Val::Px(18.0),
+                                    padding: UiRect::all(Val::Px(2.0)),
+                                    border: UiRect::all(Val::Px(1.5)),
+                                    border_radius: BorderRadius::all(Val::Px(4.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.06, 0.09, 0.13, 0.95)),
+                                BorderColor::all(Color::srgba(0.42, 0.56, 0.66, 0.9)),
+                            ))
+                            .with_children(|shell| {
+                                shell.spawn((
+                                    Node {
+                                        width: Val::Percent(100.0),
+                                        height: Val::Percent(100.0),
+                                        border_radius: BorderRadius::all(Val::Px(2.0)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(COL_ACCENT_CYAN),
+                                    HudBatteryFill,
+                                ));
+                            });
+                            // Positive battery terminal nub
+                            cell.spawn((
+                                Node {
+                                    width: Val::Px(3.0),
+                                    height: Val::Px(8.0),
+                                    border_radius: BorderRadius::all(Val::Px(1.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.55, 0.68, 0.78, 0.9)),
+                            ));
+                        });
+                });
+            });
+
+            // -----------------------------------------------------------------
+            // OPTIONAL [F3] ACOUSTIC DIAGNOSTICS DRAWER (Hidden by default!)
+            // -----------------------------------------------------------------
+            hud.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(106.0),
+                    left: Val::Px(16.0),
+                    padding: UiRect::all(Val::Px(10.0)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.03, 0.05, 0.08, 0.86)),
+                BorderColor::all(COL_BORDER_DIM),
+                Visibility::Hidden,
+                UiPanelKind::DiagDrawer,
+            ))
+            .with_children(|box_n| {
+                box_n.spawn((
+                    Text::new(""),
+                    TextFont {
+                        font_size: FontSize::Px(11.5),
+                        ..default()
+                    },
+                    TextColor(COL_TEXT_MUTED),
+                    DiagText,
+                ));
+            });
+
+            // -----------------------------------------------------------------
+            // DYNAMIC CENTER CROSSHAIR RETICLE (Dot + 4 Morphing Brackets)
+            // -----------------------------------------------------------------
             hud.spawn((
                 Node {
                     position_type: PositionType::Absolute,
                     left: Val::Percent(50.0),
                     top: Val::Percent(50.0),
-                    width: Val::Px(4.0),
-                    height: Val::Px(4.0),
+                    width: Val::Px(24.0),
+                    height: Val::Px(24.0),
                     margin: UiRect {
-                        left: Val::Px(-2.0),
-                        top: Val::Px(-2.0),
+                        left: Val::Px(-12.0),
+                        top: Val::Px(-12.0),
                         ..default()
                     },
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.95, 0.95, 0.95, 0.72)),
-                CrosshairNode,
-            ));
+                UiPanelKind::Crosshair,
+            ))
+            .with_children(|ret| {
+                // Center dot
+                ret.spawn((
+                    Node {
+                        width: Val::Px(4.0),
+                        height: Val::Px(4.0),
+                        border_radius: BorderRadius::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.96, 0.98, 1.0, 0.82)),
+                    CrosshairCenterDot,
+                ));
+                // 4 subtle outer reticle ticks (light up when aiming at interactable or Stalker!)
+                for (left, top, w, h) in [
+                    (Val::Px(11.0), Val::Px(0.0), Val::Px(2.0), Val::Px(5.0)),
+                    (Val::Px(11.0), Val::Px(19.0), Val::Px(2.0), Val::Px(5.0)),
+                    (Val::Px(0.0), Val::Px(11.0), Val::Px(5.0), Val::Px(2.0)),
+                    (Val::Px(19.0), Val::Px(11.0), Val::Px(5.0), Val::Px(2.0)),
+                ] {
+                    ret.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left,
+                            top,
+                            width: w,
+                            height: h,
+                            border_radius: BorderRadius::all(Val::Px(1.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.22, 0.92, 0.86, 0.0)),
+                        CrosshairBracket,
+                    ));
+                }
+            });
 
-            // Bottom center stack: Prompt, Toast, Battery Pouch Selector, Active Belt Bar
+            // -----------------------------------------------------------------
+            // FLOATING CROSSHAIR LOOK-AT TARGET PILL (Directly under reticle)
+            // -----------------------------------------------------------------
+            hud.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Percent(54.0),
+                    left: Val::Percent(0.0),
+                    width: Val::Percent(100.0),
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+                Visibility::Hidden,
+                UiPanelKind::TargetCard,
+            ))
+            .with_children(|wrap| {
+                wrap.spawn((
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(9.0),
+                        padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
+                        border: UiRect::all(Val::Px(1.5)),
+                        border_radius: BorderRadius::all(Val::Px(8.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.04, 0.07, 0.11, 0.90)),
+                    BorderColor::all(COL_ACCENT_CYAN),
+                    TargetCardFrame,
+                ))
+                .with_children(|pill| {
+                    pill.spawn((
+                        Node {
+                            padding: UiRect::axes(Val::Px(7.0), Val::Px(3.0)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(COL_ACCENT_CYAN),
+                        TargetKeyBadgeBg,
+                    ))
+                    .with_children(|k| {
+                        k.spawn((
+                            Text::new("E"),
+                            TextFont {
+                                font_size: FontSize::Px(12.0),
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.03, 0.05, 0.07)),
+                            TargetKeyBadgeText,
+                        ));
+                    });
+                    pill.spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(1.0),
+                        ..default()
+                    })
+                    .with_children(|txt| {
+                        txt.spawn((
+                            Text::new(""),
+                            TextFont {
+                                font_size: FontSize::Px(13.5),
+                                ..default()
+                            },
+                            TextColor(COL_TEXT_BRIGHT),
+                            TargetLabelText,
+                        ));
+                        txt.spawn((
+                            Text::new(""),
+                            TextFont {
+                                font_size: FontSize::Px(11.0),
+                                ..default()
+                            },
+                            TextColor(COL_TEXT_MUTED),
+                            TargetSublabelText,
+                        ));
+                    });
+                });
+            });
+
+            // -----------------------------------------------------------------
+            // BOTTOM DOCK: Toast Pill + [R] Visual Battery Tray + Graphical Hotbar + Pouch
+            // -----------------------------------------------------------------
             hud.spawn(Node {
                 position_type: PositionType::Absolute,
                 bottom: Val::Px(16.0),
@@ -887,70 +1755,344 @@ fn setup_hud(mut commands: Commands) {
                 width: Val::Percent(100.0),
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
-                row_gap: Val::Px(6.0),
+                row_gap: Val::Px(8.0),
                 ..default()
             })
             .with_children(|bottom| {
-                bottom.spawn((
-                    Text::new(""),
-                    TextFont {
-                        font_size: FontSize::Px(15.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(1.0, 0.88, 0.42)),
-                    PromptText,
-                ));
-
-                bottom.spawn((
-                    Text::new(""),
-                    TextFont {
-                        font_size: FontSize::Px(14.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.32, 0.95, 0.88)),
-                    ToastText,
-                ));
-
-                bottom
-                    .spawn((
-                        Node {
-                            padding: UiRect::axes(Val::Px(14.0), Val::Px(7.0)),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgba(0.06, 0.12, 0.16, 0.92)),
-                        Visibility::Hidden,
-                        BatterySelectorBox,
-                    ))
-                    .with_children(|b| {
-                        b.spawn((
-                            Text::new(""),
-                            TextFont {
-                                font_size: FontSize::Px(14.0),
-                                ..default()
-                            },
-                            TextColor(Color::srgb(0.42, 0.95, 1.0)),
-                            BatterySelectorText,
-                        ));
-                    });
-
+                // Compact Toast Notification Banner
                 bottom
                     .spawn((
                         Node {
                             padding: UiRect::axes(Val::Px(14.0), Val::Px(6.0)),
+                            border: UiRect {
+                                left: Val::Px(3.0),
+                                top: Val::Px(1.0),
+                                right: Val::Px(1.0),
+                                bottom: Val::Px(1.0),
+                            },
+                            border_radius: BorderRadius::all(Val::Px(6.0)),
                             ..default()
                         },
-                        BackgroundColor(Color::srgba(0.04, 0.06, 0.09, 0.82)),
+                        BackgroundColor(Color::srgba(0.04, 0.08, 0.12, 0.92)),
+                        BorderColor {
+                            left: COL_ACCENT_CYAN,
+                            top: COL_BORDER_DIM,
+                            right: COL_BORDER_DIM,
+                            bottom: COL_BORDER_DIM,
+                        },
+                        Visibility::Hidden,
+                        UiPanelKind::ToastCard,
                     ))
-                    .with_children(|bar| {
-                        bar.spawn((
+                    .with_children(|t| {
+                        t.spawn((
                             Text::new(""),
                             TextFont {
-                                font_size: FontSize::Px(13.5),
+                                font_size: FontSize::Px(13.0),
                                 ..default()
                             },
-                            TextColor(Color::srgb(0.90, 0.95, 0.94)),
-                            BeltHudText,
+                            TextColor(COL_TEXT_BRIGHT),
+                            ToastText,
                         ));
+                    });
+
+                // Graphical [R] Battery Swap Tray (6 Visual Cell Cards with Vertical Charge Fill!)
+                bottom
+                    .spawn((
+                        Node {
+                            padding: UiRect::axes(Val::Px(12.0), Val::Px(9.0)),
+                            border: UiRect::all(Val::Px(1.5)),
+                            border_radius: BorderRadius::all(Val::Px(9.0)),
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::Center,
+                            row_gap: Val::Px(7.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.04, 0.08, 0.13, 0.95)),
+                        BorderColor::all(COL_ACCENT_CYAN),
+                        Visibility::Hidden,
+                        UiPanelKind::BatteryTray,
+                    ))
+                    .with_children(|tray| {
+                        tray.spawn((
+                            Text::new("BATTERY POUCH   [Scroll] Select   [R] Swap   [Q] Drop"),
+                            TextFont {
+                                font_size: FontSize::Px(11.0),
+                                ..default()
+                            },
+                            TextColor(COL_ACCENT_CYAN),
+                        ));
+                        tray.spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(8.0),
+                            ..default()
+                        })
+                        .with_children(|cells| {
+                            for idx in 0..MAX_POUCH_CAPACITY {
+                                cells
+                                    .spawn((
+                                        Node {
+                                            width: Val::Px(44.0),
+                                            height: Val::Px(60.0),
+                                            padding: UiRect::all(Val::Px(4.0)),
+                                            border: UiRect::all(Val::Px(1.5)),
+                                            border_radius: BorderRadius::all(Val::Px(6.0)),
+                                            flex_direction: FlexDirection::Column,
+                                            align_items: AlignItems::Center,
+                                            justify_content: JustifyContent::SpaceBetween,
+                                            ..default()
+                                        },
+                                        BackgroundColor(COL_CARD_BG),
+                                        BorderColor::all(COL_BORDER_DIM),
+                                        TrayCellCard(idx),
+                                    ))
+                                    .with_children(|c| {
+                                        // Vertical battery tube
+                                        c.spawn((
+                                            Node {
+                                                width: Val::Px(18.0),
+                                                height: Val::Px(32.0),
+                                                padding: UiRect::all(Val::Px(2.0)),
+                                                border: UiRect::all(Val::Px(1.0)),
+                                                border_radius: BorderRadius::all(Val::Px(3.0)),
+                                                align_items: AlignItems::FlexEnd,
+                                                ..default()
+                                            },
+                                            BackgroundColor(Color::srgba(0.05, 0.07, 0.10, 0.95)),
+                                            BorderColor::all(COL_BORDER_DIM),
+                                        ))
+                                        .with_children(|tube| {
+                                            tube.spawn((
+                                                Node {
+                                                    width: Val::Percent(100.0),
+                                                    height: Val::Percent(0.0),
+                                                    border_radius: BorderRadius::all(Val::Px(2.0)),
+                                                    ..default()
+                                                },
+                                                BackgroundColor(COL_ACCENT_CYAN),
+                                                TrayCellFill(idx),
+                                            ));
+                                        });
+                                        c.spawn((
+                                            Text::new("--"),
+                                            TextFont {
+                                                font_size: FontSize::Px(10.5),
+                                                ..default()
+                                            },
+                                            TextColor(COL_TEXT_BRIGHT),
+                                            TrayCellPctText(idx),
+                                        ));
+                                    });
+                            }
+                        });
+                    });
+
+                // Graphical Bottom Equipment Dock: 5 Icon Hotbar Slots + Pouch Gauges + Wearables
+                bottom
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::FlexEnd,
+                        column_gap: Val::Px(10.0),
+                        ..default()
+                    })
+                    .with_children(|dock| {
+                        // 5 Graphical Belt Slot Cards
+                        dock.spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(7.0),
+                            ..default()
+                        })
+                        .with_children(|slots| {
+                            for idx in 0..MAX_BELT_CAPACITY {
+                                slots
+                                    .spawn((
+                                        Node {
+                                            width: Val::Px(64.0),
+                                            height: Val::Px(64.0),
+                                            border: UiRect::all(Val::Px(2.0)),
+                                            border_radius: BorderRadius::all(Val::Px(9.0)),
+                                            justify_content: JustifyContent::Center,
+                                            align_items: AlignItems::Center,
+                                            ..default()
+                                        },
+                                        BackgroundColor(COL_HUD_POD_BG),
+                                        BorderColor::all(COL_BORDER_DIM),
+                                        HotbarSlotCard(idx),
+                                    ))
+                                    .with_children(|slot| {
+                                        // Top-left slot keycap number
+                                        slot.spawn((
+                                            Text::new(format!("{}", idx + 1)),
+                                            TextFont {
+                                                font_size: FontSize::Px(10.5),
+                                                ..default()
+                                            },
+                                            TextColor(COL_TEXT_MUTED),
+                                            Node {
+                                                position_type: PositionType::Absolute,
+                                                top: Val::Px(4.0),
+                                                left: Val::Px(6.0),
+                                                ..default()
+                                            },
+                                        ));
+
+                                        // Procedural Graphical Icon (Primary + Secondary shape)
+                                        slot.spawn((
+                                            Node {
+                                                width: Val::Px(24.0),
+                                                height: Val::Px(24.0),
+                                                border_radius: BorderRadius::all(Val::Px(5.0)),
+                                                justify_content: JustifyContent::Center,
+                                                align_items: AlignItems::Center,
+                                                ..default()
+                                            },
+                                            BackgroundColor(Color::NONE),
+                                            HotbarIconPrimary(idx),
+                                        ))
+                                        .with_children(|icon| {
+                                            icon.spawn((
+                                                Node {
+                                                    width: Val::Px(10.0),
+                                                    height: Val::Px(10.0),
+                                                    border_radius: BorderRadius::all(Val::Px(2.0)),
+                                                    ..default()
+                                                },
+                                                BackgroundColor(Color::NONE),
+                                                HotbarIconSecondary(idx),
+                                            ));
+                                        });
+
+                                        // Bottom-right count / short tag badge
+                                        slot.spawn((
+                                            Text::new(""),
+                                            TextFont {
+                                                font_size: FontSize::Px(11.0),
+                                                ..default()
+                                            },
+                                            TextColor(COL_TEXT_BRIGHT),
+                                            Node {
+                                                position_type: PositionType::Absolute,
+                                                bottom: Val::Px(5.0),
+                                                right: Val::Px(6.0),
+                                                ..default()
+                                            },
+                                            HotbarCountText(idx),
+                                        ));
+
+                                        // Bottom thin charge strip (for Flashlight slot)
+                                        slot.spawn((
+                                            Node {
+                                                position_type: PositionType::Absolute,
+                                                bottom: Val::Px(2.0),
+                                                left: Val::Px(6.0),
+                                                width: Val::Px(48.0),
+                                                height: Val::Px(3.0),
+                                                border_radius: BorderRadius::all(Val::Px(2.0)),
+                                                ..default()
+                                            },
+                                            BackgroundColor(Color::NONE),
+                                        ))
+                                        .with_children(|bar| {
+                                            bar.spawn((
+                                                Node {
+                                                    width: Val::Percent(0.0),
+                                                    height: Val::Percent(100.0),
+                                                    border_radius: BorderRadius::all(Val::Px(2.0)),
+                                                    ..default()
+                                                },
+                                                BackgroundColor(COL_ACCENT_CYAN),
+                                                HotbarChargeFill(idx),
+                                            ));
+                                        });
+                                    });
+                            }
+                        });
+
+                        // Right of Hotbar: Mini Battery Pouch Vertical Gauges + Wearable Badges
+                        dock.spawn((
+                            Node {
+                                padding: UiRect::axes(Val::Px(9.0), Val::Px(8.0)),
+                                border: UiRect::all(Val::Px(1.5)),
+                                border_radius: BorderRadius::all(Val::Px(8.0)),
+                                flex_direction: FlexDirection::Column,
+                                row_gap: Val::Px(5.0),
+                                ..default()
+                            },
+                            BackgroundColor(COL_HUD_POD_BG),
+                            BorderColor::all(COL_BORDER_DIM),
+                        ))
+                        .with_children(|side| {
+                            // 4 Mini Battery Pouch Gauges
+                            side.spawn(Node {
+                                flex_direction: FlexDirection::Row,
+                                column_gap: Val::Px(4.0),
+                                align_items: AlignItems::FlexEnd,
+                                ..default()
+                            })
+                            .with_children(|pouch| {
+                                for idx in 0..4 {
+                                    pouch
+                                        .spawn((
+                                            Node {
+                                                width: Val::Px(10.0),
+                                                height: Val::Px(22.0),
+                                                padding: UiRect::all(Val::Px(1.5)),
+                                                border: UiRect::all(Val::Px(1.0)),
+                                                border_radius: BorderRadius::all(Val::Px(2.0)),
+                                                align_items: AlignItems::FlexEnd,
+                                                ..default()
+                                            },
+                                            BackgroundColor(Color::srgba(0.06, 0.08, 0.12, 0.9)),
+                                            BorderColor::all(COL_BORDER_DIM),
+                                        ))
+                                        .with_children(|g| {
+                                            g.spawn((
+                                                Node {
+                                                    width: Val::Percent(100.0),
+                                                    height: Val::Percent(0.0),
+                                                    ..default()
+                                                },
+                                                BackgroundColor(COL_ACCENT_CYAN),
+                                                PouchGaugeFill(idx),
+                                            ));
+                                        });
+                                }
+                            });
+
+                            // 2 Compact Wearable Badges (HL = Headlamp, SB = Stealth Boots)
+                            side.spawn(Node {
+                                flex_direction: FlexDirection::Row,
+                                column_gap: Val::Px(5.0),
+                                ..default()
+                            })
+                            .with_children(|wear| {
+                                for (tag, is_headlamp) in [("HL", true), ("SB", false)] {
+                                    wear.spawn((
+                                        Node {
+                                            width: Val::Px(23.0),
+                                            height: Val::Px(18.0),
+                                            border: UiRect::all(Val::Px(1.0)),
+                                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                                            justify_content: JustifyContent::Center,
+                                            align_items: AlignItems::Center,
+                                            ..default()
+                                        },
+                                        BackgroundColor(Color::srgba(0.08, 0.10, 0.14, 0.75)),
+                                        BorderColor::all(COL_BORDER_DIM),
+                                        WearableBadge { is_headlamp },
+                                    ))
+                                    .with_children(|b| {
+                                        b.spawn((
+                                            Text::new(tag),
+                                            TextFont {
+                                                font_size: FontSize::Px(9.5),
+                                                ..default()
+                                            },
+                                            TextColor(COL_TEXT_BRIGHT),
+                                        ));
+                                    });
+                                }
+                            });
+                        });
                     });
             });
         });
@@ -962,157 +2104,411 @@ fn setup_hud(mut commands: Commands) {
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Percent(50.0),
-                top: Val::Percent(50.0),
-                width: Val::Px(560.0),
-                margin: UiRect {
-                    left: Val::Px(-280.0),
-                    top: Val::Px(-185.0),
-                    ..default()
-                },
-                padding: UiRect::all(Val::Px(18.0)),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(10.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.05, 0.07, 0.10, 0.95)),
+            BackgroundColor(Color::srgba(0.015, 0.025, 0.04, 0.62)),
             Visibility::Hidden,
-            CoopPanelRoot,
+            UiPanelKind::CoopMenu,
         ))
-        .with_children(|panel| {
-            panel.spawn((
-                Text::new("EXPEDITION MENU — CO-OP & CONTROLS"),
-                TextFont {
-                    font_size: FontSize::Px(16.5),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.30, 0.92, 0.86)),
-            ));
+        .with_children(|backdrop| {
+            backdrop
+                .spawn((
+                    Node {
+                        width: Val::Px(540.0),
+                        padding: UiRect::all(Val::Px(22.0)),
+                        border: UiRect {
+                            top: Val::Px(3.0),
+                            left: Val::Px(1.5),
+                            right: Val::Px(1.5),
+                            bottom: Val::Px(1.5),
+                        },
+                        border_radius: BorderRadius::all(Val::Px(12.0)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(12.0),
+                        ..default()
+                    },
+                    BackgroundColor(COL_PANEL_BG),
+                    BorderColor {
+                        top: COL_ACCENT_CYAN,
+                        left: COL_BORDER_DIM,
+                        right: COL_BORDER_DIM,
+                        bottom: COL_BORDER_DIM,
+                    },
+                ))
+                .with_children(|panel| {
+                    panel.spawn((
+                        Text::new("EXPEDITION MENU"),
+                        TextFont {
+                            font_size: FontSize::Px(20.0),
+                            ..default()
+                        },
+                        TextColor(COL_ACCENT_CYAN),
+                    ));
 
-            panel.spawn((
-                Text::new("Status: Offline"),
-                TextFont {
-                    font_size: FontSize::Px(13.5),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.88, 0.92, 0.95)),
-                CoopPanelStatusText,
-            ));
+                    panel
+                        .spawn((
+                            Node {
+                                width: Val::Percent(100.0),
+                                padding: UiRect::all(Val::Px(12.0)),
+                                border_radius: BorderRadius::all(Val::Px(8.0)),
+                                ..default()
+                            },
+                            BackgroundColor(COL_CARD_BG),
+                        ))
+                        .with_children(|box_n| {
+                            box_n.spawn((
+                                Text::new("Status: Offline"),
+                                TextFont {
+                                    font_size: FontSize::Px(13.0),
+                                    ..default()
+                                },
+                                TextColor(COL_TEXT_BRIGHT),
+                                CoopPanelStatusText,
+                            ));
+                        });
 
-            panel
-                .spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    flex_wrap: FlexWrap::Wrap,
-                    column_gap: Val::Px(6.0),
-                    row_gap: Val::Px(4.0),
-                    ..default()
-                })
-                .with_children(|row| {
-                    spawn_std_button(row, "Copy Join Code", UiAction::CopyJoinCode);
-                    spawn_std_button(row, "Cycle Visor Color", UiAction::CycleVisor);
-                    spawn_std_button(row, "Mute Mic (M)", UiAction::ToggleMute);
-                    spawn_std_button(row, "Self-Echo Test (V)", UiAction::ToggleSelfEcho);
-                });
+                    panel
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            flex_wrap: FlexWrap::Wrap,
+                            column_gap: Val::Px(8.0),
+                            row_gap: Val::Px(6.0),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            spawn_std_btn(row, "Copy Join Code", UiAction::CopyJoinCode);
+                            spawn_std_btn(row, "Cycle Visor", UiAction::CycleVisor);
+                            spawn_std_btn(row, "Mute [M]", UiAction::ToggleMute);
+                            spawn_std_btn(row, "Self-Echo [V]", UiAction::ToggleSelfEcho);
+                        });
 
-            panel
-                .spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    flex_wrap: FlexWrap::Wrap,
-                    column_gap: Val::Px(6.0),
-                    row_gap: Val::Px(4.0),
-                    ..default()
-                })
-                .with_children(|row| {
-                    spawn_std_button(
-                        row,
-                        "Settings (FOV / Audio / Fullscreen)",
-                        UiAction::OpenSettings,
-                    );
-                    spawn_accent_button(row, "Resume [Tab/Esc]", UiAction::ResumeGame);
-                    spawn_danger_button(
-                        row,
-                        "Disconnect & Main Menu",
-                        UiAction::DisconnectToMenu,
-                    );
+                    panel
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            justify_content: JustifyContent::SpaceBetween,
+                            width: Val::Percent(100.0),
+                            margin: UiRect::top(Val::Px(4.0)),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            row.spawn(Node {
+                                flex_direction: FlexDirection::Row,
+                                column_gap: Val::Px(8.0),
+                                ..default()
+                            })
+                            .with_children(|left| {
+                                spawn_std_btn(left, "Settings", UiAction::OpenSettings);
+                                spawn_danger_btn(left, "Save & Main Menu", UiAction::DisconnectToMenu);
+                            });
+                            spawn_accent_btn(row, "Resume", UiAction::ResumeGame);
+                        });
                 });
         });
 
     // =========================================================================
-    // 5. BASE SHED SUPPLY SHOP & DEPTH SELECTOR ([E] at Terminal / [B] in Shed)
+    // 5. GRAPHICAL BASE SHED SUPPLY SHOP (2-Column Icon Cards + Tier Tabs)
     // =========================================================================
     commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Percent(50.0),
-                top: Val::Percent(50.0),
-                width: Val::Px(640.0),
-                margin: UiRect {
-                    left: Val::Px(-320.0),
-                    top: Val::Px(-250.0),
-                    ..default()
-                },
-                padding: UiRect::all(Val::Px(18.0)),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(8.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.05, 0.08, 0.11, 0.96)),
+            BackgroundColor(Color::srgba(0.015, 0.025, 0.04, 0.68)),
             Visibility::Hidden,
-            ShopPanelRoot,
+            UiPanelKind::ShopOverlay,
         ))
-        .with_children(|panel| {
-            panel.spawn((
-                Text::new("BASE SHED SUPPLY TERMINAL & DEPTH SELECTOR"),
-                TextFont {
-                    font_size: FontSize::Px(16.5),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.25, 0.96, 0.58)),
-            ));
+        .with_children(|backdrop| {
+            backdrop
+                .spawn((
+                    Node {
+                        width: Val::Px(720.0),
+                        padding: UiRect::all(Val::Px(20.0)),
+                        border: UiRect {
+                            top: Val::Px(3.0),
+                            left: Val::Px(1.5),
+                            right: Val::Px(1.5),
+                            bottom: Val::Px(1.5),
+                        },
+                        border_radius: BorderRadius::all(Val::Px(12.0)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(12.0),
+                        ..default()
+                    },
+                    BackgroundColor(COL_PANEL_BG),
+                    BorderColor {
+                        top: COL_ACCENT_GREEN,
+                        left: COL_BORDER_DIM,
+                        right: COL_BORDER_DIM,
+                        bottom: COL_BORDER_DIM,
+                    },
+                ))
+                .with_children(|panel| {
+                    // Top Bar: Title + Save Badge + Large Golden Credits Pill
+                    panel
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            justify_content: JustifyContent::SpaceBetween,
+                            align_items: AlignItems::Center,
+                            width: Val::Percent(100.0),
+                            ..default()
+                        })
+                        .with_children(|hdr| {
+                            hdr.spawn(Node {
+                                flex_direction: FlexDirection::Column,
+                                row_gap: Val::Px(2.0),
+                                ..default()
+                            })
+                            .with_children(|l| {
+                                l.spawn((
+                                    Text::new("SUPPLY TERMINAL"),
+                                    TextFont {
+                                        font_size: FontSize::Px(20.0),
+                                        ..default()
+                                    },
+                                    TextColor(COL_ACCENT_GREEN),
+                                ));
+                                l.spawn((
+                                    Text::new("Save: default"),
+                                    TextFont {
+                                        font_size: FontSize::Px(11.5),
+                                        ..default()
+                                    },
+                                    TextColor(COL_TEXT_MUTED),
+                                    ShopSaveTagText,
+                                ));
+                            });
 
-            panel.spawn((
-                Text::new("Credits: 100 cr"),
-                TextFont {
-                    font_size: FontSize::Px(13.5),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.95, 0.90, 0.55)),
-                ShopHeaderText,
-            ));
+                            hdr.spawn((
+                                Node {
+                                    padding: UiRect::axes(Val::Px(14.0), Val::Px(7.0)),
+                                    border: UiRect::all(Val::Px(1.5)),
+                                    border_radius: BorderRadius::all(Val::Px(8.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.16, 0.13, 0.05, 0.95)),
+                                BorderColor::all(COL_ACCENT_AMBER),
+                            ))
+                            .with_children(|cr| {
+                                cr.spawn((
+                                    Text::new("100 cr"),
+                                    TextFont {
+                                        font_size: FontSize::Px(17.0),
+                                        ..default()
+                                    },
+                                    TextColor(COL_ACCENT_AMBER),
+                                    ShopCreditsText,
+                                ));
+                            });
+                        });
 
-            panel
-                .spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(6.0),
-                    ..default()
-                })
-                .with_children(|row| {
-                    spawn_std_button(row, "Depth Tier 1", UiAction::ShopTier(1));
-                    spawn_std_button(row, "Depth Tier 2", UiAction::ShopTier(2));
-                    spawn_std_button(row, "Depth Tier 3", UiAction::ShopTier(3));
-                    spawn_accent_button(row, "Save Campaign", UiAction::ShopManualSave);
-                    spawn_danger_button(row, "Close [Esc/B]", UiAction::ShopClose);
-                });
+                    // Visual Depth Tier Selector Tabs
+                    panel
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(8.0),
+                            width: Val::Percent(100.0),
+                            ..default()
+                        })
+                        .with_children(|tabs| {
+                            for tier in 1..=3u8 {
+                                let label = format!("DEPTH TIER {tier}");
+                                tabs.spawn((
+                                    Node {
+                                        flex_grow: 1.0,
+                                        padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
+                                        border: UiRect::all(Val::Px(1.5)),
+                                        border_radius: BorderRadius::all(Val::Px(7.0)),
+                                        justify_content: JustifyContent::Center,
+                                        align_items: AlignItems::Center,
+                                        ..default()
+                                    },
+                                    BackgroundColor(COL_CARD_BG),
+                                    BorderColor::all(COL_BORDER_DIM),
+                                    ShopTierTab(tier),
+                                ))
+                                .observe(
+                                    move |_click: On<PointerClick>,
+                                          mut writer: MessageWriter<TriggerUiAction>| {
+                                        writer.write(TriggerUiAction(UiAction::ShopTier(tier)));
+                                    },
+                                )
+                                .with_children(|t| {
+                                    t.spawn((
+                                        Text::new(label),
+                                        TextFont {
+                                            font_size: FontSize::Px(12.5),
+                                            ..default()
+                                        },
+                                        TextColor(COL_TEXT_BRIGHT),
+                                    ));
+                                });
+                            }
+                        });
 
-            panel
-                .spawn(Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(4.0),
-                    margin: UiRect::top(Val::Px(4.0)),
-                    ..default()
-                })
-                .with_children(|list| {
-                    for entry in SHOP_CATALOG {
-                        let label = format!(
-                            "{} ({} cr) — {}",
-                            entry.name, entry.cost, entry.description
-                        );
-                        spawn_std_button(list, &label, UiAction::ShopBuy(entry.item));
-                    }
+                    // 2-Column Graphical Gear Card Grid
+                    panel
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            flex_wrap: FlexWrap::Wrap,
+                            column_gap: Val::Px(10.0),
+                            row_gap: Val::Px(8.0),
+                            width: Val::Percent(100.0),
+                            ..default()
+                        })
+                        .with_children(|grid| {
+                            for entry in SHOP_CATALOG {
+                                let (accent, code) = shop_item_visual_accent(entry.item);
+                                let action = UiAction::ShopBuy(entry.item);
+                                let base_bg = COL_CARD_BG;
+                                let hover_bg = Color::srgba(0.13, 0.19, 0.27, 0.98);
+                                grid.spawn((
+                                    Node {
+                                        width: Val::Px(332.0),
+                                        padding: UiRect::axes(Val::Px(10.0), Val::Px(9.0)),
+                                        border: UiRect::all(Val::Px(1.5)),
+                                        border_radius: BorderRadius::all(Val::Px(8.0)),
+                                        flex_direction: FlexDirection::Row,
+                                        align_items: AlignItems::Center,
+                                        justify_content: JustifyContent::SpaceBetween,
+                                        column_gap: Val::Px(10.0),
+                                        ..default()
+                                    },
+                                    BackgroundColor(base_bg),
+                                    BorderColor::all(COL_BORDER_DIM),
+                                    action,
+                                ))
+                                .observe(
+                                    move |_click: On<PointerClick>,
+                                          mut writer: MessageWriter<TriggerUiAction>| {
+                                        writer.write(TriggerUiAction(action));
+                                    },
+                                )
+                                .observe(
+                                    move |over: On<PointerOver>,
+                                          mut bg_q: Query<&mut BackgroundColor>| {
+                                        if let Ok(mut bg) = bg_q.get_mut(over.entity) {
+                                            *bg = BackgroundColor(hover_bg);
+                                        }
+                                    },
+                                )
+                                .observe(
+                                    move |out: On<PointerOut>,
+                                          mut bg_q: Query<&mut BackgroundColor>| {
+                                        if let Ok(mut bg) = bg_q.get_mut(out.entity) {
+                                            *bg = BackgroundColor(base_bg);
+                                        }
+                                    },
+                                )
+                                .with_children(|card| {
+                                    card.spawn(Node {
+                                        flex_direction: FlexDirection::Row,
+                                        align_items: AlignItems::Center,
+                                        column_gap: Val::Px(10.0),
+                                        ..default()
+                                    })
+                                    .with_children(|left| {
+                                        // Color-coded visual icon badge
+                                        left.spawn((
+                                            Node {
+                                                width: Val::Px(36.0),
+                                                height: Val::Px(36.0),
+                                                border: UiRect::all(Val::Px(1.5)),
+                                                border_radius: BorderRadius::all(Val::Px(7.0)),
+                                                justify_content: JustifyContent::Center,
+                                                align_items: AlignItems::Center,
+                                                ..default()
+                                            },
+                                            BackgroundColor(Color::srgba(0.05, 0.08, 0.12, 0.96)),
+                                            BorderColor::all(accent),
+                                        ))
+                                        .with_children(|ic| {
+                                            ic.spawn((
+                                                Text::new(code),
+                                                TextFont {
+                                                    font_size: FontSize::Px(11.0),
+                                                    ..default()
+                                                },
+                                                TextColor(accent),
+                                            ));
+                                        });
+
+                                        left.spawn(Node {
+                                            flex_direction: FlexDirection::Column,
+                                            row_gap: Val::Px(2.0),
+                                            ..default()
+                                        })
+                                        .with_children(|txt| {
+                                            txt.spawn((
+                                                Text::new(entry.name),
+                                                TextFont {
+                                                    font_size: FontSize::Px(13.5),
+                                                    ..default()
+                                                },
+                                                TextColor(COL_TEXT_BRIGHT),
+                                            ));
+                                            txt.spawn((
+                                                Text::new(entry.description),
+                                                TextFont {
+                                                    font_size: FontSize::Px(10.5),
+                                                    ..default()
+                                                },
+                                                TextColor(COL_TEXT_MUTED),
+                                            ));
+                                        });
+                                    });
+
+                                    // Right-aligned golden price pill
+                                    card.spawn((
+                                        Node {
+                                            padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                                            border_radius: BorderRadius::all(Val::Px(5.0)),
+                                            ..default()
+                                        },
+                                        BackgroundColor(Color::srgba(0.16, 0.13, 0.05, 0.92)),
+                                    ))
+                                    .with_children(|pr| {
+                                        pr.spawn((
+                                            Text::new(format!("{} cr", entry.cost)),
+                                            TextFont {
+                                                font_size: FontSize::Px(12.0),
+                                                ..default()
+                                            },
+                                            TextColor(COL_ACCENT_AMBER),
+                                        ));
+                                    });
+                                });
+                            }
+                        });
+
+                    // Footer Controls
+                    panel
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            justify_content: JustifyContent::SpaceBetween,
+                            width: Val::Percent(100.0),
+                            margin: UiRect::top(Val::Px(2.0)),
+                            ..default()
+                        })
+                        .with_children(|foot| {
+                            spawn_accent_btn(foot, "Save Campaign", UiAction::ShopManualSave);
+                            spawn_danger_btn(foot, "Close [B / Esc]", UiAction::ShopClose);
+                        });
                 });
         });
 }
+
+// =============================================================================
+// INPUT & ACTION HANDLERS
+// =============================================================================
 
 fn handle_name_typing_system(
     screen: Res<AppScreen>,
@@ -1216,8 +2612,9 @@ fn apply_slider_frac(settings: &mut UserSettings, kind: SliderKind, frac: f32) {
 
 fn slider_current_frac(settings: &UserSettings, kind: SliderKind) -> f32 {
     match kind {
-        SliderKind::Fov => ((settings.fov_deg - FOV_MIN_DEG) / (FOV_MAX_DEG - FOV_MIN_DEG))
-            .clamp(0.0, 1.0),
+        SliderKind::Fov => {
+            ((settings.fov_deg - FOV_MIN_DEG) / (FOV_MAX_DEG - FOV_MIN_DEG)).clamp(0.0, 1.0)
+        }
         SliderKind::MasterVolume => (settings.master_volume / 1.5).clamp(0.0, 1.0),
         SliderKind::VoiceVolume => (settings.voice_volume / 2.0).clamp(0.0, 1.0),
         SliderKind::MicGain => ((settings.mic_gain - 0.2) / 2.8).clamp(0.0, 1.0),
@@ -1226,7 +2623,7 @@ fn slider_current_frac(settings: &UserSettings, kind: SliderKind) -> f32 {
 }
 
 fn cycle_device(current: &Option<String>, list: &[String], delta: i32) -> Option<String> {
-    let total = list.len() + 1; // index 0 = System Default (None)
+    let total = list.len() + 1;
     let cur_idx = match current {
         None => 0usize,
         Some(name) => list
@@ -1242,71 +2639,78 @@ fn cycle_device(current: &Option<String>, list: &[String], delta: i32) -> Option
     }
 }
 
+#[derive(SystemParam)]
+struct ActionResources<'w> {
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    menu_open: ResMut<'w, CoopMenuOpen>,
+    settings_open: ResMut<'w, SettingsMenuOpen>,
+    diag_open: ResMut<'w, DiagnosticsDrawerOpen>,
+    name_focused: ResMut<'w, NameInputFocused>,
+    coop: ResMut<'w, CoopState>,
+    user_settings: ResMut<'w, UserSettings>,
+    voice_settings: ResMut<'w, VoiceSettings>,
+    device_catalog: ResMut<'w, AudioDeviceCatalog>,
+    save_browser: ResMut<'w, SaveSlotBrowser>,
+    inv: Res<'w, PlayerInventory>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_ui_actions_system(
     mut commands: Commands,
     mut actions: MessageReader<TriggerUiAction>,
-    mut menu_open: ResMut<CoopMenuOpen>,
-    mut settings_open: ResMut<SettingsMenuOpen>,
-    mut name_focused: ResMut<NameInputFocused>,
-    mut coop: ResMut<CoopState>,
-    mut user_settings: ResMut<UserSettings>,
-    mut voice_settings: ResMut<VoiceSettings>,
-    mut device_catalog: ResMut<AudioDeviceCatalog>,
-    mut save_browser: ResMut<SaveSlotBrowser>,
-    inv: Res<PlayerInventory>,
+    mut res: ActionResources,
     mut lifecycle_writer: MessageWriter<SessionLifecycleEvent>,
     mut shop_writer: MessageWriter<ShopActionEvent>,
     mut remove_voice: MessageWriter<RemoveVoiceSpeakerEvent>,
     mut exit_writer: MessageWriter<AppExit>,
 ) {
+    if res.keys.just_pressed(KeyCode::F3) {
+        res.diag_open.0 = !res.diag_open.0;
+    }
+
+    let menu_open = &mut *res.menu_open;
+    let settings_open = &mut *res.settings_open;
+    let name_focused = &mut *res.name_focused;
+    let coop = &mut *res.coop;
+    let user_settings = &mut *res.user_settings;
+    let voice_settings = &mut *res.voice_settings;
+    let device_catalog = &mut *res.device_catalog;
+    let save_browser = &mut *res.save_browser;
+    let inv = &*res.inv;
+
     for TriggerUiAction(action) in actions.read().copied() {
         if !matches!(action, UiAction::FocusNameInput) {
             name_focused.0 = false;
         }
         match action {
-            UiAction::FocusNameInput => {
-                name_focused.0 = true;
-            }
+            UiAction::FocusNameInput => name_focused.0 = true,
             UiAction::SelectVisor(idx) => {
                 let clamped = idx % VISOR_PALETTE.len();
                 user_settings.visor_idx = clamped;
                 coop.visor_idx = clamped;
                 if coop.is_connected() {
-                    coop.sync_local_profile(&inv);
+                    coop.sync_local_profile(inv);
                 }
             }
             UiAction::PrevSaveSlot => {
                 save_browser.step(-1);
-                coop.status_text = format!(
-                    "Selected campaign save slot '{}'",
-                    save_browser.selected_slot_name()
-                );
+                coop.status_text = format!("Save slot '{}' selected", save_browser.selected_slot_name());
             }
             UiAction::NextSaveSlot => {
                 save_browser.step(1);
-                coop.status_text = format!(
-                    "Selected campaign save slot '{}'",
-                    save_browser.selected_slot_name()
-                );
+                coop.status_text = format!("Save slot '{}' selected", save_browser.selected_slot_name());
             }
             UiAction::RefreshSaveSlots => {
                 save_browser.refresh();
                 coop.status_text = format!(
-                    "Found {} save slot(s) in saves/ — selected '{}'",
+                    "Found {} save slot(s) — '{}'",
                     save_browser.slots.len(),
                     save_browser.selected_slot_name()
                 );
             }
             UiAction::NewSaveSlot => match save_browser.create_new_slot() {
-                Ok(name) => {
-                    coop.status_text = format!(
-                        "Created & selected new campaign save slot '{name}'!"
-                    );
-                }
-                Err(e) => {
-                    coop.status_text = format!("Failed to create save slot: {e}");
-                }
+                Ok(name) => coop.status_text = format!("Created new save slot '{name}'"),
+                Err(e) => coop.status_text = format!("Save creation error: {e}"),
             },
             UiAction::PlaySolo => {
                 user_settings.sanitize();
@@ -1324,16 +2728,15 @@ fn handle_ui_actions_system(
                 user_settings.sanitize();
                 coop.local_name = user_settings.player_name.clone();
                 coop.visor_idx = user_settings.visor_idx % VISOR_PALETTE.len();
-                clear_remote_players(&mut commands, &mut coop, &mut remove_voice);
+                clear_remote_players(&mut commands, coop, &mut remove_voice);
                 if let Some(code) = paste_from_clipboard() {
                     coop.start_join(code);
                 } else {
-                    coop.status_text =
-                        "Clipboard empty — copy host's ECHO-... code first!".into();
+                    coop.status_text = "Clipboard empty — copy host's ECHO-... code first!".into();
                 }
             }
             UiAction::CancelConnecting => {
-                clear_remote_players(&mut commands, &mut coop, &mut remove_voice);
+                clear_remote_players(&mut commands, coop, &mut remove_voice);
                 coop.session = None;
                 coop.join_code = None;
                 coop.pending_disconnect_s = None;
@@ -1359,7 +2762,7 @@ fn handle_ui_actions_system(
                         coop.status_text = "Could not access clipboard.".into();
                     }
                 } else {
-                    coop.status_text = "Host a lobby to generate a join code.".into();
+                    coop.status_text = "Host a lobby first to get a join code.".into();
                 }
             }
             UiAction::DisconnectToMenu => {
@@ -1369,14 +2772,11 @@ fn handle_ui_actions_system(
                 let next = (coop.visor_idx + 1) % VISOR_PALETTE.len();
                 coop.visor_idx = next;
                 user_settings.visor_idx = next;
-                // Broadcast visor color change immediately to all peers!
                 if coop.is_connected() {
-                    coop.sync_local_profile(&inv);
+                    coop.sync_local_profile(inv);
                 }
             }
-            UiAction::ToggleMute => {
-                voice_settings.muted = !voice_settings.muted;
-            }
+            UiAction::ToggleMute => voice_settings.muted = !voice_settings.muted,
             UiAction::ToggleSelfEcho => {
                 voice_settings.self_echo_test = !voice_settings.self_echo_test;
             }
@@ -1384,9 +2784,7 @@ fn handle_ui_actions_system(
                 menu_open.0 = false;
                 settings_open.0 = false;
             }
-            UiAction::ToggleFullscreen => {
-                user_settings.fullscreen = !user_settings.fullscreen;
-            }
+            UiAction::ToggleFullscreen => user_settings.fullscreen = !user_settings.fullscreen,
             UiAction::PrevOutputDevice => {
                 user_settings.output_device =
                     cycle_device(&user_settings.output_device, &device_catalog.output_devices, -1);
@@ -1403,15 +2801,9 @@ fn handle_ui_actions_system(
                 user_settings.input_device =
                     cycle_device(&user_settings.input_device, &device_catalog.input_devices, 1);
             }
-            UiAction::RefreshAudioDevices => {
-                device_catalog.refresh();
-            }
-            UiAction::SliderStep(kind, dir) => {
-                apply_slider_step(&mut user_settings, kind, dir);
-            }
-            UiAction::SliderSetFrac(kind, frac) => {
-                apply_slider_frac(&mut user_settings, kind, frac);
-            }
+            UiAction::RefreshAudioDevices => device_catalog.refresh(),
+            UiAction::SliderStep(kind, dir) => apply_slider_step(user_settings, kind, dir),
+            UiAction::SliderSetFrac(kind, frac) => apply_slider_frac(user_settings, kind, frac),
             UiAction::ShopBuy(item) => {
                 shop_writer.write(ShopActionEvent::Buy(item));
             }
@@ -1428,99 +2820,24 @@ fn handle_ui_actions_system(
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+// =============================================================================
+// PANEL VISIBILITY (Single Unified Query — Zero B0001 Risk!)
+// =============================================================================
+
+#[allow(clippy::too_many_arguments)]
 fn update_panel_visibility_system(
     screen: Res<AppScreen>,
     menu_open: Res<CoopMenuOpen>,
     shop_open: Res<ShopOverlayOpen>,
     settings_open: Res<SettingsMenuOpen>,
+    diag_open: Res<DiagnosticsDrawerOpen>,
     inv: Res<PlayerInventory>,
-    mut main_menu_q: Query<
-        &mut Visibility,
-        (
-            With<MainMenuRoot>,
-            Without<SettingsPanelRoot>,
-            Without<InGameHudRoot>,
-            Without<CoopPanelRoot>,
-            Without<ShopPanelRoot>,
-            Without<CrosshairNode>,
-            Without<BatterySelectorBox>,
-        ),
-    >,
-    mut settings_q: Query<
-        &mut Visibility,
-        (
-            With<SettingsPanelRoot>,
-            Without<MainMenuRoot>,
-            Without<InGameHudRoot>,
-            Without<CoopPanelRoot>,
-            Without<ShopPanelRoot>,
-            Without<CrosshairNode>,
-            Without<BatterySelectorBox>,
-        ),
-    >,
-    mut hud_q: Query<
-        &mut Visibility,
-        (
-            With<InGameHudRoot>,
-            Without<MainMenuRoot>,
-            Without<SettingsPanelRoot>,
-            Without<CoopPanelRoot>,
-            Without<ShopPanelRoot>,
-            Without<CrosshairNode>,
-            Without<BatterySelectorBox>,
-        ),
-    >,
-    mut coop_q: Query<
-        &mut Visibility,
-        (
-            With<CoopPanelRoot>,
-            Without<MainMenuRoot>,
-            Without<SettingsPanelRoot>,
-            Without<InGameHudRoot>,
-            Without<ShopPanelRoot>,
-            Without<CrosshairNode>,
-            Without<BatterySelectorBox>,
-        ),
-    >,
-    mut shop_q: Query<
-        &mut Visibility,
-        (
-            With<ShopPanelRoot>,
-            Without<MainMenuRoot>,
-            Without<SettingsPanelRoot>,
-            Without<InGameHudRoot>,
-            Without<CoopPanelRoot>,
-            Without<CrosshairNode>,
-            Without<BatterySelectorBox>,
-        ),
-    >,
-    mut crosshair_q: Query<
-        &mut Visibility,
-        (
-            With<CrosshairNode>,
-            Without<MainMenuRoot>,
-            Without<SettingsPanelRoot>,
-            Without<InGameHudRoot>,
-            Without<CoopPanelRoot>,
-            Without<ShopPanelRoot>,
-            Without<BatterySelectorBox>,
-        ),
-    >,
-    mut bat_box_q: Query<
-        &mut Visibility,
-        (
-            With<BatterySelectorBox>,
-            Without<MainMenuRoot>,
-            Without<SettingsPanelRoot>,
-            Without<InGameHudRoot>,
-            Without<CoopPanelRoot>,
-            Without<ShopPanelRoot>,
-            Without<CrosshairNode>,
-        ),
-    >,
+    target: Res<CrosshairTargetState>,
+    toast: Res<GameplayToast>,
+    mut panels_q: Query<(&UiPanelKind, &mut Visibility)>,
 ) {
     let in_game = *screen == AppScreen::InGame;
+    let gameplay_clear = in_game && !menu_open.0 && !shop_open.0 && !settings_open.0;
     let vis = |show: bool| {
         if show {
             Visibility::Visible
@@ -1529,63 +2846,29 @@ fn update_panel_visibility_system(
         }
     };
 
-    if let Ok(mut v) = main_menu_q.single_mut() {
-        *v = vis(!in_game && !settings_open.0);
-    }
-    if let Ok(mut v) = settings_q.single_mut() {
-        *v = vis(settings_open.0);
-    }
-    if let Ok(mut v) = hud_q.single_mut() {
-        *v = vis(in_game);
-    }
-    if let Ok(mut v) = coop_q.single_mut() {
-        *v = vis(in_game && menu_open.0 && !settings_open.0);
-    }
-    if let Ok(mut v) = shop_q.single_mut() {
-        *v = vis(in_game && shop_open.0 && !settings_open.0);
-    }
-    if let Ok(mut v) = crosshair_q.single_mut() {
-        *v = vis(in_game && !menu_open.0 && !shop_open.0 && !settings_open.0);
-    }
-    if let Ok(mut v) = bat_box_q.single_mut() {
-        *v = vis(in_game && inv.battery_selector.open);
+    for (kind, mut v) in &mut panels_q {
+        *v = match kind {
+            UiPanelKind::MainMenu => vis(!in_game && !settings_open.0),
+            UiPanelKind::Settings => vis(settings_open.0),
+            UiPanelKind::InGameHud => vis(in_game),
+            UiPanelKind::CoopMenu => vis(in_game && menu_open.0 && !settings_open.0),
+            UiPanelKind::ShopOverlay => vis(in_game && shop_open.0 && !settings_open.0),
+            UiPanelKind::Crosshair => vis(gameplay_clear),
+            UiPanelKind::TargetCard => vis(gameplay_clear && !target.label.is_empty()),
+            UiPanelKind::ToastCard => vis(gameplay_clear && !toast.text.is_empty()),
+            UiPanelKind::BatteryTray => vis(gameplay_clear && inv.battery_selector.open),
+            UiPanelKind::DiagDrawer => vis(in_game && diag_open.0),
+        };
     }
 }
 
-fn format_db_meter(rms_db: f32, gate_db: f32) -> String {
-    let slots = 20usize;
-    let norm = |db: f32| ((db + 70.0) / 65.0).clamp(0.0, 1.0);
-    let level_idx = (norm(rms_db) * slots as f32).round() as usize;
-    let gate_idx = ((norm(gate_db) * slots as f32).round() as usize).min(slots - 1);
-
-    let mut bar = String::with_capacity(slots + 2);
-    bar.push('[');
-    for i in 0..slots {
-        if i == gate_idx {
-            bar.push('|');
-        } else if i < level_idx {
-            bar.push('#');
-        } else {
-            bar.push('.');
-        }
-    }
-    bar.push(']');
-    bar
-}
-
-fn truncate_device_name(name: Option<&str>) -> String {
-    match name {
-        None => "System Default".to_string(),
-        Some(s) if s.len() > 34 => format!("{}...", &s[..31]),
-        Some(s) => s.to_string(),
-    }
-}
+// =============================================================================
+// MAIN MENU, PAUSE MENU & SUPPLY SHOP VISUAL UPDATES
+// =============================================================================
 
 #[derive(SystemParam)]
-struct MenuHudRead<'w> {
-    telemetry: Res<'w, AcousticTelemetry>,
+struct MenuShopRead<'w> {
     coop: Res<'w, CoopState>,
-    voice_settings: Res<'w, VoiceSettings>,
     user_settings: Res<'w, UserSettings>,
     name_focused: Res<'w, NameInputFocused>,
     campaign: Res<'w, CampaignState>,
@@ -1593,64 +2876,77 @@ struct MenuHudRead<'w> {
 }
 
 #[allow(clippy::type_complexity)]
-fn update_menu_hud_texts_system(
-    st: MenuHudRead,
-    mut menu_texts: ParamSet<(
+fn update_menu_and_shop_system(
+    st: MenuShopRead,
+    mut texts: ParamSet<(
         Query<&mut Text, With<MainMenuNameText>>,
         Query<&mut Text, With<MainMenuStatusText>>,
+        Query<&mut Text, With<MainMenuSaveNameText>>,
+        Query<&mut Text, With<MainMenuSaveMetaText>>,
         Query<&mut Text, With<CoopPanelStatusText>>,
-        Query<&mut Text, With<ShopHeaderText>>,
-        Query<&mut Text, With<MainMenuSaveText>>,
+        Query<&mut Text, With<ShopCreditsText>>,
+        Query<&mut Text, With<ShopSaveTagText>>,
     )>,
-    mut name_box_q: Query<&mut BackgroundColor, (With<MainMenuNameBox>, Without<VisorSwatchButton>)>,
-    mut swatch_q: Query<(&VisorSwatchButton, &mut BackgroundColor), Without<MainMenuNameBox>>,
+    mut borders: ParamSet<(
+        Query<&mut BorderColor, With<MainMenuNameBox>>,
+        Query<(&VisorHelmetButton, &mut BorderColor)>,
+        Query<(&ShopTierTab, &mut BorderColor, &mut BackgroundColor)>,
+        Query<(&SaveTierPip, &mut BackgroundColor)>,
+    )>,
 ) {
-    let telemetry = &st.telemetry;
     let coop = &st.coop;
-    let voice_settings = &st.voice_settings;
     let user_settings = &st.user_settings;
     let name_focused = &st.name_focused;
     let campaign = &st.campaign;
     let save_browser = &st.save_browser;
 
-    if let Ok(mut t) = menu_texts.p0().single_mut() {
-        let cursor_ch = if name_focused.0 { "_" } else { "" };
-        t.0 = format!("{}{}", user_settings.player_name, cursor_ch);
+    if let Ok(mut t) = texts.p0().single_mut() {
+        let cursor = if name_focused.0 { "_" } else { "" };
+        t.0 = format!("{}{}", user_settings.player_name, cursor);
     }
-    if let Ok(mut bg) = name_box_q.single_mut() {
-        *bg = if name_focused.0 {
-            BackgroundColor(Color::srgba(0.14, 0.28, 0.34, 0.98))
-        } else {
-            BackgroundColor(Color::srgba(0.11, 0.15, 0.21, 0.98))
-        };
-    }
-    for (swatch, mut bg) in &mut swatch_q {
-        if swatch.0 == coop.visor_idx % VISOR_PALETTE.len() {
-            *bg = BackgroundColor(Color::srgba(0.24, 0.44, 0.50, 0.98));
-        } else {
-            *bg = BackgroundColor(Color::srgba(0.12, 0.16, 0.22, 0.94));
-        }
-    }
-    if let Ok(mut t) = menu_texts.p1().single_mut() {
+    if let Ok(mut t) = texts.p1().single_mut() {
         t.0 = coop.status_text.clone();
     }
 
-    let mic = telemetry.mic;
-    let mic_bar = format_db_meter(mic.rms_db, voice_settings.gate_threshold_db);
-    let voice_state = format_voice_state(mic, voice_settings);
-    let echo_tag = if voice_settings.self_echo_test {
-        "ON"
-    } else {
-        "OFF"
-    };
-
-    if let Ok(mut t) = menu_texts.p2().single_mut() {
-        let code_preview = match &coop.join_code {
-            Some(c) if c.len() > 44 => {
-                format!("{}...{} ({} chars)", &c[..24], &c[c.len() - 12..], c.len())
+    let slot_unlocked_tier = save_browser
+        .selected()
+        .map_or(1, |s| s.unlocked_depth_tier.clamp(1, 3));
+    if let Ok(mut t) = texts.p2().single_mut() {
+        let total = save_browser.slots.len().max(1);
+        let idx = (save_browser.selected_idx + 1).min(total);
+        t.0 = format!("{}  ({}/{})", save_browser.selected_slot_name(), idx, total);
+    }
+    if let Ok(mut t) = texts.p3().single_mut() {
+        t.0 = if let Some(slot) = save_browser.selected() {
+            if slot.exists_on_disk {
+                format!(
+                    "{} cr  •  Tier {}  •  {} dive(s)  •  {} miner(s)",
+                    slot.credits,
+                    slot.unlocked_depth_tier,
+                    slot.dives_completed,
+                    slot.player_count
+                )
+            } else {
+                format!("New Campaign  •  {} cr", slot.credits)
             }
+        } else {
+            "New Campaign".to_string()
+        };
+    }
+
+    for (pip, mut bg) in &mut borders.p3() {
+        *bg = if pip.0 <= slot_unlocked_tier {
+            BackgroundColor(COL_ACCENT_CYAN)
+        } else {
+            BackgroundColor(Color::srgba(0.16, 0.21, 0.27, 0.9))
+        };
+    }
+
+    if let Ok(mut t) = texts.p4().single_mut() {
+        let code_preview = match &coop.join_code {
+            Some(c) if c.len() > 38 => format!("{}...{}", &c[..20], &c[c.len() - 10..]),
             Some(c) => c.clone(),
-            None => "Offline / Solo".into(),
+            None => "Offline Solo".into(),
         };
         let peers: Vec<String> = coop
             .remote_players
@@ -1658,204 +2954,221 @@ fn update_menu_hud_texts_system(
             .map(|rp| rp.info.name.clone())
             .collect();
         let peer_str = if peers.is_empty() {
-            "None".to_string()
+            "Solo".to_string()
         } else {
             peers.join(", ")
         };
         t.0 = format!(
-            "Session: {}  |  Save: {}\n\
-             Join Code: {}\n\
-             Miner: {} (Visor: {})  |  Teammates: {}\n\
-             Mic: {} {:.0} dB (Gate {:.0} dB) — {}  |  Self-Echo: {}",
-            coop.status_text,
+            "Save: {}   •   Code: {}\nMiner: {} ({})   •   Crew: {}",
             campaign.slot_name,
             code_preview,
             coop.local_name,
             coop.visor_label(),
-            peer_str,
-            mic_bar,
-            mic.rms_db,
-            voice_settings.gate_threshold_db,
-            voice_state,
-            echo_tag,
+            peer_str
         );
     }
 
-    if let Ok(mut t) = menu_texts.p3().single_mut() {
+    if let Ok(mut t) = texts.p5().single_mut() {
+        t.0 = format!("{} cr", campaign.save.credits);
+    }
+    if let Ok(mut t) = texts.p6().single_mut() {
         t.0 = format!(
-            "Save: {}  |  Credits: {} cr  |  Depth: Tier {} (Unlocked: Tier {})  |  Dives: {}",
-            campaign.slot_name,
-            campaign.save.credits,
-            campaign.save.selected_depth_tier,
-            campaign.save.unlocked_depth_tier,
-            campaign.save.dives_completed,
+            "Save: {}  •  Dives: {}  •  Unlocked: Tier {}",
+            campaign.slot_name, campaign.save.dives_completed, campaign.save.unlocked_depth_tier
         );
     }
 
-    if let Ok(mut t) = menu_texts.p4().single_mut() {
-        let total = save_browser.slots.len().max(1);
-        let idx = (save_browser.selected_idx + 1).min(total);
-        t.0 = if let Some(slot) = save_browser.selected() {
-            if slot.exists_on_disk {
-                format!(
-                    "{} [{}/{}] — {} cr | Tier {} | {} dive(s) | {} miner(s)",
-                    slot.slot_name,
-                    idx,
-                    total,
-                    slot.credits,
-                    slot.unlocked_depth_tier,
-                    slot.dives_completed,
-                    slot.player_count,
-                )
-            } else {
-                format!(
-                    "{} [{}/{}] — New Campaign ({} cr, not yet saved)",
-                    slot.slot_name, idx, total, slot.credits
-                )
-            }
+    if let Ok(mut b) = borders.p0().single_mut() {
+        *b = BorderColor::all(if name_focused.0 {
+            COL_ACCENT_CYAN
         } else {
-            "default — New Campaign".to_string()
-        };
+            COL_BORDER_DIM
+        });
+    }
+    let active_visor = coop.visor_idx % VISOR_PALETTE.len();
+    for (btn, mut b) in &mut borders.p1() {
+        *b = BorderColor::all(if btn.0 == active_visor {
+            COL_ACCENT_CYAN
+        } else {
+            COL_BORDER_DIM
+        });
+    }
+    for (tab, mut b, mut bg) in &mut borders.p2() {
+        let selected = tab.0 == campaign.save.selected_depth_tier;
+        let unlocked = tab.0 <= campaign.save.unlocked_depth_tier;
+        if selected {
+            *b = BorderColor::all(COL_ACCENT_CYAN);
+            *bg = BackgroundColor(Color::srgba(0.10, 0.28, 0.30, 0.96));
+        } else if unlocked {
+            *b = BorderColor::all(COL_BORDER_DIM);
+            *bg = BackgroundColor(COL_CARD_BG);
+        } else {
+            *b = BorderColor::all(Color::srgba(0.16, 0.18, 0.22, 0.55));
+            *bg = BackgroundColor(Color::srgba(0.05, 0.06, 0.08, 0.72));
+        }
     }
 }
 
-fn format_voice_state(
-    mic: voxel_audio_dsp::MicTelemetry,
-    voice_settings: &VoiceSettings,
-) -> &'static str {
-    if !mic.available {
-        "NO MIC"
-    } else if voice_settings.muted {
-        "MUTED"
-    } else if !mic.gate_open {
-        "SILENT"
-    } else if mic.ai_noise_level < 0.35 {
-        "WHISPER (safe)"
-    } else if mic.ai_noise_level < 1.2 {
-        "TALKING"
-    } else {
-        "LOUD! (alerts AI)"
-    }
-}
+// =============================================================================
+// IN-GAME GRAPHICAL BARS, LED MIC METER & DYNAMIC CROSSHAIR
+// =============================================================================
 
 #[derive(SystemParam)]
-struct InGameHudRead<'w> {
+struct InGameBarsRead<'w> {
     telemetry: Res<'w, AcousticTelemetry>,
-    coop: Res<'w, CoopState>,
     voice_settings: Res<'w, VoiceSettings>,
     elevator: Res<'w, ElevatorState>,
     campaign: Res<'w, CampaignState>,
-    inv: Res<'w, PlayerInventory>,
     health: Res<'w, PlayerHealthState>,
-    station_state: Res<'w, ShedStationState>,
-    item_reg: Res<'w, WorldItemRegistry>,
     toast: Res<'w, GameplayToast>,
 }
 
 #[allow(clippy::type_complexity)]
-fn update_ingame_hud_texts_system(
-    st: InGameHudRead,
+fn update_ingame_bars_system(
+    st: InGameBarsRead,
     fl_q: Query<&PlayerFlashlight>,
-    mut ingame_texts: ParamSet<(
-        Query<&mut Text, With<HudText>>,
-        Query<&mut Text, With<PromptText>>,
+    mut texts: ParamSet<(
+        Query<&mut Text, With<HudTierBadgeText>>,
+        Query<&mut Text, With<HudCreditsText>>,
+        Query<&mut Text, With<HudPhaseText>>,
+        Query<&mut Text, With<HudHealthBadgeText>>,
         Query<&mut Text, With<ToastText>>,
-        Query<&mut Text, With<BatterySelectorText>>,
-        Query<&mut Text, With<BeltHudText>>,
     )>,
-    mut flash_q: Query<&mut BackgroundColor, With<DamageFlashOverlay>>,
+    mut bars: ParamSet<(
+        Query<(&mut Node, &mut BackgroundColor), With<HudElevatorProgressFill>>,
+        Query<(&mut Node, &mut BackgroundColor), With<HudHealthFill>>,
+        Query<(&mut Node, &mut BackgroundColor), With<HudBatteryFill>>,
+        Query<(&HudMicLed, &mut BackgroundColor)>,
+        Query<&mut BackgroundColor, With<HudMicStateDot>>,
+        Query<&mut BackgroundColor, With<HudBatteryLampDot>>,
+        Query<&mut BackgroundColor, With<DamageFlashOverlay>>,
+    )>,
 ) {
-    let telemetry = &st.telemetry;
-    let coop = &st.coop;
-    let voice_settings = &st.voice_settings;
-    let elevator = &st.elevator;
     let campaign = &st.campaign;
-    let inv = &st.inv;
+    let elevator = &st.elevator;
     let health = &st.health;
-    let station_state = &st.station_state;
-    let item_reg = &st.item_reg;
     let toast = &st.toast;
+    let mic = st.telemetry.mic;
+    let voice_settings = &st.voice_settings;
 
-    let mic = telemetry.mic;
-    let mic_bar = format_db_meter(mic.rms_db, voice_settings.gate_threshold_db);
-    let voice_state = format_voice_state(mic, voice_settings);
-    let echo_tag = if voice_settings.self_echo_test {
-        "ON"
-    } else {
-        "OFF"
-    };
-
-    let battery_pct = fl_q
-        .single()
-        .map(|f| (f.battery * 100.0).round() as i32)
-        .unwrap_or(0);
-    let fl_state = fl_q
-        .single()
-        .map(|f| if f.on { "ON" } else { "OFF" })
-        .unwrap_or("OFF");
-    let rev = telemetry.reverb;
-    let beacon_line = if let Some(b) = telemetry.beacon_params {
-        let active_taps = b.early_taps.iter().filter(|t| t.active).count();
-        format!(
-            "Beacon: {:.1}m | Wall: {:.2}m | Gain L/M/H: {:.0}/{:.0}/{:.0} dB | Taps: {}",
-            b.distance_m,
-            b.solid_thickness_m,
-            linear_to_db(b.direct_gain.0[0]),
-            linear_to_db(b.direct_gain.0[1]),
-            linear_to_db(b.direct_gain.0[2]),
-            active_taps,
-        )
-    } else {
-        "Beacon: solving...".to_string()
-    };
-
-    if let Ok(mut t) = ingame_texts.p0().single_mut() {
-        t.0 = format!(
-            "ECHOES BELOW  |  {} (Visor: {})  |  Credits: {} cr  |  Tier {}/{}  |  [Tab/Esc] Menu\n\
-             Status: {}  |  Health: {}\n\
-             Mic: {} {:.0} dB (Gate {:.0} dB) — {}  |  Self-Echo [V]: {}\n\
-             Room RT60 L/M/H: {:.2}/{:.2}/{:.2}s | MFP {:.1}m | {}\n\
-             Light: {} ({}%) [F] | [R] Battery | [Q] Drop | [G] Flare | [T] Decoy | [LMB] Break | [RMB] Foam | [B] Shop",
-            coop.local_name,
-            coop.visor_label(),
-            campaign.save.credits,
-            campaign.save.selected_depth_tier,
-            campaign.save.unlocked_depth_tier,
-            elevator.hud_status(),
-            health.hud_label(),
-            mic_bar,
-            mic.rms_db,
-            voice_settings.gate_threshold_db,
-            voice_state,
-            echo_tag,
-            rev.rt60_sec.0[0],
-            rev.rt60_sec.0[1],
-            rev.rt60_sec.0[2],
-            rev.mean_free_path_m,
-            beacon_line,
-            fl_state,
-            battery_pct,
-        );
+    if let Ok(mut t) = texts.p0().single_mut() {
+        t.0 = format!("T{}", campaign.save.selected_depth_tier);
+    }
+    if let Ok(mut t) = texts.p1().single_mut() {
+        t.0 = format!("{} cr", campaign.save.credits);
     }
 
-    if let Ok(mut t) = ingame_texts.p1().single_mut() {
-        t.0 = station_state
-            .prompt
-            .clone()
-            .or_else(|| item_reg.nearest_item_prompt.clone())
-            .unwrap_or_default();
+    let (phase_label, phase_frac, phase_col) = match elevator.phase {
+        ElevatorPhase::ShedIdle => ("SHED".to_string(), 0.0, COL_ACCENT_CYAN),
+        ElevatorPhase::Descending => (
+            "DESCEND".to_string(),
+            (elevator.phase_timer_s / ELEVATOR_DESCENT_DURATION_S).clamp(0.0, 1.0),
+            COL_ACCENT_CYAN,
+        ),
+        ElevatorPhase::CaveIdle => ("CAVE".to_string(), 0.0, COL_TEXT_MUTED),
+        ElevatorPhase::WinchActive => {
+            let rem = (ELEVATOR_WINCH_DURATION_S - elevator.phase_timer_s).max(0.0);
+            (
+                format!("WINCH {:.0}s", rem.ceil()),
+                (elevator.phase_timer_s / ELEVATOR_WINCH_DURATION_S).clamp(0.0, 1.0),
+                COL_ACCENT_RED,
+            )
+        }
+        ElevatorPhase::Ascending => (
+            "EXTRACT".to_string(),
+            (elevator.phase_timer_s / ELEVATOR_ASCENT_DURATION_S).clamp(0.0, 1.0),
+            COL_ACCENT_GREEN,
+        ),
+    };
+    if let Ok(mut t) = texts.p2().single_mut() {
+        t.0 = phase_label;
     }
-    if let Ok(mut t) = ingame_texts.p2().single_mut() {
+    if let Ok((mut node, mut bg)) = bars.p0().single_mut() {
+        node.width = Val::Percent(phase_frac * 100.0);
+        *bg = BackgroundColor(phase_col);
+    }
+
+    // Health bar fill + tag
+    let (hp_frac, hp_col, hp_tag) = match health.phase {
+        LocalHealthPhase::Healthy => (1.0f32, COL_ACCENT_GREEN, "OK".to_string()),
+        LocalHealthPhase::Downed { bleedout_s, .. } => (
+            (bleedout_s / BLEEDOUT_DURATION_S).clamp(0.0, 1.0),
+            COL_ACCENT_RED,
+            format!("{:.0}s", bleedout_s.ceil()),
+        ),
+        LocalHealthPhase::Dead => (0.0f32, Color::srgb(0.4, 0.42, 0.46), "DOWN".to_string()),
+    };
+    if let Ok(mut t) = texts.p3().single_mut() {
+        t.0 = hp_tag;
+    }
+    if let Ok((mut node, mut bg)) = bars.p1().single_mut() {
+        node.width = Val::Percent(hp_frac * 100.0);
+        *bg = BackgroundColor(hp_col);
+    }
+    if let Ok(mut t) = texts.p4().single_mut() {
         t.0 = toast.text.clone();
     }
-    if let Ok(mut t) = ingame_texts.p3().single_mut() {
-        t.0 = inv.format_battery_selector_hud();
+
+    // Flashlight Battery Cell Graphic
+    let (bat_frac, fl_on) = fl_q
+        .single()
+        .map(|f| (f.battery.clamp(0.0, 1.0), f.on))
+        .unwrap_or((0.0, false));
+    let bat_col = if bat_frac > 0.45 {
+        COL_ACCENT_CYAN
+    } else if bat_frac > 0.20 {
+        COL_ACCENT_AMBER
+    } else {
+        COL_ACCENT_RED
+    };
+    if let Ok((mut node, mut bg)) = bars.p2().single_mut() {
+        node.width = Val::Percent(bat_frac * 100.0);
+        *bg = BackgroundColor(bat_col);
     }
-    if let Ok(mut t) = ingame_texts.p4().single_mut() {
-        t.0 = inv.format_belt_hud();
+    if let Ok(mut dot) = bars.p5().single_mut() {
+        *dot = BackgroundColor(if fl_on && bat_frac > 0.01 {
+            COL_ACCENT_AMBER
+        } else {
+            Color::srgba(0.20, 0.24, 0.30, 0.85)
+        });
     }
 
-    if let Ok(mut bg) = flash_q.single_mut() {
+    // 10-Bar LED Mic Meter
+    let norm_mic = ((mic.rms_db + 68.0) / 58.0).clamp(0.0, 1.0);
+    let lit_bars = if !mic.available || voice_settings.muted {
+        0
+    } else {
+        (norm_mic * MIC_LED_BARS as f32).round() as usize
+    };
+    for (led, mut bg) in &mut bars.p3() {
+        *bg = if led.0 < lit_bars {
+            if !mic.gate_open {
+                BackgroundColor(Color::srgba(0.28, 0.42, 0.52, 0.9))
+            } else if led.0 >= 7 || mic.ai_noise_level >= 1.2 {
+                BackgroundColor(COL_ACCENT_RED)
+            } else if led.0 >= 4 || mic.ai_noise_level >= 0.35 {
+                BackgroundColor(COL_ACCENT_AMBER)
+            } else {
+                BackgroundColor(COL_ACCENT_GREEN)
+            }
+        } else {
+            BackgroundColor(Color::srgba(0.13, 0.18, 0.24, 0.78))
+        };
+    }
+    if let Ok(mut dot) = bars.p4().single_mut() {
+        *dot = BackgroundColor(if !mic.available {
+            Color::srgb(0.35, 0.38, 0.42)
+        } else if voice_settings.muted || (mic.gate_open && mic.ai_noise_level >= 1.2) {
+            COL_ACCENT_RED
+        } else if mic.gate_open {
+            COL_ACCENT_GREEN
+        } else {
+            Color::srgb(0.25, 0.46, 0.52)
+        });
+    }
+
+    // Damage vignette
+    if let Ok(mut bg) = bars.p6().single_mut() {
         let alpha = if health.is_dead() {
             0.42
         } else if health.is_downed() {
@@ -1868,26 +3181,324 @@ fn update_ingame_hud_texts_system(
 }
 
 #[allow(clippy::type_complexity)]
+fn update_crosshair_and_target_system(
+    target: Res<CrosshairTargetState>,
+    mut texts: ParamSet<(
+        Query<&mut Text, With<TargetKeyBadgeText>>,
+        Query<&mut Text, With<TargetLabelText>>,
+        Query<&mut Text, With<TargetSublabelText>>,
+    )>,
+    mut colors: ParamSet<(
+        Query<&mut BackgroundColor, With<CrosshairCenterDot>>,
+        Query<&mut BackgroundColor, With<CrosshairBracket>>,
+        Query<&mut BackgroundColor, With<TargetKeyBadgeBg>>,
+    )>,
+    mut target_border_q: Query<&mut BorderColor, With<TargetCardFrame>>,
+) {
+    if let Ok(mut t) = texts.p0().single_mut() {
+        t.0 = target.key_badge.clone();
+    }
+    if let Ok(mut t) = texts.p1().single_mut() {
+        t.0 = target.label.clone();
+    }
+    if let Ok(mut t) = texts.p2().single_mut() {
+        t.0 = target.sublabel.clone();
+    }
+
+    let accent_col = match target.accent {
+        TargetAccent::None => Color::srgba(0.95, 0.97, 1.0, 0.85),
+        TargetAccent::Interact => COL_ACCENT_CYAN,
+        TargetAccent::Danger => COL_ACCENT_RED,
+        TargetAccent::Blocked => COL_ACCENT_AMBER,
+    };
+    if let Ok(mut b) = target_border_q.single_mut() {
+        *b = BorderColor::all(accent_col);
+    }
+    if let Ok(mut dot) = colors.p0().single_mut() {
+        *dot = BackgroundColor(accent_col);
+    }
+    let bracket_col = if target.accent == TargetAccent::None {
+        Color::NONE
+    } else {
+        accent_col
+    };
+    for mut br in &mut colors.p1() {
+        *br = BackgroundColor(bracket_col);
+    }
+    if let Ok(mut key_bg) = colors.p2().single_mut() {
+        *key_bg = BackgroundColor(accent_col);
+    }
+}
+
+// =============================================================================
+// GRAPHICAL HOTBAR, BATTERY POUCH GAUGES & WEARABLES
+// =============================================================================
+
+fn belt_item_graphics(item: Option<&BeltItem>) -> (Color, Color, String) {
+    match item {
+        None => (Color::srgba(0.22, 0.28, 0.34, 0.35), Color::NONE, String::new()),
+        Some(BeltItem::Flashlight) => (
+            Color::srgb(0.32, 0.38, 0.46),
+            Color::srgb(1.0, 0.92, 0.45),
+            "FL".to_string(),
+        ),
+        Some(BeltItem::Flares { count }) => (
+            Color::srgb(0.92, 0.26, 0.16),
+            Color::srgb(1.0, 0.78, 0.32),
+            format!("x{count}"),
+        ),
+        Some(BeltItem::AcousticFoam { charges }) => (
+            Color::srgb(0.20, 0.78, 0.66),
+            Color::srgb(0.86, 0.98, 0.95),
+            format!("x{charges}"),
+        ),
+        Some(BeltItem::NoiseDecoys { count }) => (
+            Color::srgb(0.96, 0.70, 0.16),
+            Color::srgb(0.16, 0.12, 0.05),
+            format!("x{count}"),
+        ),
+        Some(BeltItem::AidKit) => (
+            Color::srgb(0.94, 0.96, 0.98),
+            Color::srgb(0.94, 0.18, 0.22),
+            "+".to_string(),
+        ),
+        Some(BeltItem::BonusLoot { value }) => (
+            Color::srgb(0.24, 0.90, 0.98),
+            Color::srgb(1.0, 0.88, 0.38),
+            format!("{value}"),
+        ),
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn update_hotbar_and_pouch_system(
+    inv: Res<PlayerInventory>,
+    mut visuals: ParamSet<(
+        Query<(&HotbarSlotCard, &mut BorderColor, &mut BackgroundColor)>,
+        Query<(&HotbarIconPrimary, &mut BackgroundColor)>,
+        Query<(&HotbarIconSecondary, &mut BackgroundColor)>,
+        Query<(&HotbarChargeFill, &mut Node, &mut BackgroundColor)>,
+        Query<(&PouchGaugeFill, &mut Node, &mut BackgroundColor)>,
+        Query<(&WearableBadge, &mut BorderColor, &mut BackgroundColor)>,
+    )>,
+    mut count_q: Query<(&HotbarCountText, &mut Text)>,
+) {
+    let loaded_bat = inv.loaded_battery_charge().clamp(0.0, 1.0);
+
+    for (card, mut border, mut bg) in &mut visuals.p0() {
+        let idx = card.0;
+        let unlocked = idx < inv.belt_capacity;
+        let selected = unlocked && idx == inv.active_slot && !inv.is_hands_occupied();
+        if !unlocked {
+            *border = BorderColor::all(Color::srgba(0.15, 0.18, 0.22, 0.45));
+            *bg = BackgroundColor(Color::srgba(0.03, 0.04, 0.06, 0.55));
+        } else if selected {
+            *border = BorderColor::all(COL_ACCENT_CYAN);
+            *bg = BackgroundColor(Color::srgba(0.09, 0.20, 0.26, 0.95));
+        } else {
+            *border = BorderColor::all(COL_BORDER_DIM);
+            *bg = BackgroundColor(COL_HUD_POD_BG);
+        }
+    }
+
+    for (ic, mut bg) in &mut visuals.p1() {
+        let unlocked = ic.0 < inv.belt_capacity;
+        let item = if unlocked {
+            inv.belt.get(ic.0).and_then(|s| s.as_ref())
+        } else {
+            None
+        };
+        let (prim, _, _) = belt_item_graphics(item);
+        *bg = BackgroundColor(if unlocked { prim } else { Color::NONE });
+    }
+    for (ic, mut bg) in &mut visuals.p2() {
+        let unlocked = ic.0 < inv.belt_capacity;
+        let item = if unlocked {
+            inv.belt.get(ic.0).and_then(|s| s.as_ref())
+        } else {
+            None
+        };
+        let (_, sec, _) = belt_item_graphics(item);
+        *bg = BackgroundColor(if unlocked { sec } else { Color::NONE });
+    }
+    for (ct, mut t) in &mut count_q {
+        let unlocked = ct.0 < inv.belt_capacity;
+        let item = if unlocked {
+            inv.belt.get(ct.0).and_then(|s| s.as_ref())
+        } else {
+            None
+        };
+        let (_, _, label) = belt_item_graphics(item);
+        t.0 = if unlocked { label } else { "LOCK".to_string() };
+    }
+    for (fill, mut node, mut bg) in &mut visuals.p3() {
+        let is_fl = fill.0 < inv.belt_capacity
+            && matches!(
+                inv.belt.get(fill.0).and_then(|s| s.as_ref()),
+                Some(BeltItem::Flashlight)
+            );
+        if is_fl {
+            node.width = Val::Percent(loaded_bat * 100.0);
+            *bg = BackgroundColor(if loaded_bat > 0.25 {
+                COL_ACCENT_CYAN
+            } else {
+                COL_ACCENT_RED
+            });
+        } else {
+            node.width = Val::Percent(0.0);
+        }
+    }
+
+    // Mini Battery Pouch vertical gauges (first 4 pouch cells)
+    for (g, mut node, mut bg) in &mut visuals.p4() {
+        if let Some(cell) = inv.battery_pouch.get(g.0) {
+            let pct = cell.charge.clamp(0.0, 1.0);
+            node.height = Val::Percent((pct * 100.0).max(8.0));
+            *bg = BackgroundColor(if pct > 0.45 {
+                COL_ACCENT_CYAN
+            } else if pct > 0.15 {
+                COL_ACCENT_AMBER
+            } else {
+                COL_ACCENT_RED
+            });
+        } else {
+            node.height = Val::Percent(0.0);
+        }
+    }
+
+    // Passive Wearable Badges
+    for (wb, mut border, mut bg) in &mut visuals.p5() {
+        let owned = if wb.is_headlamp {
+            inv.passive.headlamp
+        } else {
+            inv.passive.stealth_boots
+        };
+        if owned {
+            let col = if wb.is_headlamp {
+                COL_ACCENT_AMBER
+            } else {
+                Color::srgb(0.60, 0.46, 1.0)
+            };
+            *border = BorderColor::all(col);
+            *bg = BackgroundColor(Color::srgba(0.14, 0.20, 0.28, 0.96));
+        } else {
+            *border = BorderColor::all(Color::srgba(0.18, 0.22, 0.28, 0.55));
+            *bg = BackgroundColor(Color::srgba(0.05, 0.06, 0.09, 0.60));
+        }
+    }
+}
+
+// =============================================================================
+// GRAPHICAL [R] BATTERY SWAP TRAY
+// =============================================================================
+
+#[allow(clippy::type_complexity)]
+fn update_battery_tray_system(
+    inv: Res<PlayerInventory>,
+    mut cards_q: Query<(&TrayCellCard, &mut BorderColor, &mut BackgroundColor)>,
+    mut fills_q: Query<(&TrayCellFill, &mut Node, &mut BackgroundColor), Without<TrayCellCard>>,
+    mut pcts_q: Query<(&TrayCellPctText, &mut Text)>,
+) {
+    if !inv.battery_selector.open {
+        return;
+    }
+
+    let sel_idx = inv.battery_selector.selected_idx;
+    for (card, mut border, mut bg) in &mut cards_q {
+        let present = card.0 < inv.battery_pouch.len();
+        let selected = present && card.0 == sel_idx;
+        if selected {
+            *border = BorderColor::all(COL_ACCENT_CYAN);
+            *bg = BackgroundColor(Color::srgba(0.11, 0.26, 0.32, 0.98));
+        } else if present {
+            *border = BorderColor::all(COL_BORDER_DIM);
+            *bg = BackgroundColor(COL_CARD_BG);
+        } else {
+            *border = BorderColor::all(Color::srgba(0.14, 0.18, 0.22, 0.45));
+            *bg = BackgroundColor(Color::srgba(0.04, 0.05, 0.08, 0.55));
+        }
+    }
+    for (fill, mut node, mut bg) in &mut fills_q {
+        if let Some(cell) = inv.battery_pouch.get(fill.0) {
+            let pct = cell.charge.clamp(0.0, 1.0);
+            node.height = Val::Percent((pct * 100.0).max(6.0));
+            *bg = BackgroundColor(if pct > 0.45 {
+                COL_ACCENT_CYAN
+            } else if pct > 0.15 {
+                COL_ACCENT_AMBER
+            } else {
+                COL_ACCENT_RED
+            });
+        } else {
+            node.height = Val::Percent(0.0);
+        }
+    }
+    for (pt, mut t) in &mut pcts_q {
+        if let Some(cell) = inv.battery_pouch.get(pt.0) {
+            t.0 = format!("{}%", cell.charge_pct());
+        } else {
+            t.0 = "--".to_string();
+        }
+    }
+}
+
+// =============================================================================
+// SETTINGS WIDGETS + OPTIONAL [F3] ACOUSTIC DIAGNOSTICS
+// =============================================================================
+
+fn truncate_device_name(name: Option<&str>) -> String {
+    match name {
+        None => "System Default".to_string(),
+        Some(s) if s.len() > 32 => format!("{}...", &s[..29]),
+        Some(s) => s.to_string(),
+    }
+}
+
+#[allow(clippy::type_complexity)]
 fn update_settings_widgets_system(
     user_settings: Res<UserSettings>,
     voice_settings: Res<VoiceSettings>,
     telemetry: Res<AcousticTelemetry>,
-    mut seg_q: Query<(&SliderSegment, &mut BackgroundColor)>,
+    mut bg_set: ParamSet<(
+        Query<(&SliderSegment, &mut BackgroundColor)>,
+        Query<(&SettingsMicLed, &mut BackgroundColor)>,
+    )>,
     mut text_set: ParamSet<(
         Query<(&SliderValueText, &mut Text)>,
         Query<&mut Text, With<OutputDeviceLabel>>,
         Query<&mut Text, With<InputDeviceLabel>>,
         Query<&mut Text, With<FullscreenButtonLabel>>,
-        Query<&mut Text, With<SettingsMicStatusText>>,
+        Query<&mut Text, With<SettingsMicBadgeText>>,
     )>,
 ) {
-    for (seg, mut bg) in &mut seg_q {
+    for (seg, mut bg) in &mut bg_set.p0() {
         let frac = slider_current_frac(&user_settings, seg.kind);
         let filled_count = (frac * SLIDER_SEGMENTS as f32).round() as usize;
         *bg = if seg.idx < filled_count {
-            BackgroundColor(Color::srgba(0.22, 0.85, 0.78, 0.98))
+            BackgroundColor(COL_ACCENT_CYAN)
         } else {
             BackgroundColor(Color::srgba(0.14, 0.19, 0.25, 0.92))
+        };
+    }
+
+    let mic = telemetry.mic;
+    let norm_mic = ((mic.rms_db + 68.0) / 58.0).clamp(0.0, 1.0);
+    let lit = if !mic.available || voice_settings.muted {
+        0
+    } else {
+        (norm_mic * MIC_LED_BARS as f32).round() as usize
+    };
+    for (led, mut bg) in &mut bg_set.p1() {
+        *bg = if led.0 < lit {
+            if led.0 >= 7 {
+                BackgroundColor(COL_ACCENT_RED)
+            } else if led.0 >= 4 {
+                BackgroundColor(COL_ACCENT_AMBER)
+            } else {
+                BackgroundColor(COL_ACCENT_GREEN)
+            }
+        } else {
+            BackgroundColor(Color::srgba(0.14, 0.19, 0.24, 0.85))
         };
     }
 
@@ -1915,8 +3526,6 @@ fn update_settings_widgets_system(
         };
     }
     if let Ok(mut t) = text_set.p4().single_mut() {
-        let mic = telemetry.mic;
-        let bar = format_db_meter(mic.rms_db, user_settings.gate_threshold_db);
         let state = if !mic.available {
             "NO MIC"
         } else if voice_settings.muted {
@@ -1930,16 +3539,46 @@ fn update_settings_widgets_system(
         } else {
             "LOUD!"
         };
+        let echo = if voice_settings.self_echo_test {
+            " • ECHO ON"
+        } else {
+            ""
+        };
+        t.0 = format!("{state} ({:.0} dB){echo}", mic.rms_db);
+    }
+}
+
+fn update_diagnostics_drawer_system(
+    diag_open: Res<DiagnosticsDrawerOpen>,
+    telemetry: Res<AcousticTelemetry>,
+    mut diag_q: Query<&mut Text, With<DiagText>>,
+) {
+    if !diag_open.0 {
+        return;
+    }
+    let rev = telemetry.reverb;
+    let beacon = if let Some(b) = telemetry.beacon_params {
+        let taps = b.early_taps.iter().filter(|t| t.active).count();
+        format!(
+            "Beacon {:.1}m | Wall {:.2}m | L/M/H {:.0}/{:.0}/{:.0} dB | Taps {}",
+            b.distance_m,
+            b.solid_thickness_m,
+            linear_to_db(b.direct_gain.0[0]),
+            linear_to_db(b.direct_gain.0[1]),
+            linear_to_db(b.direct_gain.0[2]),
+            taps
+        )
+    } else {
+        "Beacon solving...".to_string()
+    };
+    if let Ok(mut t) = diag_q.single_mut() {
         t.0 = format!(
-            "Live Mic: {} {:.0} dB  |  {}  |  Self-Echo: {}",
-            bar,
-            mic.rms_db,
-            state,
-            if voice_settings.self_echo_test {
-                "ON"
-            } else {
-                "OFF"
-            }
+            "[F3] ACOUSTIC TELEMETRY\nRT60 L/M/H: {:.2}/{:.2}/{:.2}s  |  MFP {:.1}m\n{}\nControls: [E] Use  [LMB] Strike/Break  [RMB] Foam  [F] Light  [R] Battery  [G] Flare  [T] Decoy  [B] Shop",
+            rev.rt60_sec.0[0],
+            rev.rt60_sec.0[1],
+            rev.rt60_sec.0[2],
+            rev.mean_free_path_m,
+            beacon
         );
     }
 }

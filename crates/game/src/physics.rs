@@ -146,6 +146,46 @@ pub fn move_and_slide(
     (feet_pos_m, vel_m, grounded)
 }
 
+/// Ray vs axis-aligned bounding box intersection (`origin + dir * t`, `t in [0.0, max_dist]`).
+/// Returns the nearest positive hit distance `t`, or `0.0` if the ray origin starts inside the box.
+pub fn ray_aabb_intersect(
+    origin: Vec3,
+    dir: Vec3,
+    min_m: Vec3,
+    max_m: Vec3,
+    max_dist: f32,
+) -> Option<f32> {
+    let mut t_min = 0.0f32;
+    let mut t_max = max_dist;
+
+    for axis in 0..3 {
+        let d = dir[axis];
+        if d.abs() < 1e-6 {
+            if origin[axis] < min_m[axis] || origin[axis] > max_m[axis] {
+                return None;
+            }
+        } else {
+            let inv = 1.0 / d;
+            let mut t0 = (min_m[axis] - origin[axis]) * inv;
+            let mut t1 = (max_m[axis] - origin[axis]) * inv;
+            if t0 > t1 {
+                std::mem::swap(&mut t0, &mut t1);
+            }
+            t_min = t_min.max(t0);
+            t_max = t_max.min(t1);
+            if t_max < t_min {
+                return None;
+            }
+        }
+    }
+
+    if t_min <= max_dist && t_max >= 0.0 {
+        Some(t_min.max(0.0))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +237,19 @@ mod tests {
             feet,
             PLAYER_HEIGHT_STAND_M
         ));
+    }
+
+    #[test]
+    fn ray_aabb_intersect_hits_front_face_and_rejects_misses() {
+        let mn = Vec3::new(-0.5, 0.0, -3.5);
+        let mx = Vec3::new(0.5, 1.0, -2.5);
+        let hit = ray_aabb_intersect(Vec3::new(0.0, 0.5, 0.0), Vec3::NEG_Z, mn, mx, 5.0);
+        assert!(hit.is_some());
+        assert!((hit.unwrap() - 2.5).abs() < 1e-4);
+
+        // Aiming away misses
+        assert!(ray_aabb_intersect(Vec3::new(0.0, 0.5, 0.0), Vec3::Z, mn, mx, 5.0).is_none());
+        // Beyond max distance misses
+        assert!(ray_aabb_intersect(Vec3::new(0.0, 0.5, 0.0), Vec3::NEG_Z, mn, mx, 2.0).is_none());
     }
 }

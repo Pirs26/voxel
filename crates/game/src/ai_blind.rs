@@ -10,14 +10,28 @@ use voxel_acoustics::{AcousticEvent, AcousticEventKind, Bands3, evaluate_ai_hear
 use voxel_audio_dsp::SynthClip;
 use voxel_core::{VoxelConfig, VoxelWorld, raycast_solid};
 
-const PATROL_SPEED_M_S: f32 = 1.6;
-const INVESTIGATE_SPEED_M_S: f32 = 2.4;
-const HUNT_SPEED_M_S: f32 = 3.9;
-const COOLDOWN_SPEED_M_S: f32 = 1.4;
-
 /// Grace period (seconds) right after spawning in a new cave so the stalker
 /// never rushes the elevator before players step out and orient themselves.
-pub const STALKER_SPAWN_GRACE_S: f32 = 10.0;
+pub const STALKER_SPAWN_GRACE_S: f32 = 12.0;
+
+/// Returns `(patrol, investigate, hunt, cooldown)` speeds in m/s scaled gently by `depth_tier`.
+/// Even at Tier 3, the stalker stays slower than a walking player (`4.0 m/s`), making tunnel
+/// jukes, breakable shortcuts, and stun counterplay fair while keeping solo relic drags tense!
+pub fn stalker_speeds_for_tier(depth_tier: u8) -> (f32, f32, f32, f32) {
+    match depth_tier.clamp(1, 3) {
+        1 => (0.95, 1.35, 2.15, 0.95),
+        2 => (1.15, 1.65, 2.55, 1.10),
+        _ => (1.35, 1.95, 2.95, 1.25),
+    }
+}
+
+/// Returns the world-space melee/crosshair hit AABB `(min_m, max_m)` for a Stalker at `feet_pos_m`.
+pub fn stalker_hit_aabb(feet_pos_m: Vec3) -> (Vec3, Vec3) {
+    (
+        feet_pos_m + Vec3::new(-0.55, 0.0, -0.55),
+        feet_pos_m + Vec3::new(0.55, 2.15, 0.55),
+    )
+}
 
 const STRIKE_HORIZ_RANGE_M: f32 = 1.75;
 const STRIKE_VERT_RANGE_M: f32 = 1.5;
@@ -32,6 +46,14 @@ pub enum StalkerState {
     Investigate,
     Hunt,
     AttackCooldown,
+    Stunned,
+}
+
+/// Outcome of hitting a Blind Acoustic Stalker with a pickaxe strike or flare stun.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StalkerHitResult {
+    Stunned { remaining_hp: u8, max_hp: u8 },
+    Killed,
 }
 
 /// Reaction emitted when a blind stalker actually hears a world `AcousticEvent`.
@@ -57,20 +79,24 @@ pub struct BlindStalker {
     pub step_accum_m: f32,
     pub repath_timer_s: f32,
     pub spawn_grace_s: f32,
+    /// While > 0, the stalker is strongly distracted by a loud Noise Decoy and ignores
+    /// quieter noises like solo Heavy Relic scraping so players can slip past!
+    pub decoy_lock_s: f32,
+    pub hp: u8,
+    pub max_hp: u8,
     pub band_sensitivity: Bands3,
     pub hearing_threshold: f32,
     pub hunt_threshold: f32,
-    #[allow(dead_code)]
     pub depth_tier: u8,
 }
 
 impl BlindStalker {
     pub fn new(monster_id: u16, feet_pos_m: Vec3, depth_tier: u8) -> Self {
-        let tier = depth_tier.max(1);
-        let (hearing_threshold, hunt_threshold) = match tier {
-            1 => (0.38, 1.05),
-            2 => (0.30, 0.86),
-            _ => (0.25, 0.72),
+        let tier = depth_tier.clamp(1, 3);
+        let (hearing_threshold, hunt_threshold, max_hp) = match tier {
+            1 => (0.40, 1.10, 3u8),
+            2 => (0.32, 0.90, 4u8),
+            _ => (0.26, 0.76, 5u8),
         };
         // High Mid/High frequency sensitivity: voices, dropped items, rock breaches, sprinting.
         let band_sensitivity = Bands3::new(0.45, 1.25, 1.65);
@@ -89,11 +115,52 @@ impl BlindStalker {
             step_accum_m: 0.0,
             repath_timer_s: 0.0,
             spawn_grace_s: STALKER_SPAWN_GRACE_S,
+            decoy_lock_s: 0.0,
+            hp: max_hp,
+            max_hp,
             band_sensitivity,
             hearing_threshold,
             hunt_threshold,
             depth_tier: tier,
         }
+    }
+}
+
+/// Applies melee damage and/or stun + collision-safe knockback to a `BlindStalker`.
+pub fn apply_stalker_hit(
+    world: &VoxelWorld,
+    stalker: &mut BlindStalker,
+    damage: u8,
+    stun_s: f32,
+    knockback_dir: Vec3,
+) -> StalkerHitResult {
+    stalker.hp = stalker.hp.saturating_sub(damage);
+    if stalker.hp == 0 {
+        return StalkerHitResult::Killed;
+    }
+
+    stalker.state = StalkerState::Stunned;
+    stalker.state_timer_s = stalker.state_timer_s.max(stun_s.max(1.0));
+    stalker.waypoints.clear();
+    stalker.target_pos_m = None;
+    stalker.repath_timer_s = 0.0;
+
+    // Short collision-safe horizontal stagger away from the strike
+    let horiz = Vec3::new(knockback_dir.x, 0.0, knockback_dir.z).normalize_or_zero();
+    if horiz.length_squared() > 0.1 {
+        for step in [0.45f32, 0.40] {
+            let cand = stalker.feet_pos_m + horiz * step;
+            if !stalker_body_overlaps_solid(world, cand) {
+                stalker.feet_pos_m = cand;
+            } else {
+                break;
+            }
+        }
+    }
+
+    StalkerHitResult::Stunned {
+        remaining_hp: stalker.hp,
+        max_hp: stalker.max_hp,
     }
 }
 
@@ -342,7 +409,7 @@ pub fn process_acoustic_event_for_stalker(
     stalker: &mut BlindStalker,
     event: AcousticEvent,
 ) -> Option<StalkerReaction> {
-    if stalker.spawn_grace_s > 0.0 {
+    if stalker.spawn_grace_s > 0.0 || stalker.state == StalkerState::Stunned {
         return None;
     }
     let ear_pos_m = stalker.feet_pos_m + Vec3::Y * 1.4;
@@ -353,6 +420,20 @@ pub fn process_acoustic_event_for_stalker(
         stalker.band_sensitivity,
         stalker.hearing_threshold,
     )?;
+
+    // Noise Decoys are overwhelmingly loud acoustic lures: while locked onto a decoy,
+    // quieter sounds like relic scraping or footsteps cannot pull the stalker off the decoy!
+    if stalker.decoy_lock_s > 0.0
+        && !matches!(
+            perceived.kind,
+            AcousticEventKind::DecoyNoise | AcousticEventKind::ElevatorMachinery
+        )
+    {
+        return None;
+    }
+    if perceived.kind == AcousticEventKind::DecoyNoise {
+        stalker.decoy_lock_s = 2.6;
+    }
 
     stalker.alert_level = (stalker.alert_level + perceived.salience * 0.45).min(1.5);
     stalker.target_pos_m = Some(perceived.perceived_pos_m);
@@ -498,11 +579,22 @@ pub fn step_stalker_ai(
         StalkerState::Investigate => 0.08,
         StalkerState::Hunt => 0.05,
         StalkerState::AttackCooldown => 0.20,
+        StalkerState::Stunned => 0.25,
     };
     stalker.alert_level = (stalker.alert_level - alert_decay * dt).max(0.0);
     stalker.repath_timer_s = (stalker.repath_timer_s - dt).max(0.0);
     stalker.state_timer_s = (stalker.state_timer_s - dt).max(0.0);
     stalker.spawn_grace_s = (stalker.spawn_grace_s - dt).max(0.0);
+    stalker.decoy_lock_s = (stalker.decoy_lock_s - dt).max(0.0);
+
+    if stalker.state == StalkerState::Stunned {
+        if stalker.state_timer_s <= 0.0 {
+            stalker.state = StalkerState::Patrol;
+            stalker.target_pos_m = None;
+            stalker.waypoints.clear();
+        }
+        return output;
+    }
 
     match stalker.state {
         StalkerState::Hunt if stalker.state_timer_s <= 0.0 => {
@@ -582,7 +674,7 @@ pub fn step_stalker_ai(
         stalker.repath_timer_s = match stalker.state {
             StalkerState::Hunt => 0.45,
             StalkerState::Investigate => 0.75,
-            StalkerState::Patrol | StalkerState::AttackCooldown => 1.25,
+            StalkerState::Patrol | StalkerState::AttackCooldown | StalkerState::Stunned => 1.25,
         };
         if stalker.waypoints.is_empty() && stalker.state == StalkerState::Patrol {
             stalker.target_pos_m = None;
@@ -590,11 +682,14 @@ pub fn step_stalker_ai(
     }
 
     // 5. Follow waypoints & steer smoothly without clipping into solid voxels
+    let (patrol_spd, invest_spd, hunt_spd, cooldown_spd) =
+        stalker_speeds_for_tier(stalker.depth_tier);
     let speed = match stalker.state {
-        StalkerState::Patrol => PATROL_SPEED_M_S,
-        StalkerState::Investigate => INVESTIGATE_SPEED_M_S,
-        StalkerState::Hunt => HUNT_SPEED_M_S,
-        StalkerState::AttackCooldown => COOLDOWN_SPEED_M_S,
+        StalkerState::Patrol => patrol_spd,
+        StalkerState::Investigate => invest_spd,
+        StalkerState::Hunt => hunt_spd,
+        StalkerState::AttackCooldown => cooldown_spd,
+        StalkerState::Stunned => 0.0,
     };
 
     while let Some(&wp) = stalker.waypoints.first() {
@@ -684,7 +779,7 @@ pub fn step_stalker_ai(
         let vol = match stalker.state {
             StalkerState::Hunt => 0.85,
             StalkerState::Investigate => 0.58,
-            StalkerState::Patrol | StalkerState::AttackCooldown => 0.38,
+            StalkerState::Patrol | StalkerState::AttackCooldown | StalkerState::Stunned => 0.38,
         };
         output.emit_footstep = Some((stalker.feet_pos_m, vol));
     }
@@ -699,7 +794,9 @@ pub fn step_stalker_ai(
         let (next_interval, vol, pitch) = match stalker.state {
             StalkerState::Hunt => (3.0 + jitter * 1.4, 0.85, 1.12),
             StalkerState::Investigate => (4.5 + jitter * 1.8, 0.65, 1.00),
-            StalkerState::Patrol | StalkerState::AttackCooldown => (6.5 + jitter * 2.6, 0.50, 0.88),
+            StalkerState::Patrol | StalkerState::AttackCooldown | StalkerState::Stunned => {
+                (6.5 + jitter * 2.6, 0.50, 0.88)
+            }
         };
         stalker.vocal_timer_s = next_interval;
         output.emit_vocal = Some((SynthClip::MonsterGrowl, vol, pitch));
@@ -1061,5 +1158,52 @@ mod tests {
             strike_out.emit_vocal,
             Some((SynthClip::MonsterScreech, _, _))
         ));
+    }
+
+    #[test]
+    fn stalker_speeds_scale_by_tier_and_stay_slower_than_walking() {
+        let (p1, i1, h1, _) = stalker_speeds_for_tier(1);
+        let (p2, i2, h2, _) = stalker_speeds_for_tier(2);
+        let (p3, i3, h3, _) = stalker_speeds_for_tier(3);
+        assert!(p1 < p2 && p2 < p3);
+        assert!(i1 < i2 && i2 < i3);
+        assert!(h1 < h2 && h2 < h3);
+        assert!(h3 < 3.5, "even Tier 3 hunt speed should stay below player walk");
+    }
+
+    #[test]
+    fn stalker_can_be_stunned_and_killed_by_strikes() {
+        let (cfg, world) = build_flat_cave_room(UVec3::splat(1));
+        let start = voxel_feet_world_pos(cfg, IVec3::new(10, 5, 10));
+        let mut stalker = BlindStalker::new(7, start, 1);
+        stalker.spawn_grace_s = 0.0;
+        assert_eq!(stalker.hp, 3);
+
+        // Hit 1 stuns & knocks back
+        let r1 = apply_stalker_hit(&world, &mut stalker, 1, 3.0, Vec3::X);
+        assert_eq!(
+            r1,
+            StalkerHitResult::Stunned {
+                remaining_hp: 2,
+                max_hp: 3
+            }
+        );
+        assert_eq!(stalker.state, StalkerState::Stunned);
+        assert!(stalker.feet_pos_m.x > start.x);
+
+        // While stunned, cannot strike adjacent player or react to sounds
+        let pos_now = stalker.feet_pos_m;
+        let step = step_stalker_ai(&world, &mut stalker, &[(1, pos_now)], 0.1);
+        assert!(step.strike_target.is_none());
+
+        // Hit 2 & Hit 3 kill the stalker
+        assert!(matches!(
+            apply_stalker_hit(&world, &mut stalker, 1, 3.0, Vec3::X),
+            StalkerHitResult::Stunned { remaining_hp: 1, .. }
+        ));
+        assert_eq!(
+            apply_stalker_hit(&world, &mut stalker, 1, 3.0, Vec3::X),
+            StalkerHitResult::Killed
+        );
     }
 }

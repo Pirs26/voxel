@@ -1,17 +1,14 @@
 //! Base Shed physical stations (Shop Terminal & Battery Charger Bench) and
-//! proximity interaction detection (including the interior Elevator Lever).
+//! crosshair pointer raycast interaction detection (including the interior Elevator Lever).
 
 use bevy::prelude::*;
 use voxel_core::GeneratedLevelInfo;
-use voxel_net::ElevatorPhase;
+use voxel_net::{ElevatorPhase, WorldItemKind};
 
-use crate::elevator::ELEVATOR_WINCH_DURATION_S;
+use crate::{elevator::ELEVATOR_WINCH_DURATION_S, physics::ray_aabb_intersect};
 
-/// Tight interaction radius in meters for Base Shed Shop Terminal & Charger Bench
-/// so dropped items next to/behind them can always be picked up cleanly!
-pub const SHED_STATION_INTERACT_RANGE_M: f32 = 1.55;
-/// Interaction radius in meters for the Elevator Lever mounted inside the elevator cage.
-pub const ELEVATOR_LEVER_INTERACT_RANGE_M: f32 = 2.15;
+/// Maximum pointer raycast distance in meters for interacting with stations, levers, and items.
+pub const INTERACT_RAY_MAX_DIST_M: f32 = 3.4;
 
 /// Interactive physical stations in the persistent Base Shed and inside the Elevator cage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,11 +19,63 @@ pub enum ShedStation {
     ChargerBench,
 }
 
+/// Visual accent color/style for the graphical crosshair & floating target badge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TargetAccent {
+    #[default]
+    None,
+    Interact,
+    Danger,
+    Blocked,
+}
+
+/// Concrete object currently under the center-of-screen crosshair pointer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LookTargetKind {
+    Station(ShedStation),
+    WorldItem {
+        item_id: u32,
+        kind: WorldItemKind,
+        carriers: usize,
+    },
+    DownedPlayer {
+        player_id: u16,
+        name: String,
+    },
+    Stalker {
+        monster_id: u16,
+        hp: u8,
+        max_hp: u8,
+        stunned: bool,
+    },
+    BreakableVoxel,
+}
+
+/// Center-of-screen crosshair look-at target (updated every frame by voxel-occluded raycasting).
+#[derive(Resource, Default, Clone, Debug)]
+pub struct CrosshairTargetState {
+    pub target: Option<LookTargetKind>,
+    pub key_badge: String,
+    pub label: String,
+    pub sublabel: String,
+    pub accent: TargetAccent,
+}
+
+impl CrosshairTargetState {
+    pub fn clear(&mut self) {
+        self.target = None;
+        self.key_badge.clear();
+        self.label.clear();
+        self.sublabel.clear();
+        self.accent = TargetAccent::None;
+    }
+}
+
 /// Whether the Base Shed Supply Shop & Depth Selector overlay is currently open.
 #[derive(Resource, Default, Clone, Debug)]
 pub struct ShopOverlayOpen(pub bool);
 
-/// Nearest interactive Shed/Elevator station and formatted prompt for the HUD.
+/// Legacy/compatibility summary resource (kept lightweight for any external readers).
 #[derive(Resource, Default, Clone, Debug)]
 pub struct ShedStationState {
     pub nearest: Option<ShedStation>,
@@ -38,78 +87,107 @@ pub struct ShedStationState {
 #[derive(Component)]
 pub struct ShedLandmarkVisual;
 
-/// Detects the nearest interactive Shed station or interior Elevator Lever within range.
+/// Casts the center-of-screen camera ray `(origin_m, dir)` up to `max_dist_m` against the
+/// physical AABBs of the interior Elevator Lever, Shed Shop Terminal, and Battery Charger Bench.
 ///
-/// Returns `(station, prompt, distance_m)`:
-/// - Interior `ElevatorLeverShed` / `ElevatorWinchCave` is checked against `elevator_lever_pos_m`
-///   and reports a waiting prompt if `missing_players_in_cage > 0`.
-/// - `ShopTerminal` and `ChargerBench` use a tight `1.55 m` range so nearby dropped items
-///   remain easy to pick up.
-pub fn detect_nearest_station(
-    player_pos_m: Vec3,
+/// Returns `(station, short_label, sublabel, hit_dist_m, is_blocked)` for the closest hit.
+#[allow(clippy::too_many_arguments)]
+pub fn raycast_shed_station(
+    origin_m: Vec3,
+    dir: Vec3,
+    max_dist_m: f32,
     info: &GeneratedLevelInfo,
     elevator_lever_pos_m: Vec3,
     elevator_phase: ElevatorPhase,
     selected_depth_tier: u8,
     missing_players_in_cage: usize,
-) -> Option<(ShedStation, String, f32)> {
-    let mut best: Option<(f32, ShedStation, String)> = None;
+) -> Option<(ShedStation, String, String, f32, bool)> {
+    let mut best: Option<(f32, ShedStation, String, String, bool)> = None;
 
-    let mut consider = |station: ShedStation, pos: Vec3, max_range: f32, prompt: String| {
-        let dist = player_pos_m.distance(pos);
-        if dist <= max_range && best.as_ref().is_none_or(|(best_dist, _, _)| dist < *best_dist) {
-            best = Some((dist, station, prompt));
+    let mut consider_box = |station: ShedStation,
+                            min_m: Vec3,
+                            max_m: Vec3,
+                            label: String,
+                            sublabel: String,
+                            blocked: bool| {
+        if let Some(t) = ray_aabb_intersect(origin_m, dir, min_m, max_m, max_dist_m)
+            && best.as_ref().is_none_or(|(best_t, _, _, _, _)| t < *best_t)
+        {
+            best = Some((t, station, label, sublabel, blocked));
         }
     };
 
+    // Interior Elevator Lever AABB (box + handle mounted inside the moving cage)
+    let lever_min = elevator_lever_pos_m + Vec3::new(-0.36, 0.0, -0.36);
+    let lever_max = elevator_lever_pos_m + Vec3::new(0.36, 1.50, 0.36);
     if elevator_phase == ElevatorPhase::ShedIdle {
-        let prompt = if missing_players_in_cage > 0 {
-            format!(
-                "[Elevator Lever] Waiting for {missing_players_in_cage} player(s) to board the elevator"
-            )
+        if missing_players_in_cage > 0 {
+            consider_box(
+                ShedStation::ElevatorLeverShed,
+                lever_min,
+                lever_max,
+                "Elevator Lever".to_string(),
+                format!("Wait: {missing_players_in_cage} player(s) outside"),
+                true,
+            );
         } else {
-            format!("[E] Pull Elevator Lever — Descend to Depth Tier {selected_depth_tier}")
-        };
-        consider(
-            ShedStation::ElevatorLeverShed,
-            elevator_lever_pos_m,
-            ELEVATOR_LEVER_INTERACT_RANGE_M,
-            prompt,
-        );
-    }
-
-    if elevator_phase == ElevatorPhase::CaveIdle {
+            consider_box(
+                ShedStation::ElevatorLeverShed,
+                lever_min,
+                lever_max,
+                format!("Descend — Tier {selected_depth_tier}"),
+                "All aboard".to_string(),
+                false,
+            );
+        }
+    } else if elevator_phase == ElevatorPhase::CaveIdle {
         let winch_secs = ELEVATOR_WINCH_DURATION_S.round() as u32;
-        let prompt = if missing_players_in_cage > 0 {
-            format!(
-                "[Elevator Lever] Waiting for {missing_players_in_cage} player(s) to board before extraction"
-            )
+        if missing_players_in_cage > 0 {
+            consider_box(
+                ShedStation::ElevatorWinchCave,
+                lever_min,
+                lever_max,
+                "Extraction Lever".to_string(),
+                format!("Wait: {missing_players_in_cage} player(s) outside"),
+                true,
+            );
         } else {
-            format!("[E] Pull Lever — Activate Extraction Winch (LOUD! {winch_secs}s)")
-        };
-        consider(
-            ShedStation::ElevatorWinchCave,
-            elevator_lever_pos_m,
-            ELEVATOR_LEVER_INTERACT_RANGE_M,
-            prompt,
-        );
+            consider_box(
+                ShedStation::ElevatorWinchCave,
+                lever_min,
+                lever_max,
+                "Start Winch".to_string(),
+                format!("LOUD • {winch_secs}s holdout"),
+                false,
+            );
+        }
     }
 
-    consider(
+    // Shop Terminal console AABB (matches physical mesh: 0.95 x 1.65 x 0.55)
+    let shop_min = info.shop_terminal_pos_m + Vec3::new(-0.55, 0.0, -0.36);
+    let shop_max = info.shop_terminal_pos_m + Vec3::new(0.55, 1.72, 0.36);
+    consider_box(
         ShedStation::ShopTerminal,
-        info.shop_terminal_pos_m,
-        SHED_STATION_INTERACT_RANGE_M,
-        "[E] Open Shed Supply Shop & Depth Selector".to_string(),
+        shop_min,
+        shop_max,
+        "Supply Terminal".to_string(),
+        "Gear & Depth Tier".to_string(),
+        false,
     );
 
-    consider(
+    // Battery Charger Bench AABB (matches physical mesh: 1.30 x 0.95 x 0.66)
+    let charger_min = info.charger_bench_pos_m + Vec3::new(-0.72, 0.0, -0.42);
+    let charger_max = info.charger_bench_pos_m + Vec3::new(0.72, 1.02, 0.42);
+    consider_box(
         ShedStation::ChargerBench,
-        info.charger_bench_pos_m,
-        SHED_STATION_INTERACT_RANGE_M,
-        "[E] Recharge All Batteries (or drop cells on pad)".to_string(),
+        charger_min,
+        charger_max,
+        "Battery Charger".to_string(),
+        "Recharge all cells".to_string(),
+        false,
     );
 
-    best.map(|(dist, station, prompt)| (station, prompt, dist))
+    best.map(|(t, station, label, sublabel, blocked)| (station, label, sublabel, t, blocked))
 }
 
 /// Spawns readable physical station landmarks and dedicated child `PointLight` beacons
@@ -245,80 +323,106 @@ mod tests {
     }
 
     #[test]
-    fn detects_interior_elevator_lever_and_reports_missing_teammates() {
+    fn raycast_detects_interior_lever_and_blocks_when_players_outside() {
         let info = sample_level();
         let elev = ElevatorState::from_level_info(&info, 4242);
         let lever_pos = elev.lever_world_pos_m();
+        let eye = lever_pos + Vec3::new(-1.4, 1.1, 0.0);
+        let aim = (lever_pos + Vec3::Y * 0.9 - eye).normalize();
 
-        // All players aboard -> ready to pull
-        let hit = detect_nearest_station(
-            lever_pos + Vec3::new(-0.4, 0.0, -0.4),
+        // Pointing at lever with all players aboard
+        let hit = raycast_shed_station(
+            eye,
+            aim,
+            INTERACT_RAY_MAX_DIST_M,
             &info,
             lever_pos,
             ElevatorPhase::ShedIdle,
             2,
             0,
         );
-        assert_eq!(hit.as_ref().map(|(s, _, _)| *s), Some(ShedStation::ElevatorLeverShed));
-        assert!(hit.unwrap().1.contains("Pull Elevator Lever"));
+        assert_eq!(hit.as_ref().map(|h| h.0), Some(ShedStation::ElevatorLeverShed));
+        assert!(!hit.unwrap().4);
 
-        // Missing 1 player -> shows waiting prompt
-        let waiting = detect_nearest_station(
-            lever_pos + Vec3::new(-0.4, 0.0, -0.4),
+        // Pointing AWAY from lever while standing right next to it -> None!
+        let miss = raycast_shed_station(
+            eye,
+            -aim,
+            INTERACT_RAY_MAX_DIST_M,
+            &info,
+            lever_pos,
+            ElevatorPhase::ShedIdle,
+            2,
+            0,
+        );
+        assert!(miss.is_none());
+
+        // Missing 1 player -> blocked = true
+        let waiting = raycast_shed_station(
+            eye,
+            aim,
+            INTERACT_RAY_MAX_DIST_M,
             &info,
             lever_pos,
             ElevatorPhase::ShedIdle,
             2,
             1,
         );
-        assert!(waiting.unwrap().1.contains("Waiting for 1 player(s)"));
-
-        // CaveIdle uses the exact same interior lever for extraction winch
-        let cave_lever = Vec3::new(lever_pos.x, info.cave_floor_y_m, lever_pos.z);
-        let winch = detect_nearest_station(
-            cave_lever + Vec3::new(-0.4, 0.0, -0.4),
-            &info,
-            cave_lever,
-            ElevatorPhase::CaveIdle,
-            1,
-            0,
-        );
-        assert_eq!(winch.as_ref().map(|(s, _, _)| *s), Some(ShedStation::ElevatorWinchCave));
-        assert!(winch.unwrap().1.contains("Extraction Winch"));
+        assert!(waiting.unwrap().4);
     }
 
     #[test]
-    fn shop_and_charger_use_tight_hitboxes_so_nearby_items_arent_blocked() {
+    fn raycast_shop_and_charger_only_trigger_when_pointer_aims_at_them() {
         let info = sample_level();
         let elev = ElevatorState::from_level_info(&info, 4242);
         let lever_pos = elev.lever_world_pos_m();
 
-        // Directly in front of shop (0.9m) triggers shop
-        let near_shop = info.shop_terminal_pos_m + Vec3::new(-0.8, 0.0, 0.4);
+        let eye = info.shop_terminal_pos_m + Vec3::new(0.0, 1.3, 1.8);
+        let aim_at_shop = (info.shop_terminal_pos_m + Vec3::Y * 1.1 - eye).normalize();
         assert_eq!(
-            detect_nearest_station(near_shop, &info, lever_pos, ElevatorPhase::ShedIdle, 1, 0)
-                .map(|(s, _, _)| s),
+            raycast_shed_station(
+                eye,
+                aim_at_shop,
+                INTERACT_RAY_MAX_DIST_M,
+                &info,
+                lever_pos,
+                ElevatorPhase::ShedIdle,
+                1,
+                0,
+            )
+            .map(|h| h.0),
             Some(ShedStation::ShopTerminal)
         );
-
-        // 1.8m away from shop must NOT hijack interactions
-        let behind_shop = info.shop_terminal_pos_m + Vec3::new(-1.8, 0.0, 0.0);
-        assert_eq!(
-            detect_nearest_station(behind_shop, &info, lever_pos, ElevatorPhase::ShedIdle, 1, 0),
-            None
+        // Looking away from shop even when standing close does NOT hit the shop
+        assert!(
+            raycast_shed_station(
+                eye,
+                Vec3::Z,
+                INTERACT_RAY_MAX_DIST_M,
+                &info,
+                lever_pos,
+                ElevatorPhase::ShedIdle,
+                1,
+                0,
+            )
+            .is_none()
         );
 
-        // Directly at charger (1.0m) triggers charger, 1.9m away does not
-        let near_charger = info.charger_bench_pos_m + Vec3::new(0.0, 0.0, 1.0);
+        let eye_c = info.charger_bench_pos_m + Vec3::new(0.0, 1.3, 1.5);
+        let aim_at_charger = (info.charger_bench_pos_m + Vec3::Y * 0.6 - eye_c).normalize();
         assert_eq!(
-            detect_nearest_station(near_charger, &info, lever_pos, ElevatorPhase::ShedIdle, 1, 0)
-                .map(|(s, _, _)| s),
+            raycast_shed_station(
+                eye_c,
+                aim_at_charger,
+                INTERACT_RAY_MAX_DIST_M,
+                &info,
+                lever_pos,
+                ElevatorPhase::ShedIdle,
+                1,
+                0,
+            )
+            .map(|h| h.0),
             Some(ShedStation::ChargerBench)
-        );
-        let beside_charger = info.charger_bench_pos_m + Vec3::new(1.9, 0.0, 0.0);
-        assert_eq!(
-            detect_nearest_station(beside_charger, &info, lever_pos, ElevatorPhase::ShedIdle, 1, 0),
-            None
         );
     }
 

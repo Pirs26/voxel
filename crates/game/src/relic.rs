@@ -20,7 +20,8 @@ pub const RELIC_SCRAPE_INTERVAL_S: f32 = 0.35;
 pub const DECOY_ACTIVE_DURATION_S: f32 = 12.0;
 /// Interval in seconds between acoustic decoy pulses while active.
 pub const DECOY_PULSE_INTERVAL_S: f32 = 0.90;
-/// Maximum interaction distance in meters to pick up or grab a physical world item.
+/// Legacy interaction distance constant (replaced by crosshair raycast `INTERACT_RAY_MAX_DIST_M`).
+#[allow(dead_code)]
 pub const ITEM_INTERACT_RANGE_M: f32 = 2.6;
 /// Radius in meters around the Shed charger bench where dropped batteries passively recharge.
 pub const CHARGER_PAD_RADIUS_M: f32 = 2.3;

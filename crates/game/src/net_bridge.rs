@@ -29,7 +29,7 @@ use crate::{
     save::{CampaignState, SavedPlayerProfile},
     settings::{AppScreen, SettingsMenuOpen, UserSettings},
     shed::ShopOverlayOpen,
-    tools::SpawnFlareEvent,
+    tools::{SpawnFlareEvent, StrikeStalkerEvent},
     voxel_render::{LevelInfoResource, WorldResource},
 };
 
@@ -267,6 +267,29 @@ impl CoopState {
                 target_player_id,
                 monster_pos_m,
             });
+        }
+    }
+
+    pub fn send_monster_damaged(
+        &self,
+        monster_id: u16,
+        damage: u8,
+        stun_s: f32,
+        knockback_dir: Vec3,
+    ) {
+        if let Some(ref s) = self.session {
+            s.send_reliable(ReliableMessage::MonsterDamaged {
+                monster_id,
+                damage,
+                stun_s,
+                knockback_dir,
+            });
+        }
+    }
+
+    pub fn send_monster_killed(&self, monster_id: u16, pos_m: Vec3) {
+        if let Some(ref s) = self.session {
+            s.send_reliable(ReliableMessage::MonsterKilled { monster_id, pos_m });
         }
     }
 
@@ -566,6 +589,7 @@ struct PollNetWriters<'w> {
     remove_item_writer: MessageWriter<'w, RemoveWorldItemEvent>,
     lever_writer: MessageWriter<'w, TriggerElevatorLeverEvent>,
     hit_writer: MessageWriter<'w, MonsterHitLocalPlayerEvent>,
+    strike_writer: MessageWriter<'w, StrikeStalkerEvent>,
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -578,7 +602,7 @@ fn poll_network_events_system(
     mut ws: PollNetWorldState,
     mut player_q: Query<&mut PlayerController>,
     mut items_q: Query<(Entity, &mut WorldItemEntity, &mut Transform)>,
-    mut remote_stalkers_q: Query<&mut RemoteSyncedStalker>,
+    mut remote_stalkers_q: Query<(Entity, &mut RemoteSyncedStalker)>,
     stalker_ents_q: Query<Entity, Or<(With<BlindStalker>, With<RemoteSyncedStalker>)>>,
     mut writers: PollNetWriters,
 ) {
@@ -603,6 +627,7 @@ fn poll_network_events_system(
     let remove_item_writer = &mut writers.remove_item_writer;
     let lever_writer = &mut writers.lever_writer;
     let hit_writer = &mut writers.hit_writer;
+    let strike_writer = &mut writers.strike_writer;
 
     let events = match coop.session {
         Some(ref s) => s.poll_events(),
@@ -990,6 +1015,39 @@ fn poll_network_events_system(
             } => {
                 if target_player_id == coop.local_player_id() {
                     hit_writer.write(MonsterHitLocalPlayerEvent { monster_pos_m });
+                }
+            }
+            NetEvent::MonsterDamaged {
+                monster_id,
+                damage,
+                stun_s,
+                knockback_dir,
+            } => {
+                if coop.is_host_or_solo() {
+                    strike_writer.write(StrikeStalkerEvent {
+                        monster_id,
+                        damage,
+                        stun_s,
+                        knockback_dir,
+                        hit_pos_m: Vec3::ZERO,
+                    });
+                }
+            }
+            NetEvent::MonsterKilled { monster_id, pos_m } => {
+                if !coop.is_host_or_solo() {
+                    for (ent, rs) in &remote_stalkers_q {
+                        if rs.monster_id == monster_id {
+                            commands.entity(ent).despawn();
+                        }
+                    }
+                    sound_writer.write(PlaySpatialSoundEvent {
+                        pos_m,
+                        clip: SynthClip::MonsterScreech,
+                        volume: 0.95,
+                        pitch: 0.72,
+                        ai_event: None,
+                    });
+                    toast.show("Stalker eliminated!", 2.6);
                 }
             }
             NetEvent::VoxelDelta { coord, material } => {
