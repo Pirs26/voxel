@@ -8,40 +8,13 @@ use std::{
 
 use bevy::{
     prelude::*,
-    window::{MonitorSelection, PrimaryWindow, VideoModeSelection, WindowMode},
+    window::{MonitorSelection, PrimaryWindow, WindowMode},
 };
 use serde::{Deserialize, Serialize};
 
 pub const FOV_MIN_DEG: f32 = 60.0;
 pub const FOV_MAX_DEG: f32 = 110.0;
 pub const DEFAULT_FOV_DEG: f32 = 75.0;
-
-/// Window presentation mode selectable in Settings.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DisplayMode {
-    #[default]
-    Windowed,
-    Borderless,
-    Fullscreen,
-}
-
-impl DisplayMode {
-    pub fn next(self) -> Self {
-        match self {
-            Self::Windowed => Self::Borderless,
-            Self::Borderless => Self::Fullscreen,
-            Self::Fullscreen => Self::Windowed,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Windowed => "Windowed",
-            Self::Borderless => "Borderless Fullscreen",
-            Self::Fullscreen => "Exclusive Fullscreen",
-        }
-    }
-}
 
 /// Top-level application screen controlling Main Menu vs live Shed/Cave gameplay.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -65,12 +38,9 @@ pub struct UserSettings {
     pub player_name: String,
     pub visor_idx: usize,
     pub fov_deg: f32,
-    /// Legacy boolean kept for backward compatibility with older `settings.json` files.
+    /// Regular borderless fullscreen toggle (also bound globally to `[F11]`).
     #[serde(default)]
     pub fullscreen: bool,
-    /// Active display presentation mode (Windowed / Borderless / Exclusive Fullscreen).
-    #[serde(default)]
-    pub display_mode: Option<DisplayMode>,
     pub master_volume: f32,
     pub voice_volume: f32,
     pub mic_gain: f32,
@@ -89,7 +59,6 @@ impl Default for UserSettings {
             visor_idx: 0,
             fov_deg: DEFAULT_FOV_DEG,
             fullscreen: false,
-            display_mode: Some(DisplayMode::Windowed),
             master_volume: 1.0,
             voice_volume: 1.0,
             mic_gain: 1.0,
@@ -112,24 +81,7 @@ impl UserSettings {
         PathBuf::from("saves").join("settings.json")
     }
 
-    pub fn effective_display_mode(&self) -> DisplayMode {
-        self.display_mode.unwrap_or(if self.fullscreen {
-            DisplayMode::Borderless
-        } else {
-            DisplayMode::Windowed
-        })
-    }
-
-    pub fn cycle_display_mode(&mut self) {
-        let next = self.effective_display_mode().next();
-        self.display_mode = Some(next);
-        self.fullscreen = next != DisplayMode::Windowed;
-    }
-
     pub fn sanitize(&mut self) {
-        let mode = self.effective_display_mode();
-        self.display_mode = Some(mode);
-        self.fullscreen = mode != DisplayMode::Windowed;
         let trimmed = self.player_name.trim();
         if trimmed.is_empty() {
             self.player_name = "Miner".to_string();
@@ -224,10 +176,20 @@ impl Plugin for SettingsPlugin {
 }
 
 fn apply_video_settings_system(
-    settings: Res<UserSettings>,
+    keys: Option<Res<ButtonInput<KeyCode>>>,
+    mut settings: ResMut<UserSettings>,
     mut cam_q: Query<&mut Projection, With<Camera3d>>,
     mut win_q: Query<&mut Window, With<PrimaryWindow>>,
 ) {
+    // Global `[F11]` fullscreen toggle (Minecraft-style instant borderless fullscreen)
+    if keys
+        .as_ref()
+        .is_some_and(|k| k.just_pressed(KeyCode::F11))
+    {
+        settings.fullscreen = !settings.fullscreen;
+        let _ = settings.save_default();
+    }
+
     let target_fov = settings.fov_deg.clamp(FOV_MIN_DEG, FOV_MAX_DEG).to_radians();
     for mut proj in &mut cam_q {
         if let Projection::Perspective(ref mut persp) = *proj
@@ -238,12 +200,10 @@ fn apply_video_settings_system(
     }
 
     if let Ok(mut window) = win_q.single_mut() {
-        let desired = match settings.effective_display_mode() {
-            DisplayMode::Windowed => WindowMode::Windowed,
-            DisplayMode::Borderless => WindowMode::BorderlessFullscreen(MonitorSelection::Current),
-            DisplayMode::Fullscreen => {
-                WindowMode::Fullscreen(MonitorSelection::Current, VideoModeSelection::Current)
-            }
+        let desired = if settings.fullscreen {
+            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+        } else {
+            WindowMode::Windowed
         };
         if window.mode != desired {
             window.mode = desired;
@@ -264,7 +224,6 @@ mod tests {
             visor_idx: 3,
             fov_deg: 200.0,
             fullscreen: true,
-            display_mode: Some(DisplayMode::Fullscreen),
             master_volume: -1.0,
             voice_volume: 9.0,
             mic_gain: 0.01,
@@ -308,14 +267,14 @@ mod tests {
 
         let old = UserSettings {
             fov_deg: 95.0,
-            display_mode: Some(DisplayMode::Fullscreen),
+            fullscreen: true,
             ..Default::default()
         };
         old.save_to_path(&legacy).expect("write legacy settings");
 
         let loaded = UserSettings::load_with_migration(&primary, &legacy);
         assert_eq!(loaded.fov_deg, 95.0);
-        assert_eq!(loaded.effective_display_mode(), DisplayMode::Fullscreen);
+        assert!(loaded.fullscreen);
         assert!(primary.is_file(), "migrated config/settings.json must exist");
         assert!(!legacy.exists(), "legacy saves/settings.json should be cleaned up");
 

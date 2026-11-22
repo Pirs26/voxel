@@ -33,7 +33,7 @@ use crate::{
     player::PlayerFlashlight,
     relic::{WorldItemEntity, world_item_display_name},
     save::{CampaignState, SaveSlotBrowser},
-    settings::{AppScreen, DisplayMode, FOV_MAX_DEG, FOV_MIN_DEG, SettingsMenuOpen, UserSettings},
+    settings::{AppScreen, FOV_MAX_DEG, FOV_MIN_DEG, SettingsMenuOpen, UserSettings},
     shed::{CrosshairTargetState, ShopOverlayOpen, TargetAccent},
     updater_bridge::{UpdaterCommand, UpdaterState, UpdaterUiStatus},
 };
@@ -41,6 +41,7 @@ use crate::{
 const SLIDER_HIT_STEPS: usize = 20;
 const MIC_LED_BARS: usize = 10;
 const SAVE_DROPDOWN_ROWS: usize = 6;
+const AUDIO_DROPDOWN_ROWS: usize = 6;
 
 // ---- Color Palette (Subterranean Tactical Dive UI) ----
 const COL_PANEL_BG: Color = Color::srgba(0.04, 0.06, 0.09, 0.94);
@@ -63,6 +64,18 @@ struct DiagnosticsDrawerOpen(bool);
 #[derive(Resource, Default)]
 struct SaveDropdownState {
     open: bool,
+    page: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AudioDropdownKind {
+    Output,
+    Input,
+}
+
+#[derive(Resource, Default)]
+struct AudioDropdownState {
+    open: Option<AudioDropdownKind>,
     page: usize,
 }
 
@@ -107,7 +120,10 @@ struct SaveDropdownChevron;
 struct SaveDropdownList;
 
 #[derive(Component, Clone, Copy)]
-struct SaveDropdownRow(usize);
+struct SaveDropdownRow {
+    idx: usize,
+    hovered: bool,
+}
 
 #[derive(Component, Clone, Copy)]
 struct SaveDropdownRowName(usize);
@@ -187,6 +203,31 @@ struct OutputDeviceLabel;
 
 #[derive(Component)]
 struct InputDeviceLabel;
+
+#[derive(Component, Clone, Copy)]
+struct AudioDropdownChevron(AudioDropdownKind);
+
+#[derive(Component, Clone, Copy)]
+struct AudioDropdownList(AudioDropdownKind);
+
+#[derive(Component, Clone, Copy)]
+struct AudioDropdownRow {
+    kind: AudioDropdownKind,
+    idx: usize,
+    hovered: bool,
+}
+
+#[derive(Component, Clone, Copy)]
+struct AudioDropdownRowText {
+    kind: AudioDropdownKind,
+    idx: usize,
+}
+
+#[derive(Component, Clone, Copy)]
+struct AudioDropdownPagerRow(AudioDropdownKind);
+
+#[derive(Component, Clone, Copy)]
+struct AudioDropdownPageLabel(AudioDropdownKind);
 
 #[derive(Component)]
 struct SettingsMicBadgeText;
@@ -343,10 +384,9 @@ enum UiAction {
     CheckForUpdates,
     UpdateInstall,
     UpdateDismiss,
-    PrevOutputDevice,
-    NextOutputDevice,
-    PrevInputDevice,
-    NextInputDevice,
+    ToggleAudioDropdown(AudioDropdownKind),
+    SelectAudioRow(AudioDropdownKind, usize),
+    AudioListPage(i32),
     RefreshAudioDevices,
     SliderStep(SliderKind, f32),
     SliderSetFrac(SliderKind, f32),
@@ -367,6 +407,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<NameInputFocused>()
             .init_resource::<DiagnosticsDrawerOpen>()
             .init_resource::<SaveDropdownState>()
+            .init_resource::<AudioDropdownState>()
             .add_message::<TriggerUiAction>()
             .add_systems(Startup, setup_hud)
             .add_systems(
@@ -382,6 +423,7 @@ impl Plugin for HudPlugin {
                     update_hotbar_and_pouch_system,
                     update_battery_tray_system,
                     update_settings_widgets_system,
+                    update_audio_dropdown_system,
                     update_updater_popup_system,
                     update_diagnostics_drawer_system,
                 )
@@ -724,6 +766,207 @@ fn spawn_slider_row(parent: &mut ChildSpawnerCommands, title: &str, kind: Slider
                 },
                 SliderValueText(kind),
             ));
+        });
+}
+
+fn spawn_audio_dropdown_row(
+    panel: &mut ChildSpawnerCommands,
+    title: &str,
+    kind: AudioDropdownKind,
+) {
+    let base_bg = Color::srgba(0.08, 0.12, 0.18, 0.96);
+    let hover_bg = Color::srgba(0.13, 0.21, 0.29, 0.98);
+
+    panel
+        .spawn(Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(5.0),
+            width: Val::Percent(100.0),
+            margin: UiRect::top(Val::Px(3.0)),
+            ..default()
+        })
+        .with_children(|wrap| {
+            // Header row: label + clickable dropdown trigger pill
+            wrap.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::SpaceBetween,
+                width: Val::Percent(100.0),
+                ..default()
+            })
+            .with_children(|row| {
+                row.spawn((
+                    Text::new(title),
+                    TextFont {
+                        font_size: FontSize::Px(13.0),
+                        ..default()
+                    },
+                    TextColor(COL_TEXT_BRIGHT),
+                ));
+
+                row.spawn((
+                    Node {
+                        width: Val::Px(360.0),
+                        padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                        border: UiRect::all(Val::Px(1.5)),
+                        border_radius: BorderRadius::all(Val::Px(6.0)),
+                        flex_direction: FlexDirection::Row,
+                        justify_content: JustifyContent::SpaceBetween,
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(8.0),
+                        ..default()
+                    },
+                    BackgroundColor(base_bg),
+                    BorderColor::all(COL_BORDER_DIM),
+                ))
+                .observe(
+                    move |_click: On<PointerClick>, mut writer: MessageWriter<TriggerUiAction>| {
+                        writer.write(TriggerUiAction(UiAction::ToggleAudioDropdown(kind)));
+                    },
+                )
+                .observe(
+                    move |over: On<PointerOver>, mut bg_q: Query<&mut BackgroundColor>| {
+                        if let Ok(mut bg) = bg_q.get_mut(over.entity) {
+                            *bg = BackgroundColor(hover_bg);
+                        }
+                    },
+                )
+                .observe(
+                    move |out: On<PointerOut>, mut bg_q: Query<&mut BackgroundColor>| {
+                        if let Ok(mut bg) = bg_q.get_mut(out.entity) {
+                            *bg = BackgroundColor(base_bg);
+                        }
+                    },
+                )
+                .with_children(|btn| {
+                    let lbl = btn
+                        .spawn((
+                            Text::new("System Default"),
+                            TextFont {
+                                font_size: FontSize::Px(12.5),
+                                ..default()
+                            },
+                            TextColor(COL_TEXT_BRIGHT),
+                            Pickable::IGNORE,
+                        ))
+                        .id();
+                    match kind {
+                        AudioDropdownKind::Output => {
+                            btn.commands().entity(lbl).insert(OutputDeviceLabel);
+                        }
+                        AudioDropdownKind::Input => {
+                            btn.commands().entity(lbl).insert(InputDeviceLabel);
+                        }
+                    }
+
+                    btn.spawn((
+                        Text::new("▼"),
+                        TextFont {
+                            font_size: FontSize::Px(11.0),
+                            ..default()
+                        },
+                        TextColor(COL_ACCENT_CYAN),
+                        Pickable::IGNORE,
+                        AudioDropdownChevron(kind),
+                    ));
+                });
+            });
+
+            // Expandable clickable device list
+            wrap.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    padding: UiRect::all(Val::Px(6.0)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(3.0),
+                    display: Display::None,
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.035, 0.055, 0.085, 0.98)),
+                BorderColor::all(COL_ACCENT_CYAN),
+                AudioDropdownList(kind),
+            ))
+            .with_children(|list| {
+                for idx in 0..AUDIO_DROPDOWN_ROWS {
+                    list.spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
+                            border: UiRect::all(Val::Px(1.0)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            display: Display::None,
+                            ..default()
+                        },
+                        BackgroundColor(COL_CARD_BG),
+                        BorderColor::all(COL_BORDER_DIM),
+                        AudioDropdownRow {
+                            kind,
+                            idx,
+                            hovered: false,
+                        },
+                    ))
+                    .observe(
+                        move |_click: On<PointerClick>,
+                              mut writer: MessageWriter<TriggerUiAction>| {
+                            writer.write(TriggerUiAction(UiAction::SelectAudioRow(kind, idx)));
+                        },
+                    )
+                    .observe(
+                        |over: On<PointerOver>, mut row_q: Query<&mut AudioDropdownRow>| {
+                            if let Ok(mut r) = row_q.get_mut(over.entity) {
+                                r.hovered = true;
+                            }
+                        },
+                    )
+                    .observe(
+                        |out: On<PointerOut>, mut row_q: Query<&mut AudioDropdownRow>| {
+                            if let Ok(mut r) = row_q.get_mut(out.entity) {
+                                r.hovered = false;
+                            }
+                        },
+                    )
+                    .with_children(|r| {
+                        r.spawn((
+                            Text::new(""),
+                            TextFont {
+                                font_size: FontSize::Px(12.0),
+                                ..default()
+                            },
+                            TextColor(COL_TEXT_BRIGHT),
+                            Pickable::IGNORE,
+                            AudioDropdownRowText { kind, idx },
+                        ));
+                    });
+                }
+
+                list.spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        flex_direction: FlexDirection::Row,
+                        justify_content: JustifyContent::SpaceBetween,
+                        align_items: AlignItems::Center,
+                        margin: UiRect::top(Val::Px(2.0)),
+                        display: Display::None,
+                        ..default()
+                    },
+                    AudioDropdownPagerRow(kind),
+                ))
+                .with_children(|pager| {
+                    spawn_std_btn(pager, "Prev", UiAction::AudioListPage(-1));
+                    pager.spawn((
+                        Text::new("Page 1 / 1"),
+                        TextFont {
+                            font_size: FontSize::Px(11.0),
+                            ..default()
+                        },
+                        TextColor(COL_TEXT_MUTED),
+                        AudioDropdownPageLabel(kind),
+                    ));
+                    spawn_std_btn(pager, "Next", UiAction::AudioListPage(1));
+                });
+            });
         });
 }
 
@@ -1159,7 +1402,10 @@ fn setup_hud(mut commands: Commands) {
                                             },
                                             BackgroundColor(COL_CARD_BG),
                                             BorderColor::all(COL_BORDER_DIM),
-                                            SaveDropdownRow(row_idx),
+                                            SaveDropdownRow {
+                                                idx: row_idx,
+                                                hovered: false,
+                                            },
                                         ))
                                         .observe(
                                             move |_click: On<PointerClick>,
@@ -1167,6 +1413,22 @@ fn setup_hud(mut commands: Commands) {
                                                 writer.write(TriggerUiAction(
                                                     UiAction::SelectSaveRow(row_idx),
                                                 ));
+                                            },
+                                        )
+                                        .observe(
+                                            |over: On<PointerOver>,
+                                             mut row_q: Query<&mut SaveDropdownRow>| {
+                                                if let Ok(mut r) = row_q.get_mut(over.entity) {
+                                                    r.hovered = true;
+                                                }
+                                            },
+                                        )
+                                        .observe(
+                                            |out: On<PointerOut>,
+                                             mut row_q: Query<&mut SaveDropdownRow>| {
+                                                if let Ok(mut r) = row_q.get_mut(out.entity) {
+                                                    r.hovered = false;
+                                                }
                                             },
                                         )
                                         .with_children(|r| {
@@ -1380,96 +1642,14 @@ fn setup_hud(mut commands: Commands) {
                             );
                         });
 
-                    // Audio Output row
-                    panel
-                        .spawn(Node {
-                            flex_direction: FlexDirection::Row,
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::SpaceBetween,
-                            width: Val::Percent(100.0),
-                            margin: UiRect::top(Val::Px(4.0)),
-                            ..default()
-                        })
-                        .with_children(|row| {
-                            row.spawn((
-                                Text::new("Output Device"),
-                                TextFont {
-                                    font_size: FontSize::Px(13.0),
-                                    ..default()
-                                },
-                                TextColor(COL_TEXT_BRIGHT),
-                            ));
-                            row.spawn(Node {
-                                flex_direction: FlexDirection::Row,
-                                align_items: AlignItems::Center,
-                                column_gap: Val::Px(6.0),
-                                ..default()
-                            })
-                            .with_children(|ctrl| {
-                                spawn_std_btn(ctrl, "<", UiAction::PrevOutputDevice);
-                                ctrl.spawn((
-                                    Text::new("System Default"),
-                                    TextFont {
-                                        font_size: FontSize::Px(12.5),
-                                        ..default()
-                                    },
-                                    TextColor(COL_TEXT_BRIGHT),
-                                    Node {
-                                        width: Val::Px(270.0),
-                                        ..default()
-                                    },
-                                    OutputDeviceLabel,
-                                ));
-                                spawn_std_btn(ctrl, ">", UiAction::NextOutputDevice);
-                            });
-                        });
+                    // Audio Output clickable dropdown selector
+                    spawn_audio_dropdown_row(panel, "Output Device", AudioDropdownKind::Output);
 
                     spawn_slider_row(panel, "Master Volume", SliderKind::MasterVolume);
                     spawn_slider_row(panel, "Voice Volume", SliderKind::VoiceVolume);
 
-                    // Audio Input row
-                    panel
-                        .spawn(Node {
-                            flex_direction: FlexDirection::Row,
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::SpaceBetween,
-                            width: Val::Percent(100.0),
-                            margin: UiRect::top(Val::Px(4.0)),
-                            ..default()
-                        })
-                        .with_children(|row| {
-                            row.spawn((
-                                Text::new("Microphone"),
-                                TextFont {
-                                    font_size: FontSize::Px(13.0),
-                                    ..default()
-                                },
-                                TextColor(COL_TEXT_BRIGHT),
-                            ));
-                            row.spawn(Node {
-                                flex_direction: FlexDirection::Row,
-                                align_items: AlignItems::Center,
-                                column_gap: Val::Px(6.0),
-                                ..default()
-                            })
-                            .with_children(|ctrl| {
-                                spawn_std_btn(ctrl, "<", UiAction::PrevInputDevice);
-                                ctrl.spawn((
-                                    Text::new("System Default"),
-                                    TextFont {
-                                        font_size: FontSize::Px(12.5),
-                                        ..default()
-                                    },
-                                    TextColor(COL_TEXT_BRIGHT),
-                                    Node {
-                                        width: Val::Px(270.0),
-                                        ..default()
-                                    },
-                                    InputDeviceLabel,
-                                ));
-                                spawn_std_btn(ctrl, ">", UiAction::NextInputDevice);
-                            });
-                        });
+                    // Audio Input clickable dropdown selector
+                    spawn_audio_dropdown_row(panel, "Microphone", AudioDropdownKind::Input);
 
                     spawn_slider_row(panel, "Mic Gain", SliderKind::MicGain);
                     spawn_slider_row(panel, "Noise Gate", SliderKind::MicGate);
@@ -3204,23 +3384,6 @@ fn slider_current_frac(settings: &UserSettings, kind: SliderKind) -> f32 {
     }
 }
 
-fn cycle_device(current: &Option<String>, list: &[String], delta: i32) -> Option<String> {
-    let total = list.len() + 1;
-    let cur_idx = match current {
-        None => 0usize,
-        Some(name) => list
-            .iter()
-            .position(|d| d == name)
-            .map_or(0, |idx| idx + 1),
-    };
-    let next_idx = (cur_idx as i32 + delta).rem_euclid(total as i32) as usize;
-    if next_idx == 0 {
-        None
-    } else {
-        list.get(next_idx - 1).cloned()
-    }
-}
-
 #[derive(SystemParam)]
 struct ActionResources<'w> {
     keys: Res<'w, ButtonInput<KeyCode>>,
@@ -3234,6 +3397,7 @@ struct ActionResources<'w> {
     device_catalog: ResMut<'w, AudioDeviceCatalog>,
     save_browser: ResMut<'w, SaveSlotBrowser>,
     save_dropdown: ResMut<'w, SaveDropdownState>,
+    audio_dropdown: ResMut<'w, AudioDropdownState>,
     inv: Res<'w, PlayerInventory>,
 }
 
@@ -3261,6 +3425,7 @@ fn handle_ui_actions_system(
     let device_catalog = &mut *res.device_catalog;
     let save_browser = &mut *res.save_browser;
     let save_dropdown = &mut *res.save_dropdown;
+    let audio_dropdown = &mut *res.audio_dropdown;
     let inv = &*res.inv;
 
     for TriggerUiAction(action) in actions.read().copied() {
@@ -3351,6 +3516,7 @@ fn handle_ui_actions_system(
             }
             UiAction::CloseSettings => {
                 settings_open.0 = false;
+                audio_dropdown.open = None;
                 let _ = user_settings.save_default();
             }
             UiAction::QuitGame => {
@@ -3394,7 +3560,7 @@ fn handle_ui_actions_system(
                 menu_open.0 = false;
                 settings_open.0 = false;
             }
-            UiAction::ToggleFullscreen => user_settings.cycle_display_mode(),
+            UiAction::ToggleFullscreen => user_settings.fullscreen = !user_settings.fullscreen,
             UiAction::ToggleIncludePrereleases => {
                 user_settings.include_prereleases = !user_settings.include_prereleases;
                 let _ = user_settings.save_default();
@@ -3408,23 +3574,49 @@ fn handle_ui_actions_system(
             UiAction::UpdateDismiss => {
                 updater_writer.write(UpdaterCommand::DismissPopup);
             }
-            UiAction::PrevOutputDevice => {
-                user_settings.output_device =
-                    cycle_device(&user_settings.output_device, &device_catalog.output_devices, -1);
+            UiAction::ToggleAudioDropdown(kind) => {
+                if audio_dropdown.open == Some(kind) {
+                    audio_dropdown.open = None;
+                } else {
+                    device_catalog.refresh();
+                    audio_dropdown.open = Some(kind);
+                    audio_dropdown.page = 0;
+                }
             }
-            UiAction::NextOutputDevice => {
-                user_settings.output_device =
-                    cycle_device(&user_settings.output_device, &device_catalog.output_devices, 1);
+            UiAction::SelectAudioRow(kind, row_idx) => {
+                let abs_idx = audio_dropdown.page * AUDIO_DROPDOWN_ROWS + row_idx;
+                let list = match kind {
+                    AudioDropdownKind::Output => &device_catalog.output_devices,
+                    AudioDropdownKind::Input => &device_catalog.input_devices,
+                };
+                if abs_idx == 0 {
+                    match kind {
+                        AudioDropdownKind::Output => user_settings.output_device = None,
+                        AudioDropdownKind::Input => user_settings.input_device = None,
+                    }
+                } else if let Some(dev_name) = list.get(abs_idx - 1).cloned() {
+                    match kind {
+                        AudioDropdownKind::Output => user_settings.output_device = Some(dev_name),
+                        AudioDropdownKind::Input => user_settings.input_device = Some(dev_name),
+                    }
+                }
+                audio_dropdown.open = None;
             }
-            UiAction::PrevInputDevice => {
-                user_settings.input_device =
-                    cycle_device(&user_settings.input_device, &device_catalog.input_devices, -1);
+            UiAction::AudioListPage(delta) => {
+                if let Some(kind) = audio_dropdown.open {
+                    let count = match kind {
+                        AudioDropdownKind::Output => device_catalog.output_devices.len() + 1,
+                        AudioDropdownKind::Input => device_catalog.input_devices.len() + 1,
+                    };
+                    let total_pages = count.div_ceil(AUDIO_DROPDOWN_ROWS).max(1);
+                    let next = (audio_dropdown.page as i32 + delta).rem_euclid(total_pages as i32);
+                    audio_dropdown.page = next as usize;
+                }
             }
-            UiAction::NextInputDevice => {
-                user_settings.input_device =
-                    cycle_device(&user_settings.input_device, &device_catalog.input_devices, 1);
+            UiAction::RefreshAudioDevices => {
+                device_catalog.refresh();
+                audio_dropdown.page = 0;
             }
-            UiAction::RefreshAudioDevices => device_catalog.refresh(),
             UiAction::SliderStep(kind, dir) => apply_slider_step(user_settings, kind, dir),
             UiAction::SliderSetFrac(kind, frac) => apply_slider_frac(user_settings, kind, frac),
             UiAction::ShopBuy(item) => {
@@ -3697,16 +3889,20 @@ fn update_save_dropdown_system(
 
     let start = dropdown.page * SAVE_DROPDOWN_ROWS;
     for (row, mut node, mut bg, mut border) in &mut nodes.p1() {
-        let abs_idx = start + row.0;
+        let abs_idx = start + row.idx;
         if abs_idx < save_browser.slots.len() {
             node.display = Display::Flex;
             let selected = abs_idx == save_browser.selected_idx;
-            *bg = BackgroundColor(if selected {
+            *bg = BackgroundColor(if selected && row.hovered {
+                Color::srgba(0.13, 0.34, 0.38, 0.98)
+            } else if selected {
                 Color::srgba(0.09, 0.24, 0.28, 0.98)
+            } else if row.hovered {
+                Color::srgba(0.13, 0.21, 0.29, 0.98)
             } else {
                 COL_CARD_BG
             });
-            *border = BorderColor::all(if selected {
+            *border = BorderColor::all(if selected || row.hovered {
                 COL_ACCENT_CYAN
             } else {
                 COL_BORDER_DIM
@@ -4328,23 +4524,21 @@ fn update_settings_widgets_system(
                     )
                 }
             }
-            ToggleKind::Fullscreen => match user_settings.effective_display_mode() {
-                DisplayMode::Windowed => (
-                    Color::srgba(0.11, 0.16, 0.22, 0.96),
-                    Color::srgba(0.18, 0.28, 0.36, 0.98),
-                    COL_BORDER_DIM,
-                ),
-                DisplayMode::Borderless => (
-                    Color::srgba(0.09, 0.30, 0.34, 0.98),
-                    Color::srgba(0.14, 0.43, 0.47, 0.98),
-                    COL_ACCENT_CYAN,
-                ),
-                DisplayMode::Fullscreen => (
-                    Color::srgba(0.09, 0.28, 0.19, 0.98),
-                    Color::srgba(0.13, 0.39, 0.27, 0.98),
-                    COL_ACCENT_GREEN,
-                ),
-            },
+            ToggleKind::Fullscreen => {
+                if user_settings.fullscreen {
+                    (
+                        Color::srgba(0.09, 0.30, 0.34, 0.98),
+                        Color::srgba(0.14, 0.43, 0.47, 0.98),
+                        COL_ACCENT_CYAN,
+                    )
+                } else {
+                    (
+                        Color::srgba(0.11, 0.16, 0.22, 0.96),
+                        Color::srgba(0.18, 0.28, 0.36, 0.98),
+                        COL_BORDER_DIM,
+                    )
+                }
+            }
             ToggleKind::IncludePrereleases => {
                 if user_settings.include_prereleases {
                     (
@@ -4397,7 +4591,13 @@ fn update_settings_widgets_system(
                     "Self-Echo: OFF [V]".to_string()
                 }
             }
-            ToggleKind::Fullscreen => user_settings.effective_display_mode().label().to_string(),
+            ToggleKind::Fullscreen => {
+                if user_settings.fullscreen {
+                    "Fullscreen [F11]".to_string()
+                } else {
+                    "Windowed [F11]".to_string()
+                }
+            }
             ToggleKind::IncludePrereleases => {
                 if user_settings.include_prereleases {
                     "Pre-releases: ON".to_string()
@@ -4430,6 +4630,133 @@ fn update_settings_widgets_system(
     }
     if let Ok(mut t) = text_set.p5().single_mut() {
         t.0 = updater.settings_status_text.clone();
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn update_audio_dropdown_system(
+    user_settings: Res<UserSettings>,
+    catalog: Res<AudioDeviceCatalog>,
+    mut dropdown: ResMut<AudioDropdownState>,
+    mut nodes: ParamSet<(
+        Query<(&AudioDropdownList, &mut Node)>,
+        Query<(&AudioDropdownRow, &mut Node, &mut BackgroundColor, &mut BorderColor)>,
+        Query<(&AudioDropdownPagerRow, &mut Node)>,
+    )>,
+    mut texts: ParamSet<(
+        Query<(&AudioDropdownChevron, &mut Text)>,
+        Query<(&AudioDropdownRowText, &mut Text, &mut TextColor)>,
+        Query<(&AudioDropdownPageLabel, &mut Text)>,
+    )>,
+) {
+    let device_for = |kind: AudioDropdownKind, abs_idx: usize| -> Option<Option<&str>> {
+        let list = match kind {
+            AudioDropdownKind::Output => &catalog.output_devices,
+            AudioDropdownKind::Input => &catalog.input_devices,
+        };
+        if abs_idx == 0 {
+            Some(None)
+        } else {
+            list.get(abs_idx - 1).map(|s| Some(s.as_str()))
+        }
+    };
+    let total_for = |kind: AudioDropdownKind| -> usize {
+        match kind {
+            AudioDropdownKind::Output => catalog.output_devices.len() + 1,
+            AudioDropdownKind::Input => catalog.input_devices.len() + 1,
+        }
+    };
+    let is_selected = |kind: AudioDropdownKind, entry: Option<&str>| -> bool {
+        match kind {
+            AudioDropdownKind::Output => user_settings.output_device.as_deref() == entry,
+            AudioDropdownKind::Input => user_settings.input_device.as_deref() == entry,
+        }
+    };
+
+    if let Some(open_kind) = dropdown.open {
+        let total_pages = total_for(open_kind).div_ceil(AUDIO_DROPDOWN_ROWS).max(1);
+        if dropdown.page >= total_pages {
+            dropdown.page = total_pages - 1;
+        }
+    }
+
+    for (ch, mut t) in &mut texts.p0() {
+        t.0 = if dropdown.open == Some(ch.0) { "▲" } else { "▼" }.to_string();
+    }
+
+    for (list, mut node) in &mut nodes.p0() {
+        node.display = if dropdown.open == Some(list.0) {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+
+    let Some(open_kind) = dropdown.open else {
+        return;
+    };
+
+    let start = dropdown.page * AUDIO_DROPDOWN_ROWS;
+    let total = total_for(open_kind);
+    let total_pages = total.div_ceil(AUDIO_DROPDOWN_ROWS).max(1);
+
+    for (row, mut node, mut bg, mut border) in &mut nodes.p1() {
+        if row.kind != open_kind {
+            node.display = Display::None;
+            continue;
+        }
+        let abs_idx = start + row.idx;
+        if let Some(entry) = device_for(open_kind, abs_idx) {
+            node.display = Display::Flex;
+            let selected = is_selected(open_kind, entry);
+            *bg = BackgroundColor(if selected && row.hovered {
+                Color::srgba(0.13, 0.34, 0.38, 0.98)
+            } else if selected {
+                Color::srgba(0.09, 0.24, 0.28, 0.98)
+            } else if row.hovered {
+                Color::srgba(0.13, 0.21, 0.29, 0.98)
+            } else {
+                COL_CARD_BG
+            });
+            *border = BorderColor::all(if selected || row.hovered {
+                COL_ACCENT_CYAN
+            } else {
+                COL_BORDER_DIM
+            });
+        } else {
+            node.display = Display::None;
+        }
+    }
+
+    for (rt, mut t, mut col) in &mut texts.p1() {
+        if rt.kind != open_kind {
+            continue;
+        }
+        let abs_idx = start + rt.idx;
+        if let Some(entry) = device_for(open_kind, abs_idx) {
+            t.0 = match entry {
+                None => "System Default".to_string(),
+                Some(name) => truncate_device_name(Some(name)),
+            };
+            *col = TextColor(if is_selected(open_kind, entry) {
+                COL_ACCENT_CYAN
+            } else {
+                COL_TEXT_BRIGHT
+            });
+        }
+    }
+
+    for (pager, mut node) in &mut nodes.p2() {
+        node.display = if pager.0 == open_kind && total_pages > 1 {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    for (lbl, mut t) in &mut texts.p2() {
+        if lbl.0 == open_kind {
+            t.0 = format!("Page {} / {}", dropdown.page + 1, total_pages);
+        }
     }
 }
 
