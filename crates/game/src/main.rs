@@ -6,6 +6,7 @@ mod health;
 mod hud;
 mod inventory;
 mod net_bridge;
+mod parkour_board;
 mod physics;
 mod player;
 mod relic;
@@ -101,6 +102,7 @@ mod tests {
             .init_resource::<ButtonInput<MouseButton>>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<Image>>()
             .insert_resource(GlobalAmbientLight::default())
             .insert_resource(WorldResource(Arc::new(RwLock::new(world))))
             .insert_resource(LevelInfoResource(level_info))

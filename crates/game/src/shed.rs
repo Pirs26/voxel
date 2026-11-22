@@ -95,6 +95,8 @@ pub struct ParkourTimerState {
     pub running: bool,
     pub elapsed_s: f32,
     pub in_gate_prev: bool,
+    pub reached_east_stage: bool,
+    pub reached_north_stage: bool,
     pub last_finish_ms: Option<u32>,
     pub last_finish_rank: Option<usize>,
     pub finish_banner_s: f32,
@@ -105,6 +107,14 @@ impl ParkourTimerState {
         self.running = false;
         self.elapsed_s = 0.0;
         self.in_gate_prev = false;
+        self.reached_east_stage = false;
+        self.reached_north_stage = false;
+    }
+
+    /// Returns `true` when the runner has climbed through both the East and North stages
+    /// of the course (preventing cheese skips straight from the entrance to the Bell).
+    pub fn has_completed_course(&self) -> bool {
+        self.reached_east_stage && self.reached_north_stage
     }
 }
 
@@ -239,17 +249,26 @@ pub fn raycast_shed_station(
         false,
     );
 
-    // Parkour Summit Victory Bell AABB atop the suspended center podium
-    let bell_min = info.parkour_bell_pos_m + Vec3::new(-0.42, 0.0, -0.42);
-    let bell_max = info.parkour_bell_pos_m + Vec3::new(0.42, 1.35, 0.42);
-    consider_box(
-        ShedStation::ParkourBell,
-        bell_min,
-        bell_max,
-        "Parkour Summit Bell".to_string(),
-        "Stop clock & log run".to_string(),
-        false,
-    );
+    // Parkour Summit Victory Bell AABB atop the suspended center podium.
+    // Guarded directionally & vertically so players can ONLY click the Bell from summit elevation
+    // inside the open -X booth entrance (cannot click from below, behind, or jumping past walls).
+    let bell = info.parkour_bell_pos_m;
+    let in_bell_booth_approach = origin_m.y >= bell.y + 0.35
+        && origin_m.x >= bell.x - 2.35
+        && origin_m.x <= bell.x + 0.45
+        && (origin_m.z - bell.z).abs() <= 1.35;
+    if in_bell_booth_approach {
+        let bell_min = bell + Vec3::new(-0.42, 0.0, -0.42);
+        let bell_max = bell + Vec3::new(0.42, 1.35, 0.42);
+        consider_box(
+            ShedStation::ParkourBell,
+            bell_min,
+            bell_max,
+            "Parkour Summit Bell".to_string(),
+            "Stop clock & log run".to_string(),
+            false,
+        );
+    }
 
     best.map(|(t, station, label, sublabel, blocked)| (station, label, sublabel, t, blocked))
 }
@@ -654,5 +673,51 @@ mod tests {
         assert!(!is_pos_in_parkour_start_gate(info.spawn_pos_m, &info));
         assert_eq!(format_parkour_time_ms(12_340), "12.34s");
         assert_eq!(format_parkour_time_ms(64_250), "1:04.25");
+
+        // Bell raycast succeeds from inside the -X booth entrance at summit elevation...
+        let elev = ElevatorState::from_level_info(&info, 4242);
+        let lever_pos = elev.lever_world_pos_m();
+        let bell = info.parkour_bell_pos_m;
+        let front_eye = bell + Vec3::new(-1.3, 1.2, 0.0);
+        let aim_front = (bell + Vec3::Y * 0.7 - front_eye).normalize();
+        assert_eq!(
+            raycast_shed_station(
+                front_eye,
+                aim_front,
+                INTERACT_RAY_MAX_DIST_M,
+                &info,
+                lever_pos,
+                ElevatorPhase::ShedIdle,
+                1,
+                0,
+            )
+            .map(|h| h.0),
+            Some(ShedStation::ParkourBell)
+        );
+
+        // ...and is BLOCKED from below, from the +X back side, or from the -Z/+Z sides!
+        for bad_eye in [
+            bell + Vec3::new(0.0, -1.5, 0.0), // below platform
+            bell + Vec3::new(1.4, 1.2, 0.0),  // behind +X guard wall
+            bell + Vec3::new(0.0, 1.2, 2.0),  // outside +Z guard wall
+            bell + Vec3::new(0.0, 1.2, -2.0), // outside -Z guard wall
+        ] {
+            let aim = (bell + Vec3::Y * 0.7 - bad_eye).normalize();
+            assert_ne!(
+                raycast_shed_station(
+                    bad_eye,
+                    aim,
+                    INTERACT_RAY_MAX_DIST_M,
+                    &info,
+                    lever_pos,
+                    ElevatorPhase::ShedIdle,
+                    1,
+                    0,
+                )
+                .map(|h| h.0),
+                Some(ShedStation::ParkourBell),
+                "bell must NOT be clickable from {bad_eye:?}"
+            );
+        }
     }
 }

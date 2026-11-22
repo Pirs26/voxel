@@ -41,6 +41,7 @@ use crate::{
     },
     inventory::{BeltItem, CarryHandState, PlayerInventory, ShopCatalogItem, purchase_shop_item},
     net_bridge::{CoopMenuOpen, CoopState, clear_remote_players},
+    parkour_board::{spawn_parkour_billboard, update_parkour_billboard_system},
     physics::{aabb_intersects_world, ray_aabb_intersect},
     player::PlayerController,
     relic::{
@@ -157,6 +158,7 @@ impl Plugin for GameplayPlugin {
                     inventory_input_system,
                     parkour_timer_system,
                     station_and_item_interact_system,
+                    update_parkour_billboard_system,
                     elevator_runtime_system,
                     world_items_runtime_system,
                     blind_stalker_ai_system,
@@ -167,11 +169,14 @@ impl Plugin for GameplayPlugin {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn setup_week3_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     level_info: Res<LevelInfoResource>,
+    parkour_timer: Res<ParkourTimerState>,
     mut coop: ResMut<CoopState>,
     mut inv: ResMut<PlayerInventory>,
     mut item_reg: ResMut<WorldItemRegistry>,
@@ -190,8 +195,18 @@ fn setup_week3_world(
     spawn_elevator_cage(&mut commands, &mut meshes, &mut materials, &elevator);
     commands.insert_resource(elevator);
 
-    // 3. Spawn Base Shed & Cave station props (Shop Terminal, Charger Bench, Lever, Winch)
+    // 3. Spawn Base Shed & Cave station props (Shop Terminal, Charger Bench, Start Gate, Summit Bell)
+    //    and the diegetic North-wall Parkour Leaderboard billboard.
     spawn_shed_landmarks(&mut commands, &mut meshes, &mut materials, &level_info.0);
+    spawn_parkour_billboard(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &level_info.0,
+        &campaign.save.parkour_leaderboard,
+        &parkour_timer,
+    );
 
     // 4. Restore persisted Base Shed world items (or place starter workbench items once for brand-new saves)
     let shed_items = if !campaign.save.shed_initialized
@@ -908,6 +923,8 @@ fn parkour_timer_system(
         let was_running = parkour.running;
         parkour.running = true;
         parkour.elapsed_s = 0.0;
+        parkour.reached_east_stage = false;
+        parkour.reached_north_stage = false;
         parkour.last_finish_ms = None;
         parkour.last_finish_rank = None;
         parkour.finish_banner_s = 0.0;
@@ -931,6 +948,18 @@ fn parkour_timer_system(
 
     if parkour.running {
         parkour.elapsed_s = (parkour.elapsed_s + dt).min(3599.99);
+        // Track generous East & North stage progress so players must climb the course
+        // rather than skipping straight from the entrance to the Summit Bell.
+        if pc.feet_pos_m.x >= level_info.0.parkour_bell_pos_m.x + 2.5
+            && pc.feet_pos_m.y >= level_info.0.shed_floor_y_m + 2.3
+        {
+            parkour.reached_east_stage = true;
+        }
+        if pc.feet_pos_m.z <= level_info.0.parkour_bell_pos_m.z - 3.5
+            && pc.feet_pos_m.y >= level_info.0.shed_floor_y_m + 3.9
+        {
+            parkour.reached_north_stage = true;
+        }
     }
 }
 
@@ -1446,13 +1475,30 @@ fn station_and_item_interact_system(
             }
             ShedStation::ParkourBell => {
                 if parkour_timer.running {
+                    if !parkour_timer.has_completed_course() {
+                        toast.show(
+                            "Complete the full Parkour course before ringing the Summit Bell!",
+                            3.2,
+                        );
+                        sound_writer.write(PlaySpatialSoundEvent {
+                            pos_m: level_info.0.parkour_bell_pos_m + Vec3::Y * 0.9,
+                            clip: SynthClip::BeaconPing,
+                            volume: 0.55,
+                            pitch: 0.92,
+                            ai_event: None,
+                        });
+                        return;
+                    }
+
                     let time_ms = (parkour_timer.elapsed_s * 1000.0).round().max(100.0) as u32;
                     parkour_timer.running = false;
+                    parkour_timer.reached_east_stage = false;
+                    parkour_timer.reached_north_stage = false;
                     parkour_timer.last_finish_ms = Some(time_ms);
                     parkour_timer.finish_banner_s = 5.0;
 
-                    let rank = campaign.save.record_parkour_run(&coop.local_name, time_ms);
-                    parkour_timer.last_finish_rank = rank;
+                    let outcome = campaign.save.record_parkour_run(&coop.local_name, time_ms);
+                    parkour_timer.last_finish_rank = outcome.rank;
 
                     if coop.is_host_or_solo() {
                         let _ = campaign.save_now();
@@ -1462,10 +1508,26 @@ fn station_and_item_interact_system(
                     }
 
                     let pretty = format_parkour_time_ms(time_ms);
-                    let msg = match rank {
-                        Some(1) => format!("NEW RECORD! Finished in {pretty} — #1 on the Leaderboard!"),
-                        Some(r) => format!("PARKOUR FINISHED in {pretty}! (Leaderboard #{r})"),
-                        None => format!("PARKOUR FINISHED in {pretty}!"),
+                    let best_pretty = format_parkour_time_ms(outcome.best_time_ms);
+                    let msg = if outcome.is_personal_best {
+                        match outcome.rank {
+                            Some(1) => format!(
+                                "NEW RECORD! Finished in {pretty} — #1 on the Parkour Billboard!"
+                            ),
+                            Some(r) => {
+                                format!("NEW PERSONAL BEST: {pretty}! (Leaderboard #{r})")
+                            }
+                            None => format!("NEW PERSONAL BEST: {pretty}!"),
+                        }
+                    } else {
+                        match outcome.rank {
+                            Some(r) => format!(
+                                "PARKOUR FINISHED in {pretty} (Personal Best: {best_pretty}, #{r})"
+                            ),
+                            None => format!(
+                                "PARKOUR FINISHED in {pretty} (Personal Best: {best_pretty})"
+                            ),
+                        }
                     };
                     toast.show(msg, 4.2);
                     sound_writer.write(PlaySpatialSoundEvent {

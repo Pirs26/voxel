@@ -19,11 +19,23 @@ pub const DEFAULT_SAVE_SLOT: &str = "default";
 pub const MAX_SAVE_SLOT_NAME_LEN: usize = 28;
 pub const MAX_PARKOUR_LEADERBOARD: usize = 8;
 
-/// A single completed official Parkour Room run persisted in the campaign save.
+/// A single completed official Parkour Room run persisted in the campaign save
+/// (the leaderboard keeps only each player's single fastest Personal Best).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParkourRecord {
     pub player_name: String,
     pub time_ms: u32,
+}
+
+/// Result of submitting a timed Parkour Room finish to [`CampaignSave::record_parkour_run`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParkourRunOutcome {
+    /// 1-based leaderboard rank of this player's Personal Best if within top [`MAX_PARKOUR_LEADERBOARD`].
+    pub rank: Option<usize>,
+    /// `true` if this run set a new Personal Best for the player.
+    pub is_personal_best: bool,
+    /// Player's Personal Best time after this run (ms).
+    pub best_time_ms: u32,
 }
 
 /// Physical items persisted inside the Base Shed across dives and sessions.
@@ -142,32 +154,75 @@ impl CampaignSave {
         }
     }
 
-    /// Inserts an official timed Parkour Room run into the sorted leaderboard (fastest first,
-    /// capped at [`MAX_PARKOUR_LEADERBOARD`]). Returns the 1-based rank if the run placed.
-    pub fn record_parkour_run(&mut self, player_name: &str, time_ms: u32) -> Option<usize> {
+    /// Records an official timed Parkour Room run while keeping ONLY each player's single
+    /// fastest Personal Best (matched case-insensitively via [`normalize_player_key`]),
+    /// sorted ascending by time and capped at [`MAX_PARKOUR_LEADERBOARD`].
+    pub fn record_parkour_run(&mut self, player_name: &str, time_ms: u32) -> ParkourRunOutcome {
         let trimmed = player_name.trim();
-        let display_name = if trimmed.is_empty() {
+        let display_name: String = if trimmed.is_empty() {
             "Miner".to_string()
         } else {
             trimmed.chars().take(20).collect()
         };
+        let key = normalize_player_key(&display_name);
         let clamped_ms = time_ms.max(100);
-        let entry = ParkourRecord {
-            player_name: display_name,
-            time_ms: clamped_ms,
+
+        self.deduplicate_parkour_leaderboard();
+
+        let (is_personal_best, best_time_ms) = if let Some(existing) = self
+            .parkour_leaderboard
+            .iter_mut()
+            .find(|r| normalize_player_key(&r.player_name) == key)
+        {
+            if clamped_ms < existing.time_ms {
+                existing.time_ms = clamped_ms;
+                existing.player_name = display_name;
+                (true, clamped_ms)
+            } else {
+                (false, existing.time_ms)
+            }
+        } else {
+            self.parkour_leaderboard.push(ParkourRecord {
+                player_name: display_name,
+                time_ms: clamped_ms,
+            });
+            (true, clamped_ms)
         };
-        let insert_idx = self
+
+        self.parkour_leaderboard.sort_by_key(|r| r.time_ms);
+        self.parkour_leaderboard.truncate(MAX_PARKOUR_LEADERBOARD);
+
+        let rank = self
             .parkour_leaderboard
             .iter()
-            .position(|r| clamped_ms < r.time_ms)
-            .unwrap_or(self.parkour_leaderboard.len());
-        self.parkour_leaderboard.insert(insert_idx, entry);
-        self.parkour_leaderboard.truncate(MAX_PARKOUR_LEADERBOARD);
-        if insert_idx < MAX_PARKOUR_LEADERBOARD {
-            Some(insert_idx + 1)
-        } else {
-            None
+            .position(|r| normalize_player_key(&r.player_name) == key)
+            .map(|i| i + 1);
+
+        ParkourRunOutcome {
+            rank,
+            is_personal_best,
+            best_time_ms,
         }
+    }
+
+    /// Deduplicates any legacy leaderboard entries so only the single best time per player remains.
+    pub fn deduplicate_parkour_leaderboard(&mut self) {
+        let mut best_by_player: HashMap<String, ParkourRecord> = HashMap::new();
+        for rec in self.parkour_leaderboard.drain(..) {
+            let key = normalize_player_key(&rec.player_name);
+            best_by_player
+                .entry(key)
+                .and_modify(|e| {
+                    if rec.time_ms < e.time_ms {
+                        *e = rec.clone();
+                    }
+                })
+                .or_insert(rec);
+        }
+        let mut deduped: Vec<ParkourRecord> = best_by_player.into_values().collect();
+        deduped.sort_by_key(|r| r.time_ms);
+        deduped.truncate(MAX_PARKOUR_LEADERBOARD);
+        self.parkour_leaderboard = deduped;
     }
 
     /// Retrieves an existing player's profile by normalized name, or inserts and returns
@@ -232,6 +287,7 @@ impl CampaignSave {
         if !save.shed_items.is_empty() || save.dives_completed > 0 {
             save.shed_initialized = true;
         }
+        save.deduplicate_parkour_leaderboard();
         for profile in save.players.values_mut() {
             profile.inventory.normalize_slots();
         }
@@ -754,20 +810,37 @@ mod tests {
     }
 
     #[test]
-    fn parkour_leaderboard_sorts_fastest_first_and_caps_top_entries() {
+    fn parkour_leaderboard_keeps_only_best_run_per_player_and_caps_top_entries() {
         let mut save = CampaignSave::default_new();
-        assert_eq!(save.record_parkour_run("Bob", 18_500), Some(1));
-        assert_eq!(save.record_parkour_run("Alice", 12_340), Some(1));
-        assert_eq!(save.record_parkour_run("Charlie", 15_000), Some(2));
+        let bob1 = save.record_parkour_run("Bob", 18_500);
+        assert_eq!(bob1.rank, Some(1));
+        assert!(bob1.is_personal_best);
+
+        let alice1 = save.record_parkour_run("Alice", 12_340);
+        assert_eq!(alice1.rank, Some(1));
+        assert!(alice1.is_personal_best);
+
+        // Slower run by Alice (different casing) must NOT duplicate or overwrite her PB
+        let alice_slow = save.record_parkour_run("alice", 16_000);
+        assert!(!alice_slow.is_personal_best);
+        assert_eq!(alice_slow.best_time_ms, 12_340);
+        assert_eq!(alice_slow.rank, Some(1));
+        assert_eq!(save.parkour_leaderboard.len(), 2);
+
+        // Faster run by Bob replaces his old entry and overtakes Alice for #1
+        let bob_pb = save.record_parkour_run("Bob", 11_200);
+        assert!(bob_pb.is_personal_best);
+        assert_eq!(bob_pb.rank, Some(1));
+        assert_eq!(save.parkour_leaderboard.len(), 2);
+        assert_eq!(save.parkour_leaderboard[0].player_name, "Bob");
+        assert_eq!(save.parkour_leaderboard[0].time_ms, 11_200);
+        assert_eq!(save.parkour_leaderboard[1].player_name, "Alice");
+
+        // Adding 8 more unique runners caps the leaderboard at MAX_PARKOUR_LEADERBOARD
         for i in 0..8 {
-            save.record_parkour_run("Runner", 20_000 + i * 500);
+            save.record_parkour_run(&format!("Runner_{i}"), 20_000 + i * 500);
         }
         assert_eq!(save.parkour_leaderboard.len(), MAX_PARKOUR_LEADERBOARD);
-        assert_eq!(save.parkour_leaderboard[0].player_name, "Alice");
-        assert_eq!(save.parkour_leaderboard[0].time_ms, 12_340);
-        assert_eq!(save.parkour_leaderboard[1].player_name, "Charlie");
-        assert_eq!(save.parkour_leaderboard[2].player_name, "Bob");
-        // Slower run beyond top 8 returns None
-        assert_eq!(save.record_parkour_run("Slow", 99_999), None);
+        assert_eq!(save.record_parkour_run("Slowest", 99_999).rank, None);
     }
 }

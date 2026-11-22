@@ -43,6 +43,8 @@ pub struct GeneratedLevelInfo {
     pub parkour_start_pos_m: Vec3,
     /// Minimum X coordinate (in meters) separating the main Shed from the attached Parkour Room.
     pub parkour_room_min_x_m: f32,
+    /// Wall-mounted diegetic Parkour Leaderboard billboard center on the North wall (facing +Z).
+    pub parkour_billboard_pos_m: Vec3,
     /// Summit trophy bell position atop the Base Shed Parkour Room victory platform.
     pub parkour_bell_pos_m: Vec3,
     /// Interior AABB minimum corner of the Base Shed (including Parkour Room) in world meters.
@@ -1028,6 +1030,12 @@ fn build_level_info(
         ((cz + 3) as f32 + 0.5) * vs,
     );
     let parkour_room_min_x_m = (cx + SHED_HALF_MAX_X) as f32 * vs;
+    // Diegetic wall billboard mounted flush against the inner North wall (z = cz - 8) facing +Z
+    let parkour_billboard_pos_m = Vec3::new(
+        ((cx + 16) as f32 + 0.5) * vs,
+        shed_floor_y_m + 2.35,
+        (cz - SHED_HALF_Z + 1) as f32 * vs + 0.08,
+    );
     // Top center of the 3x3 suspended steel Victory Platform in the Parkour Room
     let parkour_bell_pos_m = Vec3::new(
         ((cx + 18) as f32 + 0.5) * vs,
@@ -1066,6 +1074,7 @@ fn build_level_info(
         shed_workbench_pos_m,
         parkour_start_pos_m,
         parkour_room_min_x_m,
+        parkour_billboard_pos_m,
         parkour_bell_pos_m,
         shed_bounds_min_m,
         shed_bounds_max_m,
@@ -1397,6 +1406,21 @@ fn build_shed_parkour_room(world: &mut VoxelWorld, cx: i32, cz: i32, shed_floor_
     place_platform(13, 14, -4, -3, 7, VoxelId::Timber); // P11: NW corner climb (+1 up)
     place_platform(13, 14, -1, 0, 7, VoxelId::Steel); // P12: West launch pad
     place_platform(17, 19, -1, 1, 7, VoxelId::Steel); // P13: Suspended 3x3 center Victory Podium!
+
+    // 4. Full-height 3-sided Steel Guard Booth enclosing the Summit Bell on +X, +Z, and -Z
+    //    up to the ceiling so players can ONLY enter and click the Bell from the -X launch pad (P12),
+    //    preventing jumping/clicking from earlier stages or underneath!
+    for dy in 7..=PARKOUR_ROOF_OFFSET {
+        // East back wall (`x = 20`, `z = -2..=2`)
+        for dz in -2..=2 {
+            world.set(IVec3::new(cx + 20, shed_floor_y + dy, cz + dz), VoxelId::Steel);
+        }
+        // South & North guard walls (`z = +-2`, `x = 17..=20`)
+        for dx in 17..=20 {
+            world.set(IVec3::new(cx + dx, shed_floor_y + dy, cz - 2), VoxelId::Steel);
+            world.set(IVec3::new(cx + dx, shed_floor_y + dy, cz + 2), VoxelId::Steel);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1786,7 +1810,8 @@ mod tests {
             }
         }
 
-        // 2. Center Victory Podium is solid Steel with >= 3 full voxels of clear Air headroom.
+        // 2. Center Victory Podium is solid Steel with >= 4 full voxels of clear Air headroom
+        //    and enclosed by solid Steel guard walls on +X, +Z, -Z (open ONLY on -X toward P12).
         let summit_block = IVec3::new(cx + 18, shed_floor_y + 7, cz);
         assert_eq!(world.get(summit_block), VoxelId::Steel);
         for h in 1..=4 {
@@ -1795,6 +1820,11 @@ mod tests {
                 VoxelId::Air,
                 "summit podium needs generous headroom at +{h}"
             );
+            // West entrance (-X) is open Air; East (+X), North (-Z), South (+Z) are guarded Steel
+            assert_eq!(world.get(IVec3::new(cx + 16, shed_floor_y + 7 + h, cz)), VoxelId::Air);
+            assert_eq!(world.get(IVec3::new(cx + 20, shed_floor_y + 7 + h, cz)), VoxelId::Steel);
+            assert_eq!(world.get(IVec3::new(cx + 18, shed_floor_y + 7 + h, cz - 2)), VoxelId::Steel);
+            assert_eq!(world.get(IVec3::new(cx + 18, shed_floor_y + 7 + h, cz + 2)), VoxelId::Steel);
         }
 
         // 3. Start gate & Summit bell sit cleanly inside the Parkour Room & Base Shed bounds.

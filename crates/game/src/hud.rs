@@ -32,10 +32,7 @@ use crate::{
     },
     player::PlayerFlashlight,
     relic::{WorldItemEntity, world_item_display_name},
-    save::{
-        CampaignState, MAX_PARKOUR_LEADERBOARD, MAX_SAVE_SLOT_NAME_LEN, SaveSlotBrowser,
-        validate_save_slot_name,
-    },
+    save::{CampaignState, MAX_SAVE_SLOT_NAME_LEN, SaveSlotBrowser, validate_save_slot_name},
     settings::{AppScreen, FOV_MAX_DEG, FOV_MIN_DEG, SettingsMenuOpen, UserSettings},
     shed::{
         CrosshairTargetState, ParkourTimerState, ShopOverlayOpen, TargetAccent,
@@ -189,9 +186,6 @@ struct ParkourClockText;
 
 #[derive(Component)]
 struct ParkourClockStatusText;
-
-#[derive(Component, Clone, Copy)]
-struct ParkourBoardRow(usize);
 
 #[derive(Component, Clone, Copy)]
 struct SaveTierPip(u8);
@@ -2231,15 +2225,16 @@ fn setup_hud(mut commands: Commands) {
             });
 
             // -----------------------------------------------------------------
-            // PARKOUR ROOM LIVE CLOCK & LEADERBOARD POD (Shown while in Parkour Room!)
+            // COMPACT PARKOUR LIVE STOPWATCH PILL (Shown only during an active/just-finished run;
+            // the full Best Runs Leaderboard lives diegetically on the Parkour Room wall billboard!)
             // -----------------------------------------------------------------
             hud.spawn((
                 Node {
                     position_type: PositionType::Absolute,
                     top: Val::Px(122.0),
                     right: Val::Px(16.0),
-                    width: Val::Px(268.0),
-                    padding: UiRect::all(Val::Px(12.0)),
+                    width: Val::Px(224.0),
+                    padding: UiRect::all(Val::Px(11.0)),
                     border: UiRect {
                         right: Val::Px(3.0),
                         top: Val::Px(1.0),
@@ -2248,7 +2243,7 @@ fn setup_hud(mut commands: Commands) {
                     },
                     border_radius: BorderRadius::all(Val::Px(8.0)),
                     flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(6.0),
+                    row_gap: Val::Px(4.0),
                     ..default()
                 },
                 BackgroundColor(COL_HUD_POD_BG),
@@ -2266,7 +2261,7 @@ fn setup_hud(mut commands: Commands) {
                 pod.spawn((
                     Text::new("PARKOUR CLOCK"),
                     TextFont {
-                        font_size: FontSize::Px(11.0),
+                        font_size: FontSize::Px(10.5),
                         ..default()
                     },
                     TextColor(COL_ACCENT_GREEN),
@@ -2283,49 +2278,15 @@ fn setup_hud(mut commands: Commands) {
                     ParkourClockText,
                 ));
                 pod.spawn((
-                    Text::new("Pass Start Gate to begin"),
+                    Text::new("Climb to Summit Bell [E]"),
                     TextFont {
-                        font_size: FontSize::Px(11.5),
+                        font_size: FontSize::Px(11.0),
                         ..default()
                     },
                     TextColor(COL_TEXT_MUTED),
                     Pickable::IGNORE,
                     ParkourClockStatusText,
                 ));
-
-                pod.spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        height: Val::Px(1.0),
-                        margin: UiRect::vertical(Val::Px(2.0)),
-                        ..default()
-                    },
-                    BackgroundColor(COL_BORDER_DIM),
-                    Pickable::IGNORE,
-                ));
-
-                pod.spawn((
-                    Text::new("BEST RUNS LEADERBOARD"),
-                    TextFont {
-                        font_size: FontSize::Px(10.5),
-                        ..default()
-                    },
-                    TextColor(COL_ACCENT_AMBER),
-                    Pickable::IGNORE,
-                ));
-
-                for idx in 0..MAX_PARKOUR_LEADERBOARD {
-                    pod.spawn((
-                        Text::new(""),
-                        TextFont {
-                            font_size: FontSize::Px(12.0),
-                            ..default()
-                        },
-                        TextColor(COL_TEXT_MUTED),
-                        Pickable::IGNORE,
-                        ParkourBoardRow(idx),
-                    ));
-                }
             });
 
             // -----------------------------------------------------------------
@@ -4144,7 +4105,13 @@ fn update_panel_visibility_system(
             UiPanelKind::TargetCard => gameplay_clear && !target.label.is_empty(),
             UiPanelKind::ToastCard => gameplay_clear && !toast.text.is_empty(),
             UiPanelKind::BatteryTray => gameplay_clear && inv.battery_selector.open,
-            UiPanelKind::ParkourHud => gameplay_clear && parkour_timer.in_room,
+            UiPanelKind::ParkourHud => {
+                gameplay_clear
+                    && parkour_timer.in_room
+                    && (parkour_timer.running
+                        || (parkour_timer.last_finish_ms.is_some()
+                            && parkour_timer.finish_banner_s > 0.0))
+            }
             UiPanelKind::DiagDrawer => in_game && diag_open.0,
         };
         *v = if show {
@@ -4549,11 +4516,9 @@ fn update_save_name_modal_system(
 #[allow(clippy::type_complexity)]
 fn update_parkour_hud_system(
     parkour: Res<ParkourTimerState>,
-    campaign: Res<CampaignState>,
     mut texts: ParamSet<(
         Query<(&mut Text, &mut TextColor), With<ParkourClockText>>,
         Query<(&mut Text, &mut TextColor), With<ParkourClockStatusText>>,
-        Query<(&ParkourBoardRow, &mut Text, &mut TextColor, &mut Node)>,
     )>,
 ) {
     if !parkour.in_room {
@@ -4578,7 +4543,7 @@ fn update_parkour_hud_system(
 
     if let Ok((mut t, mut col)) = texts.p1().single_mut() {
         if parkour.running {
-            t.0 = "RUNNING • Click Summit Bell [E]".to_string();
+            t.0 = "RUNNING • Ring Summit Bell [E]".to_string();
             *col = TextColor(COL_ACCENT_CYAN);
         } else if let Some(rank) = parkour.last_finish_rank
             && parkour.finish_banner_s > 0.0
@@ -4586,7 +4551,7 @@ fn update_parkour_hud_system(
             t.0 = if rank == 1 {
                 "NEW #1 RECORD!".to_string()
             } else {
-                format!("FINISHED • Placed #{rank}")
+                format!("FINISHED • Best #{rank}")
             };
             *col = TextColor(COL_ACCENT_GREEN);
         } else if parkour.last_finish_ms.is_some() && parkour.finish_banner_s > 0.0 {
@@ -4595,31 +4560,6 @@ fn update_parkour_hud_system(
         } else {
             t.0 = "Pass emerald Start Gate to begin".to_string();
             *col = TextColor(COL_TEXT_MUTED);
-        }
-    }
-
-    let board = &campaign.save.parkour_leaderboard;
-    for (row, mut t, mut col, mut node) in &mut texts.p2() {
-        if board.is_empty() {
-            if row.0 == 0 {
-                node.display = Display::Flex;
-                t.0 = "No official runs yet".to_string();
-                *col = TextColor(COL_TEXT_MUTED);
-            } else {
-                node.display = Display::None;
-            }
-        } else if let Some(rec) = board.get(row.0) {
-            node.display = Display::Flex;
-            let time_str = format_parkour_time_ms(rec.time_ms);
-            t.0 = format!("#{}  {}  —  {time_str}", row.0 + 1, rec.player_name);
-            *col = TextColor(match row.0 {
-                0 => COL_ACCENT_AMBER,
-                1 => COL_TEXT_BRIGHT,
-                2 => COL_ACCENT_CYAN,
-                _ => COL_TEXT_MUTED,
-            });
-        } else {
-            node.display = Display::None;
         }
     }
 }

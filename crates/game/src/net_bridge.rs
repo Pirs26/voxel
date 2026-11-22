@@ -1504,11 +1504,11 @@ fn poll_network_events_system(
                 time_ms,
             } => {
                 if coop.is_host_or_solo() {
-                    let rank = campaign.save.record_parkour_run(&player_name, time_ms);
+                    let outcome = campaign.save.record_parkour_run(&player_name, time_ms);
                     let _ = campaign.save_now();
                     coop.send_parkour_leaderboard_sync(&campaign.save.parkour_leaderboard);
                     let pretty = crate::shed::format_parkour_time_ms(time_ms);
-                    if rank == Some(1) {
+                    if outcome.is_personal_best && outcome.rank == Some(1) {
                         toast.show(
                             format!("{player_name} set a NEW PARKOUR RECORD: {pretty}!"),
                             4.0,
