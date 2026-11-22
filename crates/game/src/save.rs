@@ -16,6 +16,7 @@ pub const SAVE_VERSION: u32 = 1;
 pub const STARTER_CREDITS: i32 = 100;
 pub const UNRECOVERED_COMPANION_FINE: i32 = 50;
 pub const DEFAULT_SAVE_SLOT: &str = "default";
+pub const MAX_SAVE_SLOT_NAME_LEN: usize = 28;
 
 /// Physical items persisted inside the Base Shed across dives and sessions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -93,6 +94,24 @@ fn sanitize_slot_name(slot: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+/// Validates and normalizes a user-supplied campaign save slot name into a safe filename stem.
+pub fn validate_save_slot_name(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || !trimmed.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return Err("Enter a save name using letters or numbers".to_string());
+    }
+    let safe = sanitize_slot_name(trimmed);
+    if safe.eq_ignore_ascii_case("settings") {
+        return Err("The name 'settings' is reserved".to_string());
+    }
+    if safe.len() > MAX_SAVE_SLOT_NAME_LEN {
+        return Err(format!(
+            "Save name must be at most {MAX_SAVE_SLOT_NAME_LEN} characters"
+        ));
+    }
+    Ok(safe)
 }
 
 impl CampaignSave {
@@ -227,8 +246,12 @@ impl Default for SaveSlotBrowser {
 
 impl SaveSlotBrowser {
     pub fn refresh(&mut self) {
+        self.refresh_in_dir(Path::new("saves"));
+    }
+
+    fn refresh_in_dir(&mut self, dir: &Path) {
         let prev_name = self.selected_slot_name().to_string();
-        self.slots = list_save_slots_in_dir(Path::new("saves"));
+        self.slots = list_save_slots_in_dir(dir);
         if self.slots.is_empty() {
             self.slots.push(SaveSlotSummary {
                 slot_name: DEFAULT_SAVE_SLOT.to_string(),
@@ -265,29 +288,103 @@ impl SaveSlotBrowser {
         self.selected_idx = (self.selected_idx as i32 + delta).rem_euclid(len) as usize;
     }
 
-    /// Creates a brand-new numbered campaign slot (`expedition_2`, `expedition_3`, ...) on disk
-    /// and selects it without touching any existing save files.
-    pub fn create_new_slot(&mut self) -> Result<String, String> {
-        self.refresh();
+    /// Computes the next unused default save name (`default`, `expedition_1`, `expedition_2`, ...).
+    pub fn next_default_new_slot_name(&self) -> String {
         let mut num = 1u32;
-        let name = loop {
-            let cand = if num == 1 && !self.slots.iter().any(|s| s.slot_name == DEFAULT_SAVE_SLOT && s.exists_on_disk) {
+        loop {
+            let cand = if num == 1
+                && !self
+                    .slots
+                    .iter()
+                    .any(|s| s.slot_name == DEFAULT_SAVE_SLOT && s.exists_on_disk)
+            {
                 DEFAULT_SAVE_SLOT.to_string()
             } else {
                 format!("expedition_{num}")
             };
-            if !self.slots.iter().any(|s| s.slot_name == cand && s.exists_on_disk) {
-                break cand;
+            if !self
+                .slots
+                .iter()
+                .any(|s| s.slot_name == cand && s.exists_on_disk)
+            {
+                return cand;
             }
             num += 1;
+        }
+    }
+
+    /// Creates a brand-new named campaign save slot on disk (using [`Self::next_default_new_slot_name`]
+    /// if `requested_name` is blank) and selects it without overwriting existing saves.
+    pub fn create_named_slot(&mut self, requested_name: &str) -> Result<String, String> {
+        self.create_named_slot_in_dir(Path::new("saves"), requested_name)
+    }
+
+    pub fn create_named_slot_in_dir(
+        &mut self,
+        dir: &Path,
+        requested_name: &str,
+    ) -> Result<String, String> {
+        self.refresh_in_dir(dir);
+        let name = if requested_name.trim().is_empty() {
+            self.next_default_new_slot_name()
+        } else {
+            validate_save_slot_name(requested_name)?
         };
+        let path = dir.join(format!("{name}.json"));
+        if path.exists() {
+            return Err(format!("A save named '{name}' already exists"));
+        }
         let fresh = CampaignSave::default_new();
-        fresh.save_slot(&name)?;
-        self.refresh();
+        fresh.save_to_path(&path)?;
+        self.refresh_in_dir(dir);
         if let Some(idx) = self.slots.iter().position(|s| s.slot_name == name) {
             self.selected_idx = idx;
         }
         Ok(name)
+    }
+
+    /// Renames the currently selected campaign save slot on disk (preserving all progress)
+    /// and updates the selection to the new name.
+    pub fn rename_selected_slot(&mut self, new_name: &str) -> Result<String, String> {
+        self.rename_selected_slot_in_dir(Path::new("saves"), new_name)
+    }
+
+    pub fn rename_selected_slot_in_dir(
+        &mut self,
+        dir: &Path,
+        new_name: &str,
+    ) -> Result<String, String> {
+        self.refresh_in_dir(dir);
+        let safe_new = validate_save_slot_name(new_name)?;
+        let old_name = self.selected_slot_name().to_string();
+        if safe_new == old_name {
+            return Ok(safe_new);
+        }
+
+        let old_path = dir.join(format!("{old_name}.json"));
+        let new_path = dir.join(format!("{safe_new}.json"));
+        if !old_name.eq_ignore_ascii_case(&safe_new) && new_path.exists() {
+            return Err(format!("A save named '{safe_new}' already exists"));
+        }
+
+        if old_path.exists() {
+            fs::rename(&old_path, &new_path).map_err(|err| {
+                format!(
+                    "Failed to rename {} to {}: {err}",
+                    old_path.display(),
+                    new_path.display()
+                )
+            })?;
+        } else {
+            // Starter placeholder slot not yet written to disk: create it under the requested name.
+            CampaignSave::default_new().save_to_path(&new_path)?;
+        }
+
+        self.refresh_in_dir(dir);
+        if let Some(idx) = self.slots.iter().position(|s| s.slot_name == safe_new) {
+            self.selected_idx = idx;
+        }
+        Ok(safe_new)
     }
 }
 
@@ -533,6 +630,79 @@ mod tests {
         assert_eq!(found[1].slot_name, "friday_coop");
         assert_eq!(found[1].credits, 900);
         assert_eq!(found[1].unlocked_depth_tier, 3);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn validate_save_slot_name_handles_valid_reserved_and_empty() {
+        assert_eq!(
+            validate_save_slot_name("Friday Squad!").unwrap(),
+            "friday_squad"
+        );
+        assert_eq!(validate_save_slot_name("Tier-3_Run").unwrap(), "tier-3_run");
+        assert!(validate_save_slot_name("   ").is_err());
+        assert!(validate_save_slot_name("!!!").is_err());
+        assert!(validate_save_slot_name("Settings").is_err());
+        assert!(validate_save_slot_name(&"a".repeat(MAX_SAVE_SLOT_NAME_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn create_named_and_rename_save_slots_preserve_data_and_prevent_duplicates() {
+        let path = unique_temp_save_path("create_rename");
+        let dir = path.parent().expect("temp dir");
+        fs::create_dir_all(dir).expect("create dir");
+
+        let mut browser = SaveSlotBrowser {
+            slots: Vec::new(),
+            selected_idx: 0,
+        };
+        browser.refresh_in_dir(dir);
+
+        // 1. Create a custom-named save slot.
+        let created = browser
+            .create_named_slot_in_dir(dir, "Deep Boys")
+            .expect("create named save");
+        assert_eq!(created, "deep_boys");
+        assert_eq!(browser.selected_slot_name(), "deep_boys");
+
+        // Duplicate name must be rejected cleanly without overwriting.
+        assert!(browser.create_named_slot_in_dir(dir, "deep boys").is_err());
+
+        // Blank name uses next_default_new_slot_name cleanly.
+        let auto = browser
+            .create_named_slot_in_dir(dir, "   ")
+            .expect("auto-named save");
+        assert_eq!(auto, DEFAULT_SAVE_SLOT);
+
+        // Modify saved credits on `deep_boys` so we can confirm rename preserves contents.
+        let mut custom = CampaignSave::load_from_path(&dir.join("deep_boys.json")).unwrap();
+        custom.credits = 777;
+        custom.dives_completed = 4;
+        custom
+            .save_to_path(&dir.join("deep_boys.json"))
+            .expect("update custom save");
+
+        browser.refresh_in_dir(dir);
+        browser.selected_idx = browser
+            .slots
+            .iter()
+            .position(|s| s.slot_name == "deep_boys")
+            .expect("find deep_boys");
+
+        // Renaming onto an existing slot must fail.
+        assert!(browser.rename_selected_slot_in_dir(dir, "default").is_err());
+
+        // Renaming to a new name preserves credits/dives and removes the old file.
+        let renamed = browser
+            .rename_selected_slot_in_dir(dir, "Abyssal Crew")
+            .expect("rename save");
+        assert_eq!(renamed, "abyssal_crew");
+        assert_eq!(browser.selected_slot_name(), "abyssal_crew");
+        assert!(!dir.join("deep_boys.json").exists());
+        let reloaded = CampaignSave::load_from_path(&dir.join("abyssal_crew.json")).unwrap();
+        assert_eq!(reloaded.credits, 777);
+        assert_eq!(reloaded.dives_completed, 4);
 
         let _ = fs::remove_dir_all(dir);
     }

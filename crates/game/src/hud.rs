@@ -32,7 +32,7 @@ use crate::{
     },
     player::PlayerFlashlight,
     relic::{WorldItemEntity, world_item_display_name},
-    save::{CampaignState, SaveSlotBrowser},
+    save::{CampaignState, MAX_SAVE_SLOT_NAME_LEN, SaveSlotBrowser, validate_save_slot_name},
     settings::{AppScreen, FOV_MAX_DEG, FOV_MIN_DEG, SettingsMenuOpen, UserSettings},
     shed::{CrosshairTargetState, ShopOverlayOpen, TargetAccent},
     updater_bridge::{UpdaterCommand, UpdaterState, UpdaterUiStatus},
@@ -68,6 +68,22 @@ struct SaveDropdownState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SaveNamePromptMode {
+    Create,
+    Rename,
+}
+
+#[derive(Resource, Default)]
+struct SaveNamePromptState {
+    open: bool,
+    mode: Option<SaveNamePromptMode>,
+    buffer: String,
+    default_hint: String,
+    target_old_name: String,
+    error_text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AudioDropdownKind {
     Output,
     Input,
@@ -85,6 +101,7 @@ struct AudioDropdownState {
 enum UiPanelKind {
     MainMenu,
     Settings,
+    SaveNameModal,
     UpdatePopup,
     InGameHud,
     CoopMenu,
@@ -136,6 +153,21 @@ struct SaveDropdownPagerRow;
 
 #[derive(Component)]
 struct SaveDropdownPageLabel;
+
+#[derive(Component)]
+struct SaveNameModalTitle;
+
+#[derive(Component)]
+struct SaveNameModalSubtitle;
+
+#[derive(Component)]
+struct SaveNameInputText;
+
+#[derive(Component)]
+struct SaveNameHintText;
+
+#[derive(Component)]
+struct SaveNameConfirmLabel;
 
 #[derive(Component, Clone, Copy)]
 struct SaveTierPip(u8);
@@ -365,7 +397,10 @@ enum UiAction {
     ToggleSaveDropdown,
     SelectSaveRow(usize),
     SaveListPage(i32),
-    NewSaveSlot,
+    OpenNewSavePrompt,
+    OpenRenameSavePrompt,
+    ConfirmSaveNamePrompt,
+    CancelSaveNamePrompt,
     RefreshSaveSlots,
     OpenSettings,
     CloseSettings,
@@ -407,6 +442,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<NameInputFocused>()
             .init_resource::<DiagnosticsDrawerOpen>()
             .init_resource::<SaveDropdownState>()
+            .init_resource::<SaveNamePromptState>()
             .init_resource::<AudioDropdownState>()
             .add_message::<TriggerUiAction>()
             .add_systems(Startup, setup_hud)
@@ -418,6 +454,7 @@ impl Plugin for HudPlugin {
                     update_panel_visibility_system,
                     update_menu_and_shop_system,
                     update_save_dropdown_system,
+                    update_save_name_modal_system,
                     update_ingame_bars_system,
                     update_crosshair_and_target_system,
                     update_hotbar_and_pouch_system,
@@ -1488,7 +1525,8 @@ fn setup_hud(mut commands: Commands) {
                                     ..default()
                                 })
                                 .with_children(|row| {
-                                    spawn_std_btn(row, "+ New Slot", UiAction::NewSaveSlot);
+                                    spawn_std_btn(row, "+ New Save", UiAction::OpenNewSavePrompt);
+                                    spawn_std_btn(row, "Rename", UiAction::OpenRenameSavePrompt);
                                     spawn_std_btn(row, "Refresh", UiAction::RefreshSaveSlots);
                                 });
                             });
@@ -3266,21 +3304,206 @@ fn setup_hud(mut commands: Commands) {
                         });
                 });
         });
+
+    // =========================================================================
+    // 7. MAIN MENU SAVE CREATE / RENAME MODAL (GlobalZIndex(55))
+    // =========================================================================
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                display: Display::None,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.01, 0.02, 0.035, 0.78)),
+            GlobalZIndex(55),
+            Visibility::Hidden,
+            UiPanelKind::SaveNameModal,
+        ))
+        .with_children(|backdrop| {
+            backdrop
+                .spawn((
+                    Node {
+                        width: Val::Px(430.0),
+                        padding: UiRect::all(Val::Px(22.0)),
+                        border: UiRect {
+                            top: Val::Px(3.0),
+                            left: Val::Px(1.5),
+                            right: Val::Px(1.5),
+                            bottom: Val::Px(1.5),
+                        },
+                        border_radius: BorderRadius::all(Val::Px(12.0)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(12.0),
+                        ..default()
+                    },
+                    BackgroundColor(COL_PANEL_BG),
+                    BorderColor {
+                        top: COL_ACCENT_CYAN,
+                        left: COL_BORDER_DIM,
+                        right: COL_BORDER_DIM,
+                        bottom: COL_BORDER_DIM,
+                    },
+                ))
+                .with_children(|modal| {
+                    modal
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: Val::Px(3.0),
+                            ..default()
+                        })
+                        .with_children(|hdr| {
+                            hdr.spawn((
+                                Text::new("New Save"),
+                                TextFont {
+                                    font_size: FontSize::Px(20.0),
+                                    ..default()
+                                },
+                                TextColor(COL_ACCENT_CYAN),
+                                SaveNameModalTitle,
+                            ));
+                            hdr.spawn((
+                                Text::new("Enter a name for your new expedition save"),
+                                TextFont {
+                                    font_size: FontSize::Px(13.0),
+                                    ..default()
+                                },
+                                TextColor(COL_TEXT_MUTED),
+                                SaveNameModalSubtitle,
+                            ));
+                        });
+
+                    modal
+                        .spawn((
+                            Node {
+                                width: Val::Percent(100.0),
+                                padding: UiRect::axes(Val::Px(12.0), Val::Px(10.0)),
+                                border: UiRect::all(Val::Px(1.5)),
+                                border_radius: BorderRadius::all(Val::Px(6.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgba(0.05, 0.08, 0.12, 0.98)),
+                            BorderColor::all(COL_ACCENT_CYAN),
+                        ))
+                        .with_children(|input_box| {
+                            input_box.spawn((
+                                Text::new("_"),
+                                TextFont {
+                                    font_size: FontSize::Px(15.0),
+                                    ..default()
+                                },
+                                TextColor(COL_TEXT_BRIGHT),
+                                SaveNameInputText,
+                            ));
+                        });
+
+                    modal.spawn((
+                        Text::new("Enter to confirm • Esc to cancel • Del to clear"),
+                        TextFont {
+                            font_size: FontSize::Px(12.0),
+                            ..default()
+                        },
+                        TextColor(COL_TEXT_MUTED),
+                        SaveNameHintText,
+                    ));
+
+                    modal
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            justify_content: JustifyContent::SpaceBetween,
+                            width: Val::Percent(100.0),
+                            margin: UiRect::top(Val::Px(4.0)),
+                            ..default()
+                        })
+                        .with_children(|btns| {
+                            spawn_std_btn(btns, "Cancel", UiAction::CancelSaveNamePrompt);
+                            let confirm_txt = spawn_accent_btn(
+                                btns,
+                                "Create Save",
+                                UiAction::ConfirmSaveNamePrompt,
+                            );
+                            btns.commands()
+                                .entity(confirm_txt)
+                                .insert(SaveNameConfirmLabel);
+                        });
+                });
+        });
 }
 
 // =============================================================================
 // INPUT & ACTION HANDLERS
 // =============================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn handle_name_typing_system(
     screen: Res<AppScreen>,
     settings_open: Res<SettingsMenuOpen>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut focused: ResMut<NameInputFocused>,
+    mut save_prompt: ResMut<SaveNamePromptState>,
     mut key_events: MessageReader<KeyboardInput>,
+    mut ui_writer: MessageWriter<TriggerUiAction>,
     mut user_settings: ResMut<UserSettings>,
     mut coop: ResMut<CoopState>,
 ) {
-    if *screen != AppScreen::MainMenu || settings_open.0 || !focused.0 {
+    if *screen != AppScreen::MainMenu || settings_open.0 {
+        key_events.clear();
+        return;
+    }
+
+    if save_prompt.open {
+        let ctrl_held =
+            keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+        for ev in key_events.read() {
+            if ev.state != ButtonState::Pressed {
+                continue;
+            }
+            match &ev.logical_key {
+                Key::Backspace => {
+                    if ctrl_held {
+                        save_prompt.buffer.clear();
+                    } else {
+                        save_prompt.buffer.pop();
+                    }
+                    save_prompt.error_text.clear();
+                }
+                Key::Delete => {
+                    save_prompt.buffer.clear();
+                    save_prompt.error_text.clear();
+                }
+                Key::Enter => {
+                    ui_writer.write(TriggerUiAction(UiAction::ConfirmSaveNamePrompt));
+                }
+                Key::Escape => {
+                    ui_writer.write(TriggerUiAction(UiAction::CancelSaveNamePrompt));
+                }
+                Key::Space => {
+                    if save_prompt.buffer.len() < MAX_SAVE_SLOT_NAME_LEN {
+                        save_prompt.buffer.push(' ');
+                        save_prompt.error_text.clear();
+                    }
+                }
+                Key::Character(s) => {
+                    for ch in s.chars() {
+                        if save_prompt.buffer.len() < MAX_SAVE_SLOT_NAME_LEN
+                            && (ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == ' ')
+                        {
+                            save_prompt.buffer.push(ch);
+                            save_prompt.error_text.clear();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        return;
+    }
+
+    if !focused.0 {
         key_events.clear();
         return;
     }
@@ -3397,6 +3620,8 @@ struct ActionResources<'w> {
     device_catalog: ResMut<'w, AudioDeviceCatalog>,
     save_browser: ResMut<'w, SaveSlotBrowser>,
     save_dropdown: ResMut<'w, SaveDropdownState>,
+    save_prompt: ResMut<'w, SaveNamePromptState>,
+    campaign: ResMut<'w, CampaignState>,
     audio_dropdown: ResMut<'w, AudioDropdownState>,
     inv: Res<'w, PlayerInventory>,
 }
@@ -3425,6 +3650,8 @@ fn handle_ui_actions_system(
     let device_catalog = &mut *res.device_catalog;
     let save_browser = &mut *res.save_browser;
     let save_dropdown = &mut *res.save_dropdown;
+    let save_prompt = &mut *res.save_prompt;
+    let campaign = &mut *res.campaign;
     let audio_dropdown = &mut *res.audio_dropdown;
     let inv = &*res.inv;
 
@@ -3472,27 +3699,88 @@ fn handle_ui_actions_system(
                     save_browser.selected_slot_name()
                 );
             }
-            UiAction::NewSaveSlot => match save_browser.create_new_slot() {
-                Ok(name) => {
-                    save_dropdown.page = save_browser.selected_idx / SAVE_DROPDOWN_ROWS;
-                    save_dropdown.open = false;
-                    coop.status_text = format!("Created new save slot '{name}'");
+            UiAction::OpenNewSavePrompt => {
+                save_browser.refresh();
+                save_dropdown.open = false;
+                save_prompt.open = true;
+                save_prompt.mode = Some(SaveNamePromptMode::Create);
+                save_prompt.buffer.clear();
+                save_prompt.default_hint = save_browser.next_default_new_slot_name();
+                save_prompt.target_old_name.clear();
+                save_prompt.error_text.clear();
+            }
+            UiAction::OpenRenameSavePrompt => {
+                save_browser.refresh();
+                save_dropdown.open = false;
+                let current = save_browser.selected_slot_name().to_string();
+                save_prompt.open = true;
+                save_prompt.mode = Some(SaveNamePromptMode::Rename);
+                save_prompt.buffer = current.clone();
+                save_prompt.default_hint.clear();
+                save_prompt.target_old_name = current;
+                save_prompt.error_text.clear();
+            }
+            UiAction::CancelSaveNamePrompt => {
+                save_prompt.open = false;
+                save_prompt.error_text.clear();
+            }
+            UiAction::ConfirmSaveNamePrompt => match save_prompt.mode {
+                Some(SaveNamePromptMode::Create) => {
+                    match save_browser.create_named_slot(&save_prompt.buffer) {
+                        Ok(name) => {
+                            save_prompt.open = false;
+                            save_prompt.error_text.clear();
+                            save_dropdown.page = save_browser.selected_idx / SAVE_DROPDOWN_ROWS;
+                            save_dropdown.open = false;
+                            coop.status_text = format!("Created new save '{name}'");
+                        }
+                        Err(e) => {
+                            save_prompt.error_text = e;
+                        }
+                    }
                 }
-                Err(e) => coop.status_text = format!("Save creation error: {e}"),
+                Some(SaveNamePromptMode::Rename) => {
+                    let old_name = save_prompt.target_old_name.clone();
+                    match save_browser.rename_selected_slot(&save_prompt.buffer) {
+                        Ok(new_name) => {
+                            if campaign.slot_name == old_name {
+                                campaign.slot_name = new_name.clone();
+                            }
+                            save_prompt.open = false;
+                            save_prompt.error_text.clear();
+                            save_dropdown.page = save_browser.selected_idx / SAVE_DROPDOWN_ROWS;
+                            save_dropdown.open = false;
+                            coop.status_text = if old_name == new_name {
+                                format!("Save slot '{}' unchanged", new_name)
+                            } else {
+                                format!("Renamed save '{old_name}' → '{new_name}'")
+                            };
+                        }
+                        Err(e) => {
+                            save_prompt.error_text = e;
+                        }
+                    }
+                }
+                None => {
+                    save_prompt.open = false;
+                }
             },
             UiAction::PlaySolo => {
+                save_prompt.open = false;
                 user_settings.sanitize();
                 coop.local_name = user_settings.player_name.clone();
                 coop.visor_idx = user_settings.visor_idx % VISOR_PALETTE.len();
                 lifecycle_writer.write(SessionLifecycleEvent::StartSolo);
             }
             UiAction::HostLobby => {
+                save_prompt.open = false;
                 user_settings.sanitize();
                 coop.local_name = user_settings.player_name.clone();
                 coop.visor_idx = user_settings.visor_idx % VISOR_PALETTE.len();
                 lifecycle_writer.write(SessionLifecycleEvent::StartHost);
             }
             UiAction::PasteAndJoin => {
+                save_prompt.open = false;
                 user_settings.sanitize();
                 coop.local_name = user_settings.player_name.clone();
                 coop.visor_idx = user_settings.visor_idx % VISOR_PALETTE.len();
@@ -3511,6 +3799,7 @@ fn handle_ui_actions_system(
                 coop.status_text = "Cancelled — Ready".into();
             }
             UiAction::OpenSettings => {
+                save_prompt.open = false;
                 device_catalog.refresh();
                 settings_open.0 = true;
             }
@@ -3645,6 +3934,7 @@ fn update_panel_visibility_system(
     menu_open: Res<CoopMenuOpen>,
     shop_open: Res<ShopOverlayOpen>,
     settings_open: Res<SettingsMenuOpen>,
+    save_prompt: Res<SaveNamePromptState>,
     diag_open: Res<DiagnosticsDrawerOpen>,
     updater: Res<UpdaterState>,
     inv: Res<PlayerInventory>,
@@ -3659,6 +3949,7 @@ fn update_panel_visibility_system(
         let show = match kind {
             UiPanelKind::MainMenu => !in_game && !settings_open.0,
             UiPanelKind::Settings => settings_open.0,
+            UiPanelKind::SaveNameModal => !in_game && !settings_open.0 && save_prompt.open,
             UiPanelKind::UpdatePopup => !in_game && updater.popup_open,
             UiPanelKind::InGameHud => in_game,
             UiPanelKind::CoopMenu => in_game && menu_open.0 && !settings_open.0,
@@ -3678,6 +3969,7 @@ fn update_panel_visibility_system(
             kind,
             UiPanelKind::MainMenu
                 | UiPanelKind::Settings
+                | UiPanelKind::SaveNameModal
                 | UiPanelKind::UpdatePopup
                 | UiPanelKind::CoopMenu
                 | UiPanelKind::ShopOverlay
@@ -3944,6 +4236,76 @@ fn update_save_dropdown_system(
     }
     if let Ok(mut lbl) = texts.p3().single_mut() {
         lbl.0 = format!("Page {} / {}", dropdown.page + 1, total_pages);
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn update_save_name_modal_system(
+    prompt: Res<SaveNamePromptState>,
+    mut texts: ParamSet<(
+        Query<&mut Text, With<SaveNameModalTitle>>,
+        Query<&mut Text, With<SaveNameModalSubtitle>>,
+        Query<(&mut Text, &mut TextColor), With<SaveNameInputText>>,
+        Query<(&mut Text, &mut TextColor), With<SaveNameHintText>>,
+        Query<&mut Text, With<SaveNameConfirmLabel>>,
+    )>,
+) {
+    if !prompt.open {
+        return;
+    }
+
+    let is_rename = prompt.mode == Some(SaveNamePromptMode::Rename);
+
+    if let Ok(mut t) = texts.p0().single_mut() {
+        t.0 = if is_rename {
+            "Rename Save".to_string()
+        } else {
+            "New Save".to_string()
+        };
+    }
+
+    if let Ok(mut t) = texts.p1().single_mut() {
+        t.0 = if is_rename {
+            format!("Rename '{}' to a new name:", prompt.target_old_name)
+        } else {
+            "Choose a name for your new expedition save:".to_string()
+        };
+    }
+
+    if let Ok((mut t, mut col)) = texts.p2().single_mut() {
+        if prompt.buffer.is_empty() && !is_rename {
+            t.0 = format!("Type name... (Enter for '{}')", prompt.default_hint);
+            *col = TextColor(COL_TEXT_MUTED);
+        } else {
+            t.0 = format!("{}_", prompt.buffer);
+            *col = TextColor(COL_TEXT_BRIGHT);
+        }
+    }
+
+    if let Ok((mut t, mut col)) = texts.p3().single_mut() {
+        if !prompt.error_text.is_empty() {
+            t.0 = prompt.error_text.clone();
+            *col = TextColor(COL_ACCENT_RED);
+        } else {
+            let preview = if prompt.buffer.trim().is_empty() && !is_rename {
+                Some(prompt.default_hint.clone())
+            } else {
+                validate_save_slot_name(&prompt.buffer).ok()
+            };
+            t.0 = match preview {
+                Some(stem) => format!("File: saves/{stem}.json  •  Enter confirm  •  Del clear"),
+                None => "Letters, numbers, '-' or '_'  •  Esc to cancel".to_string(),
+            };
+            *col = TextColor(COL_TEXT_MUTED);
+        }
+    }
+
+    if let Ok(mut t) = texts.p4().single_mut() {
+        t.0 = if is_rename {
+            "Rename Save".to_string()
+        } else {
+            "Create Save".to_string()
+        };
     }
 }
 
