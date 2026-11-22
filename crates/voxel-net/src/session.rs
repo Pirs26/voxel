@@ -99,6 +99,8 @@ pub enum NetEvent {
     CreditsSync {
         credits: i32,
         unlocked_depth_tier: u8,
+        winch_overdrive: bool,
+        fast_charger: bool,
     },
     PlayerProfileSync {
         player_id: PlayerId,
@@ -461,6 +463,7 @@ impl HostState {
             ReliableMessage::CreditsSync {
                 credits,
                 unlocked_depth_tier,
+                ..
             } => {
                 self.credits = *credits;
                 self.unlocked_depth_tier = *unlocked_depth_tier;
@@ -1292,11 +1295,15 @@ fn emit_reliable_event(events: &EventQueue, msg: ReliableMessage) {
         ReliableMessage::CreditsSync {
             credits,
             unlocked_depth_tier,
+            winch_overdrive,
+            fast_charger,
         } => push_event(
             events,
             NetEvent::CreditsSync {
                 credits,
                 unlocked_depth_tier,
+                winch_overdrive,
+                fast_charger,
             },
         ),
         ReliableMessage::PlayerProfileSync {

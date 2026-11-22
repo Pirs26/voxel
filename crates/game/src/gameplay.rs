@@ -448,6 +448,8 @@ fn handle_session_lifecycle_system(
                         coop.send_credits_sync(
                             campaign.save.credits,
                             campaign.save.unlocked_depth_tier,
+                            campaign.save.winch_overdrive,
+                            campaign.save.fast_charger,
                         );
                         coop.send_elevator_sync(elevator);
                         for st in spawned_states {
@@ -597,6 +599,8 @@ fn handle_shop_actions_system(
                         coop.send_credits_sync(
                             campaign.save.credits,
                             campaign.save.unlocked_depth_tier,
+                            campaign.save.winch_overdrive,
+                            campaign.save.fast_charger,
                         );
                         sound_writer.write(PlaySpatialSoundEvent {
                             pos_m: player_pos,
@@ -2193,7 +2197,12 @@ fn elevator_runtime_system(
         });
         let _ = campaign.save_now();
 
-        coop.send_credits_sync(campaign.save.credits, campaign.save.unlocked_depth_tier);
+        coop.send_credits_sync(
+            campaign.save.credits,
+            campaign.save.unlocked_depth_tier,
+            campaign.save.winch_overdrive,
+            campaign.save.fast_charger,
+        );
         coop.send_elevator_sync(elevator);
 
         returned_writer.write(ElevatorReturnedShedEvent {

@@ -159,6 +159,8 @@ pub enum ReliableMessage {
     CreditsSync {
         credits: i32,
         unlocked_depth_tier: u8,
+        winch_overdrive: bool,
+        fast_charger: bool,
     },
     PlayerProfileSync {
         player_id: PlayerId,

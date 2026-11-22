@@ -177,6 +177,8 @@ mod tests {
             ReliableMessage::CreditsSync {
                 credits: 1250,
                 unlocked_depth_tier: 3,
+                winch_overdrive: true,
+                fast_charger: true,
             },
             ReliableMessage::PlayerProfileSync {
                 player_id: 0,
@@ -308,6 +310,8 @@ mod tests {
         host.send_reliable(ReliableMessage::CreditsSync {
             credits: 350,
             unlocked_depth_tier: 2,
+            winch_overdrive: true,
+            fast_charger: false,
         });
         host.send_reliable(ReliableMessage::WorldItemSpawn(initial_item.clone()));
         host.send_reliable(ReliableMessage::ElevatorStateSync {

@@ -262,11 +262,19 @@ impl CoopState {
         }
     }
 
-    pub fn send_credits_sync(&self, credits: i32, unlocked_depth_tier: u8) {
+    pub fn send_credits_sync(
+        &self,
+        credits: i32,
+        unlocked_depth_tier: u8,
+        winch_overdrive: bool,
+        fast_charger: bool,
+    ) {
         if let Some(ref s) = self.session {
             s.send_reliable(ReliableMessage::CreditsSync {
                 credits,
                 unlocked_depth_tier,
+                winch_overdrive,
+                fast_charger,
             });
         }
     }
@@ -1195,6 +1203,12 @@ fn poll_network_events_system(
                         info.visor_rgb,
                         inv_json,
                     );
+                    coop.send_credits_sync(
+                        campaign.save.credits,
+                        campaign.save.unlocked_depth_tier,
+                        campaign.save.winch_overdrive,
+                        campaign.save.fast_charger,
+                    );
                     coop.send_parkour_leaderboard_sync(&campaign.save.parkour_leaderboard);
                 }
             }
@@ -1426,9 +1440,13 @@ fn poll_network_events_system(
             NetEvent::CreditsSync {
                 credits,
                 unlocked_depth_tier,
+                winch_overdrive,
+                fast_charger,
             } => {
                 campaign.save.credits = credits;
                 campaign.save.unlocked_depth_tier = unlocked_depth_tier.max(1);
+                campaign.save.winch_overdrive = winch_overdrive;
+                campaign.save.fast_charger = fast_charger;
             }
             NetEvent::DecoyTriggered { pos_m } => {
                 sound_writer.write(PlaySpatialSoundEvent {
