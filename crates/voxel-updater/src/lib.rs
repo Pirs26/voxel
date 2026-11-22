@@ -156,6 +156,7 @@ pub fn is_dev_build_path_only(exe_path: &Path) -> bool {
 
     exe_path
         .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
         .is_some_and(|parent| parent.join("Cargo.toml").exists())
 }
 
