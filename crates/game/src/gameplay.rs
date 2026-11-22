@@ -730,6 +730,12 @@ fn inventory_input_system(
             inv.scroll_active_slot(scroll_delta);
         }
         if keys.just_pressed(KeyCode::KeyR) {
+            if inv.passive.headlamp && !inv.has_flashlight_in_belt() {
+                toast.show(
+                    "Headlamp has a sealed cell — recharges at Base Shed Charger Bench!",
+                    2.8,
+                );
+            }
             inv.open_battery_selector();
             return;
         }

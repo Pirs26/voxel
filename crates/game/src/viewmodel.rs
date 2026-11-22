@@ -1086,6 +1086,8 @@ mod tests {
                     Transform::default(),
                     PlayerFlashlight {
                         on: true,
+                        headlamp_on: false,
+                        active_beam: true,
                         battery: 1.0,
                     },
                 ));

@@ -16,6 +16,17 @@ pub const MAX_DECOYS_STACK: u8 = 2;
 pub const STEALTH_BOOTS_NOISE_MULT: f32 = 0.55;
 pub const FULL_BELT_NOISE_MULT: f32 = 1.12;
 
+/// Sealed internal battery duration (seconds) for Headlamp Mk I.
+pub const HEADLAMP_MK1_DURATION_S: f32 = 120.0;
+/// Sealed internal battery duration (seconds) for Headlamp Cell Mk II upgrade.
+pub const HEADLAMP_MK2_DURATION_S: f32 = 240.0;
+/// Maximum Headlamp internal cell upgrade tier.
+pub const MAX_HEADLAMP_TIER: u8 = 2;
+
+fn default_headlamp_charge() -> f32 {
+    1.0
+}
+
 /// A physical rechargeable battery cell tracked individually (Subnautica-style).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BatteryCellItem {
@@ -136,6 +147,12 @@ pub struct PlayerInventory {
     pub battery_pouch: Vec<BatteryCellItem>,
     pub loaded_battery: Option<BatteryCellItem>,
     pub passive: PassiveGear,
+    /// Sealed non-swappable Headlamp internal battery (`0.0..=1.0`), recharged only at Shed Charger.
+    #[serde(default = "default_headlamp_charge")]
+    pub headlamp_charge: f32,
+    /// Headlamp capacity tier (`0` = not owned, `1` = Mk I 120s, `2` = Mk II 240s).
+    #[serde(default)]
+    pub headlamp_tier: u8,
     #[serde(skip)]
     pub carry_state: CarryHandState,
     #[serde(skip)]
@@ -162,6 +179,8 @@ impl PlayerInventory {
             battery_pouch: vec![BatteryCellItem::full(), BatteryCellItem::full()],
             loaded_battery: Some(BatteryCellItem::full()),
             passive: PassiveGear::default(),
+            headlamp_charge: 1.0,
+            headlamp_tier: 0,
             carry_state: CarryHandState::Free,
             battery_selector: BatterySelectorState::default(),
         }
@@ -177,6 +196,11 @@ impl PlayerInventory {
             self.belt.truncate(self.belt_capacity);
         }
         self.active_slot = self.active_slot.min(self.belt_capacity - 1);
+        self.headlamp_charge = self.headlamp_charge.clamp(0.0, 1.0);
+        if self.passive.headlamp && self.headlamp_tier == 0 {
+            self.headlamp_tier = 1;
+        }
+        self.headlamp_tier = self.headlamp_tier.min(MAX_HEADLAMP_TIER);
         if self.battery_pouch.is_empty() {
             self.battery_selector.selected_idx = 0;
         } else {
@@ -232,12 +256,37 @@ impl PlayerInventory {
     /// Returns `true` if the player can operate their personal light:
     /// - Always `true` with a passive Headlamp (even during 2-handed carry).
     /// - Otherwise requires free hands and a `Flashlight` in the belt.
+    #[allow(dead_code)]
     pub fn can_use_light(&self) -> bool {
         if self.passive.headlamp {
             true
         } else {
             !self.is_hands_occupied() && self.has_flashlight_in_belt()
         }
+    }
+
+    /// Returns the total runtime duration (seconds) of the sealed Headlamp internal cell.
+    pub fn headlamp_duration_s(&self) -> f32 {
+        if self.headlamp_tier >= 2 {
+            HEADLAMP_MK2_DURATION_S
+        } else {
+            HEADLAMP_MK1_DURATION_S
+        }
+    }
+
+    /// Returns the sealed Headlamp internal battery percentage (`0..=100`).
+    pub fn headlamp_charge_pct(&self) -> u8 {
+        (self.headlamp_charge.clamp(0.0, 1.0) * 100.0).round() as u8
+    }
+
+    /// Drains the sealed Headlamp internal battery over `dt_s` seconds (never touches pouch cells).
+    pub fn drain_headlamp(&mut self, dt_s: f32) -> f32 {
+        if dt_s <= 0.0 || !self.passive.headlamp {
+            return self.headlamp_charge.clamp(0.0, 1.0);
+        }
+        let drain = dt_s / self.headlamp_duration_s().max(1.0);
+        self.headlamp_charge = (self.headlamp_charge - drain).clamp(0.0, 1.0);
+        self.headlamp_charge
     }
 
     /// Returns the normalized charge `[0.0, 1.0]` of the loaded battery cell (`0.0` if none).
@@ -602,8 +651,8 @@ impl PlayerInventory {
         total
     }
 
-    /// Recharges both the loaded battery and all pouch batteries by `amount`.
-    /// Returns `true` if at least one cell gained charge.
+    /// Recharges the loaded battery, all pouch batteries, and (if owned) the sealed Headlamp cell
+    /// by `amount`. Returns `true` if at least one battery gained charge.
     pub fn recharge_all_batteries(&mut self, amount: f32) -> bool {
         let mut any_recharged = false;
         if let Some(ref mut cell) = self.loaded_battery {
@@ -611,6 +660,11 @@ impl PlayerInventory {
         }
         for cell in &mut self.battery_pouch {
             any_recharged |= cell.recharge(amount);
+        }
+        if self.passive.headlamp && amount > 0.0 && self.headlamp_charge < 1.0 {
+            let prev = self.headlamp_charge;
+            self.headlamp_charge = (self.headlamp_charge + amount).clamp(0.0, 1.0);
+            any_recharged |= self.headlamp_charge > prev + 1e-6;
         }
         any_recharged
     }
@@ -683,6 +737,9 @@ impl PlayerInventory {
         }
 
         self.loaded_battery = Some(BatteryCellItem::full());
+        if self.passive.headlamp {
+            self.headlamp_charge = 1.0;
+        }
         self.battery_pouch.clear();
         if self.battery_pouch_capacity > 0 {
             self.battery_pouch.push(BatteryCellItem::full());
@@ -792,6 +849,7 @@ pub enum ShopCatalogItem {
     NoiseDecoys,
     AidKit,
     Headlamp,
+    HeadlampCellMk2,
     StealthBoots,
     ToolBeltUpgrade,
     BatteryPouchUpgrade,
@@ -807,7 +865,7 @@ pub struct ShopItemInfo {
 }
 
 /// Balanced Base Shed shop catalog.
-pub const SHOP_CATALOG: [ShopItemInfo; 9] = [
+pub const SHOP_CATALOG: [ShopItemInfo; 10] = [
     ShopItemInfo {
         item: ShopCatalogItem::BatteryCell,
         name: "Battery Cell",
@@ -840,9 +898,15 @@ pub const SHOP_CATALOG: [ShopItemInfo; 9] = [
     },
     ShopItemInfo {
         item: ShopCatalogItem::Headlamp,
-        name: "Headlamp",
+        name: "Headlamp Mk I",
         cost: 180,
-        description: "Passive headgear light — frees a belt slot & works during 2H carry.",
+        description: "Hands-free 120s floodlight [F]. Sealed cell recharges at Shed Charger.",
+    },
+    ShopItemInfo {
+        item: ShopCatalogItem::HeadlampCellMk2,
+        name: "Headlamp Cell Mk II",
+        cost: 140,
+        description: "Upgrades sealed Headlamp internal battery to 240s (2x duration).",
     },
     ShopItemInfo {
         item: ShopCatalogItem::StealthBoots,
@@ -884,7 +948,13 @@ pub fn purchase_shop_item(
     // Check permanent upgrade caps/ownership before checking credits for clear feedback.
     match item {
         ShopCatalogItem::Headlamp if inv.passive.headlamp => {
-            return Err("Headlamp already owned.");
+            return Err("Headlamp Mk I already owned.");
+        }
+        ShopCatalogItem::HeadlampCellMk2 if !inv.passive.headlamp => {
+            return Err("Purchase Headlamp Mk I first.");
+        }
+        ShopCatalogItem::HeadlampCellMk2 if inv.headlamp_tier >= MAX_HEADLAMP_TIER => {
+            return Err("Headlamp Cell Mk II already installed.");
         }
         ShopCatalogItem::StealthBoots if inv.passive.stealth_boots => {
             return Err("Stealth Boots already owned.");
@@ -936,7 +1006,14 @@ pub fn purchase_shop_item(
         }
         ShopCatalogItem::Headlamp => {
             inv.passive.headlamp = true;
-            "Equipped Headlamp! Belt light slot is now optional."
+            inv.headlamp_tier = inv.headlamp_tier.max(1);
+            inv.headlamp_charge = 1.0;
+            "Equipped Headlamp Mk I [F] (120s sealed cell, recharges at Shed Charger)!"
+        }
+        ShopCatalogItem::HeadlampCellMk2 => {
+            inv.headlamp_tier = 2;
+            inv.headlamp_charge = 1.0;
+            "Installed Headlamp Cell Mk II (240s sealed runtime)!"
         }
         ShopCatalogItem::StealthBoots => {
             inv.passive.stealth_boots = true;
@@ -1171,8 +1248,52 @@ mod tests {
         // Buy StealthBoots (160cr) -> 5cr left; cannot afford FlarePack (40cr).
         assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::StealthBoots).is_ok());
         assert_eq!(credits, 5);
-        assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::FlarePack).is_err());
+        assert!(
+            purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::FlarePack).is_err()
+        );
         assert_eq!(credits, 5);
+    }
+
+    #[test]
+    fn headlamp_sealed_battery_upgrade_and_shed_recharge() {
+        let mut inv = PlayerInventory::starter();
+        let mut credits: i32 = 400;
+
+        // Mk II upgrade requires Headlamp Mk I first
+        assert!(
+            purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::HeadlampCellMk2).is_err()
+        );
+        assert_eq!(credits, 400);
+
+        // Purchase Headlamp Mk I (180 cr, 120s runtime)
+        assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::Headlamp).is_ok());
+        assert_eq!(credits, 220);
+        assert!(inv.passive.headlamp);
+        assert_eq!(inv.headlamp_tier, 1);
+        assert!((inv.headlamp_duration_s() - HEADLAMP_MK1_DURATION_S).abs() < 1e-4);
+
+        // Draining Headlamp for 60s halves sealed cell WITHOUT draining loaded flashlight battery
+        let rem = inv.drain_headlamp(60.0);
+        assert!((rem - 0.5).abs() < 1e-4);
+        assert!((inv.loaded_battery_charge() - 1.0).abs() < 1e-4);
+
+        // Shed Charger Bench recharges sealed Headlamp cell alongside pouch cells
+        assert!(inv.recharge_all_batteries(1.0));
+        assert_eq!(inv.headlamp_charge_pct(), 100);
+
+        // Purchase Headlamp Cell Mk II (140 cr, 240s runtime)
+        assert!(
+            purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::HeadlampCellMk2).is_ok()
+        );
+        assert_eq!(credits, 80);
+        assert_eq!(inv.headlamp_tier, 2);
+        assert!((inv.headlamp_duration_s() - HEADLAMP_MK2_DURATION_S).abs() < 1e-4);
+        assert!((inv.drain_headlamp(60.0) - 0.75).abs() < 1e-4);
+
+        // Duplicate Mk II purchase rejected
+        assert!(
+            purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::HeadlampCellMk2).is_err()
+        );
     }
 
     #[test]

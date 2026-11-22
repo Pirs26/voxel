@@ -37,7 +37,12 @@ pub struct PlayerController {
 
 #[derive(Component)]
 pub struct PlayerFlashlight {
+    /// Handheld flashlight switch (toggled via `[RMB]` while holding the flashlight).
     pub on: bool,
+    /// Wearable headlamp switch (toggled via `[F]` once purchased).
+    pub headlamp_on: bool,
+    /// Whether either light is currently shining (drives HUD lamp dot & remote pose sync).
+    pub active_beam: bool,
     pub battery: f32, // 0.0..=1.0 mirrored from PlayerInventory::loaded_battery
 }
 
@@ -105,6 +110,8 @@ fn spawn_player(
                 Transform::from_xyz(0.14, -0.10, -0.15),
                 PlayerFlashlight {
                     on: true,
+                    headlamp_on: false,
+                    active_beam: true,
                     battery: 1.0,
                 },
             ));
@@ -490,35 +497,85 @@ fn flashlight_system(
     let cursor_locked = cursor_q
         .single()
         .is_ok_and(|c| c.grab_mode != CursorGrabMode::None);
-    let rmb_held_flashlight = cursor_locked
-        && mouse.just_pressed(MouseButton::Right)
-        && !inv.is_hands_occupied()
+    let holding_flashlight = !inv.is_hands_occupied()
         && matches!(inv.active_item(), Some(BeltItem::Flashlight));
 
-    if !menu_open.0
-        && !shop_open.0
-        && !settings_open.0
-        && health.is_alive()
-        && (rmb_held_flashlight || keys.just_pressed(KeyCode::KeyF))
-    {
-        fl.on = !fl.on;
+    if !menu_open.0 && !shop_open.0 && !settings_open.0 && health.is_alive() {
+        // Handheld Flashlight toggles strictly via `[RMB]` while held in hand
+        if cursor_locked && mouse.just_pressed(MouseButton::Right) && holding_flashlight {
+            fl.on = !fl.on;
+        }
+        // Wearable Headlamp toggles strictly via `[F]` once purchased
+        if keys.just_pressed(KeyCode::KeyF) && inv.passive.headlamp {
+            fl.headlamp_on = !fl.headlamp_on;
+        }
     }
 
-    let can_light = health.is_alive() && inv.can_use_light();
-    let charge = inv.loaded_battery_charge();
-    fl.battery = charge;
+    let handheld_shining = fl.on && holding_flashlight && inv.loaded_battery_charge() > 0.0;
+    let headlamp_shining = fl.headlamp_on && inv.passive.headlamp && inv.headlamp_charge > 0.0;
 
-    if fl.on && can_light && charge > 0.0 {
-        // ~4 minutes per standard battery cell (scaled by cell capacity_scale)
-        let remaining = inv.drain_loaded_battery(dt, 240.0);
-        fl.battery = remaining;
-        let flicker = if remaining < 0.12 {
+    let mut beam_level = 0.0f32;
+    let mut active_handheld = false;
+    let mut active_headlamp = false;
+
+    if health.is_alive() {
+        if handheld_shining {
+            // ~4 minutes per swappable standard battery cell (scaled by cell capacity_scale)
+            let rem = inv.drain_loaded_battery(dt, 240.0);
+            if rem > 0.0 {
+                active_handheld = true;
+                beam_level = beam_level.max(rem);
+            }
+        }
+        if headlamp_shining {
+            // Sealed internal Headlamp battery (120s Mk I / 240s Mk II), Shed Charger only!
+            let rem = inv.drain_headlamp(dt);
+            if rem > 0.0 {
+                active_headlamp = true;
+                beam_level = beam_level.max(rem);
+            }
+        }
+    }
+
+    fl.battery = inv.loaded_battery_charge();
+    fl.active_beam = active_handheld || active_headlamp;
+
+    if fl.active_beam {
+        let flicker = if beam_level < 0.12 {
             let t = time.elapsed_secs() * 23.0;
             if t.sin() > -0.35 { 0.6 } else { 0.08 }
         } else {
             1.0
         };
-        spot.intensity = 420_000.0 * flicker;
+        match (active_handheld, active_headlamp) {
+            // Handheld Flashlight only: tight, punchy long-range scouting spot (~44m)
+            (true, false) => {
+                spot.color = Color::srgb(1.0, 0.96, 0.88);
+                spot.range = 44.0;
+                spot.inner_angle = 0.20;
+                spot.outer_angle = 0.46;
+                spot.intensity = 440_000.0 * flicker;
+            }
+            // Wearable Headlamp only: wide, softer short-range work flood (~20m)
+            (false, true) => {
+                spot.color = Color::srgb(1.0, 0.90, 0.72);
+                spot.range = 20.0;
+                spot.inner_angle = 0.48;
+                spot.outer_angle = 0.96;
+                spot.intensity = 220_000.0 * flicker;
+            }
+            // Both active: long-range punch + wide peripheral fill
+            (true, true) => {
+                spot.color = Color::srgb(1.0, 0.94, 0.82);
+                spot.range = 44.0;
+                spot.inner_angle = 0.28;
+                spot.outer_angle = 0.78;
+                spot.intensity = 480_000.0 * flicker;
+            }
+            (false, false) => {
+                spot.intensity = 0.0;
+            }
+        }
     } else {
         spot.intensity = 0.0;
     }
