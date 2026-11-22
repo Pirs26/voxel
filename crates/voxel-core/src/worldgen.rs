@@ -273,66 +273,23 @@ fn carve_tunnel_maze(
             let ox = gx as i32 - 2;
             let oz = gz as i32 - 2;
             let salt = (gx as u64 + 1) * 31 + (gz as u64 + 1) * 131;
+            let is_corner = (gx == 0 || gx == 4) && (gz == 0 || gz == 4);
+            let jitter_bound = if tier >= 3 && is_corner { 1 } else { 2 };
             let (jx, jz) = if (gx == 2 && gz == 2) || (gx == 3 && gz == 2) {
                 // Keep shaft cell & immediate +X vestibule entrance aligned
                 (0, 0)
             } else {
                 (
-                    deterministic_range(cave_seed, salt, -2, 2),
-                    deterministic_range(cave_seed, salt + 7, -2, 2),
+                    deterministic_range(cave_seed, salt, -jitter_bound, jitter_bound),
+                    deterministic_range(cave_seed, salt + 7, -jitter_bound, jitter_bound),
                 )
             };
-            *slot = IVec3::new(cx + ox * STEP + jx, cave_floor_y, cz + oz * STEP + jz);
+            let node_y = compute_node_floor_y(cave_seed, tier, gx, gz, cave_floor_y);
+            *slot = IVec3::new(cx + ox * STEP + jx, node_y, cz + oz * STEP + jz);
         }
     }
 
-    // 1. Compact shaft landing vestibule directly outside +X shaft opening (`dx = 4..=8`)
-    let vestibule = IVec3::new(cx + 6, cave_floor_y, cz);
-    carve_junction_pocket(world, vestibule, 2, 4, VoxelId::CaveDirt, shed_floor_y);
-    carve_maze_corridor(
-        world,
-        IVec3::new(cx + 4, cave_floor_y, cz),
-        nodes[2][3],
-        cave_floor_y,
-        shed_floor_y,
-    );
-
-    // 2. Carve small organic tunnel junctions at every non-shaft grid cell
-    for (gz, row) in nodes.iter().enumerate() {
-        for (gx, &node) in row.iter().enumerate() {
-            if gx == 2 && gz == 2 {
-                continue;
-            }
-            let is_corner = (gx == 0 || gx == 4) && (gz == 0 || gz == 4);
-            let radius = if is_corner { 3 } else { 2 };
-            let height = if is_corner { 5 } else { 4 };
-            let floor_mat = if (gx + gz) % 2 == 0 {
-                VoxelId::CaveStone
-            } else {
-                VoxelId::CaveDirt
-            };
-            carve_junction_pocket(world, node, radius, height, floor_mat, shed_floor_y);
-        }
-    }
-
-    // Modest resonant echo chamber at east-mid node (4, 2) so acoustic cavern reverb still shines
-    // without turning the level into an open arena.
-    let cavern_center = IVec3::new(nodes[2][4].x, cave_floor_y + 4, nodes[2][4].z);
-    carve_ellipsoid(
-        world,
-        cavern_center,
-        Vec3::new(5.8, 5.2 + tier as f32 * 0.5, 5.8),
-        shed_floor_y,
-    );
-    flatten_floor(
-        world,
-        IVec3::new(cavern_center.x, cave_floor_y, cavern_center.z),
-        5,
-        VoxelId::CaveDirt,
-        shed_floor_y,
-    );
-
-    // 3. Build a deterministic randomized DFS spanning tree starting at entry node (3, 2)
+    // 1. Build a deterministic randomized DFS spanning tree starting at entry node (3, 2)
     //    so EVERY maze cell is guaranteed reachable through winding tunnels!
     let mut visited = [[false; GRID]; GRID];
     visited[2][2] = true; // shaft cell is not a walkable maze node
@@ -376,25 +333,45 @@ fn carve_tunnel_maze(
             .any(|&(u, v)| (u == a && v == b) || (u == b && v == a))
     };
 
-    // Carve all spanning-tree main tunnels!
+    // 2. Carve shaft landing vestibule & all spanning-tree main tunnels first
+    //    (with smooth 1-voxel stair steps when connecting terraced elevations on Tiers 2 & 3).
+    let vestibule = IVec3::new(cx + 6, cave_floor_y, cz);
+    carve_junction_pocket(world, vestibule, 2, 4, VoxelId::CaveDirt, shed_floor_y);
+    carve_maze_corridor(
+        world,
+        IVec3::new(cx + 4, cave_floor_y, cz),
+        nodes[2][3],
+        shed_floor_y,
+    );
+
     // Seal the final entrance into the NE sealed relic vault (4, 0) with a CrackedRock wall
     // so players discover a breachable vault + acoustic demo beacon behind it.
     let alcove_cell = (4usize, 0usize);
-    let mut barricade_spots: Vec<(IVec3, bool)> = Vec::new();
+    let mut barricade_spots: Vec<(IVec3, bool, i32, i32)> = Vec::new();
 
     for &(a, b) in &tree_edges {
         let pa = nodes[a.1][a.0];
         let pb = nodes[b.1][b.0];
-        carve_maze_corridor(world, pa, pb, cave_floor_y, shed_floor_y);
+        carve_maze_corridor(world, pa, pb, shed_floor_y);
         if a == alcove_cell || b == alcove_cell {
             let mid = (pa + pb) / 2;
             let x_major = (pb.x - pa.x).abs() >= (pb.z - pa.z).abs();
-            barricade_spots.push((mid, x_major));
+            barricade_spots.push((mid, x_major, pa.y.min(pb.y), pa.y.max(pb.y)));
         }
     }
 
-    // 4. Add hidden shortcut/loop tunnels between non-tree adjacent cells, and block most of
+    // 3. Add hidden shortcut/loop tunnels between non-tree adjacent cells, and block most of
     //    them with breakable `CrackedRock` barricades so smashing walls uncovers new tunnels!
+    let loop_chance = match tier {
+        1 => 60,
+        2 => 72,
+        _ => 80,
+    };
+    let barricade_chance = match tier {
+        1 => 44,
+        2 => 58,
+        _ => 68,
+    };
     let mut loop_salt = 900u64;
     for gz in 0..GRID {
         for gx in 0..GRID {
@@ -410,101 +387,207 @@ fn carve_tunnel_maze(
                 }
                 loop_salt += 1;
                 let roll = deterministic_range(cave_seed, loop_salt, 0, 99);
-                // ~60% of remaining walls become extra connecting tunnels (so the cave feels like
-                // a rich bundle of tunnels rather than a single linear snake)
-                if roll < 60 {
+                if roll < loop_chance {
                     let pa = nodes[gz][gx];
                     let pb = nodes[nz][nx];
-                    carve_maze_corridor(world, pa, pb, cave_floor_y, shed_floor_y);
-                    // ~70% of extra loop corridors are sealed with breakable `CrackedRock` walls!
-                    // Always seal extra corridors entering the NE relic vault too.
+                    carve_maze_corridor(world, pa, pb, shed_floor_y);
+                    // Seal extra loop corridors with breakable `CrackedRock` walls
                     let touches_alcove = (gx, gz) == alcove_cell || (nx, nz) == alcove_cell;
-                    if touches_alcove || roll < 44 {
+                    if touches_alcove || roll < barricade_chance {
                         let mid = (pa + pb) / 2;
                         let x_major = (pb.x - pa.x).abs() >= (pb.z - pa.z).abs();
-                        barricade_spots.push((mid, x_major));
+                        barricade_spots.push((mid, x_major, pa.y.min(pb.y), pa.y.max(pb.y)));
                     }
                 }
             }
         }
     }
 
-    // Stamp all breakable `CrackedRock` barricades cleanly across their carved tunnel sections
-    for (mid, x_major) in barricade_spots {
-        place_breakable_barricade(world, mid, x_major, cave_floor_y, shed_floor_y);
+    // 4. Carve tunnel junctions and tier-specific vault chambers at every non-shaft grid cell
+    for (gz, row) in nodes.iter().enumerate() {
+        for (gx, &node) in row.iter().enumerate() {
+            if gx == 2 && gz == 2 {
+                continue;
+            }
+            let is_corner = (gx == 0 || gx == 4) && (gz == 0 || gz == 4);
+            if tier == 3 && is_corner {
+                // Tier 3: Recessed ancient ruined sanctum vault with symmetrical stone pillars,
+                // overhead ruined archways, and a central stepped altar plinth.
+                carve_ruined_sanctum_vault(world, node, shed_floor_y);
+            } else {
+                let radius = if is_corner { 3 } else { 2 };
+                let height = if is_corner { 5 } else { 4 };
+                let floor_mat = if (gx + gz) % 2 == 0 {
+                    VoxelId::CaveStone
+                } else {
+                    VoxelId::CaveDirt
+                };
+                carve_junction_pocket(world, node, radius, height, floor_mat, shed_floor_y);
+            }
+        }
     }
 
-    // 5. Pick well-spaced landmarks across the tunnel maze
+    // Modest resonant echo chamber at east-mid node (4, 2) so acoustic cavern reverb still shines
+    // without turning the level into an open arena.
+    let east_node = nodes[2][4];
+    let cavern_center = IVec3::new(east_node.x, east_node.y + 4, east_node.z);
+    carve_ellipsoid(
+        world,
+        cavern_center,
+        Vec3::new(5.8, 5.2 + tier as f32 * 0.5, 5.8),
+        shed_floor_y,
+    );
+    flatten_floor(
+        world,
+        east_node,
+        5,
+        VoxelId::CaveDirt,
+        shed_floor_y,
+    );
+
+    // 5. Stamp tier-specific structural landmarks at interior tunnel junctions:
+    //    - Tier 1 (Damp Timber Mine Tunnels): frequent wooden mining support frames/arches.
+    //    - Tier 2 (Stepped Catacombs): wooden mine bracing at mid-catacomb junctions.
+    //    - Tier 3 (Modular Ancient Ruins): weathered stone ruined archways at interior junctions.
+    for (gz, row) in nodes.iter().enumerate() {
+        for (gx, &node) in row.iter().enumerate() {
+            if (gx == 2 && gz == 2) || (gx == 4 && gz == 2) {
+                continue;
+            }
+            let is_corner = (gx == 0 || gx == 4) && (gz == 0 || gz == 4);
+            if is_corner {
+                continue;
+            }
+            let x_aligned = (gx + gz) % 2 == 0;
+            match tier {
+                1 => {
+                    if (gx + gz) % 2 == 1 || (gx == 3 && gz == 2) || gx == 2 {
+                        build_timber_mine_frame(world, node, x_aligned, shed_floor_y);
+                    }
+                }
+                2 => {
+                    if gx == 2 || gz == 2 {
+                        build_timber_mine_frame(world, node, x_aligned, shed_floor_y);
+                    }
+                }
+                _ => {
+                    if (gx + gz) % 2 == 1 || (gx == 3 && gz == 2) {
+                        build_ruined_stone_archway(world, node, x_aligned, shed_floor_y);
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. Stamp all breakable `CrackedRock` barricades cleanly across their carved tunnel sections
+    for (mid, x_major, min_floor_y, max_floor_y) in barricade_spots {
+        place_breakable_barricade(
+            world,
+            mid,
+            x_major,
+            min_floor_y.min(cave_floor_y),
+            max_floor_y.max(cave_floor_y),
+            shed_floor_y,
+        );
+    }
+
+    // 7. Pick well-spaced landmarks across the tunnel maze (respecting each node's elevation
+    //    and Tier 3's 1-voxel-high stepped altar plinths at the four outer corner sanctums).
     let alcove_node = nodes[alcove_cell.1][alcove_cell.0];
-    let alcove_center = IVec3::new(alcove_node.x, cave_floor_y + 3, alcove_node.z);
+    let alcove_center = IVec3::new(alcove_node.x, alcove_node.y + 3, alcove_node.z);
+    let corner_relic_lift = if tier == 3 { 2 } else { 1 };
 
     let mut relic_voxels = vec![
         // Relic 1: NE sealed CrackedRock vault
-        IVec3::new(alcove_node.x, cave_floor_y + 1, alcove_node.z),
+        IVec3::new(alcove_node.x, alcove_node.y + corner_relic_lift, alcove_node.z),
         // Relic 2: NW far vault
-        IVec3::new(nodes[0][0].x, cave_floor_y + 1, nodes[0][0].z),
+        IVec3::new(nodes[0][0].x, nodes[0][0].y + corner_relic_lift, nodes[0][0].z),
     ];
     if tier >= 2 {
         // Relic 3: Deep SE corner vault
-        relic_voxels.push(IVec3::new(nodes[4][4].x, cave_floor_y + 1, nodes[4][4].z));
+        relic_voxels.push(IVec3::new(
+            nodes[4][4].x,
+            nodes[4][4].y + corner_relic_lift,
+            nodes[4][4].z,
+        ));
     }
     if tier >= 3 {
         // Relic 4: Deep SW corner vault
-        relic_voxels.push(IVec3::new(nodes[4][0].x, cave_floor_y + 1, nodes[4][0].z));
-    }
-
-    let mut bonus_voxels = vec![
-        IVec3::new(nodes[0][2].x, cave_floor_y + 1, nodes[0][2].z),
-        IVec3::new(nodes[2][0].x, cave_floor_y + 1, nodes[2][0].z),
-    ];
-    if tier >= 2 {
-        bonus_voxels.push(IVec3::new(nodes[3][4].x, cave_floor_y + 1, nodes[3][4].z));
-    }
-    if tier >= 3 {
-        bonus_voxels.push(IVec3::new(nodes[4][2].x, cave_floor_y + 1, nodes[4][2].z));
-    }
-
-    // Monsters spawn in the far southern corner vaults (~28m from the shaft around multiple bends)
-    let mut monster_voxels = vec![IVec3::new(
-        nodes[4][4].x,
-        cave_floor_y + 1,
-        nodes[4][4].z,
-    )];
-    if tier >= 2 {
-        monster_voxels.push(IVec3::new(
+        relic_voxels.push(IVec3::new(
             nodes[4][0].x,
-            cave_floor_y + 1,
+            nodes[4][0].y + corner_relic_lift,
             nodes[4][0].z,
         ));
     }
 
+    let mut bonus_voxels = vec![
+        IVec3::new(nodes[0][2].x, nodes[0][2].y + 1, nodes[0][2].z),
+        IVec3::new(nodes[2][0].x, nodes[2][0].y + 1, nodes[2][0].z),
+    ];
+    if tier >= 2 {
+        bonus_voxels.push(IVec3::new(nodes[3][4].x, nodes[3][4].y + 1, nodes[3][4].z));
+    }
+    if tier >= 3 {
+        bonus_voxels.push(IVec3::new(nodes[4][2].x, nodes[4][2].y + 1, nodes[4][2].z));
+    }
+
+    // Monsters spawn in the far southern corner vaults (~28m from the shaft around multiple bends).
+    // On Tiers 2-3, offset by 1 voxel onto the chamber floor so they stand beside the corner relic/altar.
+    let m_off = if tier >= 2 { 1 } else { 0 };
+    let mut monster_voxels = vec![IVec3::new(
+        nodes[4][4].x - m_off,
+        nodes[4][4].y + 1,
+        nodes[4][4].z - m_off,
+    )];
+    if tier >= 2 {
+        monster_voxels.push(IVec3::new(
+            nodes[4][0].x + m_off,
+            nodes[4][0].y + 1,
+            nodes[4][0].z - m_off,
+        ));
+    }
+
     // Subtle bioluminescent crystals tucked into corners of select tunnel junctions
+    // (progressively sparser on deeper tiers: 5 clusters on T1, 3 on T2, 2 eerie clusters on T3).
     let mut crystal_spots = vec![
-        IVec3::new(nodes[2][3].x + 2, cave_floor_y + 1, nodes[2][3].z - 2),
-        IVec3::new(nodes[0][4].x - 2, cave_floor_y + 1, nodes[0][4].z + 1),
-        IVec3::new(nodes[0][0].x + 2, cave_floor_y + 1, nodes[0][0].z + 2),
+        IVec3::new(nodes[0][4].x - 2, nodes[0][4].y + 1, nodes[0][4].z + 1),
     ];
     if tier == 1 {
         crystal_spots.push(IVec3::new(
+            nodes[2][3].x + 2,
+            nodes[2][3].y + 1,
+            nodes[2][3].z - 1,
+        ));
+        crystal_spots.push(IVec3::new(
+            nodes[0][0].x + 2,
+            nodes[0][0].y + 1,
+            nodes[0][0].z + 1,
+        ));
+        crystal_spots.push(IVec3::new(
             nodes[2][4].x + 2,
-            cave_floor_y + 1,
+            nodes[2][4].y + 1,
             nodes[2][4].z + 2,
         ));
         crystal_spots.push(IVec3::new(
             nodes[2][0].x + 1,
-            cave_floor_y + 1,
-            nodes[2][0].z - 2,
+            nodes[2][0].y + 1,
+            nodes[2][0].z - 1,
         ));
     } else if tier == 2 {
         crystal_spots.push(IVec3::new(
-            nodes[4][3].x - 1,
-            cave_floor_y + 1,
-            nodes[4][3].z - 2,
+            nodes[2][3].x + 2,
+            nodes[2][3].y + 1,
+            nodes[2][3].z - 1,
+        ));
+        crystal_spots.push(IVec3::new(
+            nodes[0][0].x + 2,
+            nodes[0][0].y + 1,
+            nodes[0][0].z + 1,
         ));
     } else {
         crystal_spots.push(IVec3::new(
             nodes[4][1].x + 1,
-            cave_floor_y + 1,
+            nodes[4][1].y + 1,
             nodes[4][1].z - 1,
         ));
     }
@@ -517,6 +600,45 @@ fn carve_tunnel_maze(
         monster_voxels,
         crystal_spots,
     )
+}
+
+/// Computes the deterministic floor elevation for a 5x5 maze junction cell `(gx, gz)`:
+/// - Tier 1 stays flat at `cave_floor_y`.
+/// - Tier 2 (Stepped Catacombs) varies across `cave_floor_y - 2..=cave_floor_y + 1`.
+/// - Tier 3 (Modular Ancient Ruins) terraces across `cave_floor_y - 2..=cave_floor_y + 2` (`±2` voxels).
+/// - The central shaft `(2, 2)`, entry junction `(3, 2)`, and east echo cavern `(4, 2)` always stay at `cave_floor_y`.
+fn compute_node_floor_y(
+    cave_seed: u64,
+    tier: u8,
+    gx: usize,
+    gz: usize,
+    cave_floor_y: i32,
+) -> i32 {
+    const TIER2_OFFSETS: [[i32; 5]; 5] = [
+        [-2, -1, 0, 1, 1],
+        [-1, -1, 0, 0, 1],
+        [-1, 0, 0, 0, 0],
+        [-1, -1, 0, -1, -1],
+        [-2, -1, -1, -1, -2],
+    ];
+    const TIER3_OFFSETS: [[i32; 5]; 5] = [
+        [-2, -1, 0, 1, 2],
+        [-1, -1, 0, 1, 1],
+        [-1, 0, 0, 0, 0],
+        [-1, -1, 0, -1, -1],
+        [-2, -2, -1, -1, -2],
+    ];
+
+    if tier <= 1 || (gz == 2 && gx >= 2) {
+        return cave_floor_y;
+    }
+    let eff_gz = if (cave_seed & 1) == 1 { 4 - gz } else { gz };
+    let offset = if tier == 2 {
+        TIER2_OFFSETS[eff_gz][gx]
+    } else {
+        TIER3_OFFSETS[eff_gz][gx]
+    };
+    (cave_floor_y + offset).max(4)
 }
 
 /// Carves a compact subterranean tunnel junction chamber with flat walkable floor and arched roof.
@@ -541,6 +663,9 @@ fn carve_junction_pocket(
                 if floor_p.y > 1 {
                     world.set(floor_p - IVec3::Y, VoxelId::CaveStone);
                 }
+                if floor_p.y > 2 {
+                    world.set(floor_p - IVec3::new(0, 2, 0), VoxelId::CaveStone);
+                }
             }
             let local_h = if d2 <= 2 { height } else { (height - 1).max(3) };
             for dy in 1..=local_h {
@@ -553,16 +678,165 @@ fn carve_junction_pocket(
     }
 }
 
+/// Stamps a wooden mining support frame (`VoxelId::Timber` side corner posts + overhead collar beams)
+/// at a tunnel junction without obstructing the 3-voxel-wide cardinal tunnel openings.
+fn build_timber_mine_frame(
+    world: &mut VoxelWorld,
+    center: IVec3,
+    x_aligned: bool,
+    shed_floor_y: i32,
+) {
+    // 4 corner vertical timber support posts at `(dx = ±2, dz = ±2)`
+    for dz in [-2, 2] {
+        for dx in [-2, 2] {
+            let base = IVec3::new(center.x + dx, center.y, center.z + dz);
+            if base.y < shed_floor_y {
+                world.set(base, VoxelId::CaveStone);
+            }
+            for dy in 1..=4 {
+                let p = base + IVec3::new(0, dy, 0);
+                if p.y > 2 && p.y < shed_floor_y {
+                    world.set(p, VoxelId::Timber);
+                }
+            }
+        }
+    }
+
+    // Overhead timber crossbeams at `center.y + 4` (leaving 3 full voxels of clear Air below)
+    let beam_y = center.y + 4;
+    if beam_y > 2 && beam_y < shed_floor_y {
+        for span in -2..=2 {
+            for side in [-1, 1] {
+                let p = if x_aligned {
+                    IVec3::new(center.x + span, beam_y, center.z + side)
+                } else {
+                    IVec3::new(center.x + side, beam_y, center.z + span)
+                };
+                world.set(p, VoxelId::Timber);
+            }
+        }
+    }
+}
+
+/// Carves a Tier 3 recessed Modular Ancient Ruin sanctum vault (`7x7` dressed stone chamber)
+/// featuring 4 symmetrical freestanding `CaveStone` columns, overhead ruined stone archways,
+/// and a central 1-voxel-high stepped stone altar plinth.
+fn carve_ruined_sanctum_vault(world: &mut VoxelWorld, center: IVec3, shed_floor_y: i32) {
+    for dz in -3..=3 {
+        for dx in -3..=3 {
+            let floor_p = IVec3::new(center.x + dx, center.y, center.z + dz);
+            if floor_p.y < shed_floor_y {
+                world.set(floor_p, VoxelId::CaveStone);
+                if floor_p.y > 1 {
+                    world.set(floor_p - IVec3::Y, VoxelId::CaveStone);
+                }
+                if floor_p.y > 2 {
+                    world.set(floor_p - IVec3::new(0, 2, 0), VoxelId::CaveStone);
+                }
+            }
+            let max_h = if dx.abs() <= 2 && dz.abs() <= 2 { 6 } else { 5 };
+            for dy in 1..=max_h {
+                let p = floor_p + IVec3::new(0, dy, 0);
+                if p.y > 2 && p.y < shed_floor_y {
+                    world.set(p, VoxelId::Air);
+                }
+            }
+        }
+    }
+
+    // 4 symmetrical freestanding interior stone columns at `(center.x ± 2, center.z ± 2)`
+    for sz in [-2, 2] {
+        for sx in [-2, 2] {
+            for dy in 1..=5 {
+                let p = IVec3::new(center.x + sx, center.y + dy, center.z + sz);
+                if p.y > 2 && p.y < shed_floor_y {
+                    world.set(p, VoxelId::CaveStone);
+                }
+            }
+        }
+    }
+
+    // Overhead ruined stone archways (`dy = 5`) linking the 4 columns
+    let arch_y = center.y + 5;
+    if arch_y > 2 && arch_y < shed_floor_y {
+        for d in -1..=1 {
+            let mat = if d == 0 {
+                VoxelId::CrackedRock
+            } else {
+                VoxelId::CaveStone
+            };
+            for side in [-2, 2] {
+                world.set(IVec3::new(center.x + d, arch_y, center.z + side), mat);
+                world.set(IVec3::new(center.x + side, arch_y, center.z + d), mat);
+            }
+        }
+    }
+
+    // Central 1-voxel-high stepped stone altar plinth at `(center.x, center.y + 1, center.z)`
+    let plinth = IVec3::new(center.x, center.y + 1, center.z);
+    if plinth.y > 2 && plinth.y < shed_floor_y {
+        world.set(plinth, VoxelId::CaveStone);
+    }
+}
+
+/// Stamps an ancient ruined stone archway (`CaveStone` corner pilasters + overhead stone lintel)
+/// at an interior Tier 3 junction without narrowing the 3-voxel-wide walkways.
+fn build_ruined_stone_archway(
+    world: &mut VoxelWorld,
+    center: IVec3,
+    x_aligned: bool,
+    shed_floor_y: i32,
+) {
+    for dz in [-2, 2] {
+        for dx in [-2, 2] {
+            let base = IVec3::new(center.x + dx, center.y, center.z + dz);
+            if base.y < shed_floor_y {
+                world.set(base, VoxelId::CaveStone);
+            }
+            for dy in 1..=4 {
+                let p = base + IVec3::new(0, dy, 0);
+                if p.y > 2 && p.y < shed_floor_y {
+                    world.set(p, VoxelId::CaveStone);
+                }
+            }
+        }
+    }
+
+    let arch_y = center.y + 4;
+    if arch_y > 2 && arch_y < shed_floor_y {
+        for span in -2..=2 {
+            let mat = if span == 0 {
+                VoxelId::CrackedRock
+            } else {
+                VoxelId::CaveStone
+            };
+            for side in [-1, 1] {
+                let p = if x_aligned {
+                    IVec3::new(center.x + span, arch_y, center.z + side)
+                } else {
+                    IVec3::new(center.x + side, arch_y, center.z + span)
+                };
+                world.set(p, VoxelId::CaveStone.def().id);
+                if span == 0 {
+                    world.set(p, mat);
+                }
+            }
+        }
+    }
+}
+
 /// Carves a narrow, tense winding subterranean mine tunnel (3 voxels wide × 3–4 voxels tall)
-/// with guaranteed solid floor and subtle organic curve.
+/// with guaranteed solid floor, subtle organic curve, and smooth 1-voxel stair transitions
+/// when connecting junctions at different elevations (`a.y != b.y`).
 fn carve_maze_corridor(
     world: &mut VoxelWorld,
     a: IVec3,
     b: IVec3,
-    floor_y: i32,
     shed_floor_y: i32,
 ) {
-    let dist = a.as_vec3().distance(b.as_vec3());
+    let a_xz = Vec3::new(a.x as f32, 0.0, a.z as f32);
+    let b_xz = Vec3::new(b.x as f32, 0.0, b.z as f32);
+    let dist = a_xz.distance(b_xz);
     let steps = (dist * 2.0).ceil().max(1.0) as i32;
     let delta = b - a;
     let perp = Vec3::new(-delta.z as f32, 0.0, delta.x as f32).normalize_or_zero();
@@ -573,27 +847,79 @@ fn carve_maze_corridor(
         -1.0
     };
 
+    let mut centerline: Vec<(i32, i32, f32)> = Vec::with_capacity(steps as usize + 1);
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
         let curve = (t * std::f32::consts::PI).sin() * 1.15 * bend_dir;
-        let p_f = a.as_vec3().lerp(b.as_vec3(), t) + perp * curve;
-        let c = IVec3::new(p_f.x.round() as i32, floor_y, p_f.z.round() as i32);
+        let p_f = a_xz.lerp(b_xz, t) + perp * curve;
+        let cx_i = p_f.x.round() as i32;
+        let cz_i = p_f.z.round() as i32;
+        if centerline
+            .last()
+            .is_none_or(|&(lx, lz, _)| lx != cx_i || lz != cz_i)
+        {
+            centerline.push((cx_i, cz_i, t));
+        }
+    }
 
+    // Assign floor height `y` along the centerline with max 1-voxel step delta
+    // and flat landings inside both endpoint junction radii.
+    let mut center_pts: Vec<IVec3> = Vec::with_capacity(centerline.len());
+    let mut cur_y = a.y;
+    let mut hold_count = 3i32;
+    for &(cx_i, cz_i, t) in &centerline {
+        let target_y = if a.y == b.y || t <= 0.30 {
+            a.y
+        } else if t >= 0.70 {
+            b.y
+        } else {
+            let local_t = ((t - 0.30) / 0.40).clamp(0.0, 1.0);
+            (a.y as f32 + (b.y - a.y) as f32 * local_t).round() as i32
+        };
+
+        if cur_y != target_y && hold_count >= 2 {
+            cur_y += (target_y - cur_y).signum();
+            hold_count = 0;
+        } else {
+            hold_count += 1;
+        }
+        center_pts.push(IVec3::new(cx_i, cur_y, cz_i));
+    }
+    if let Some(last) = center_pts.last_mut() {
+        last.y = b.y;
+    }
+
+    let highest_y = a.y.max(b.y);
+    for &c in &center_pts {
         for dz in -1..=1 {
             for dx in -1..=1 {
-                let floor_p = IVec3::new(c.x + dx, floor_y, c.z + dz);
+                let wx = c.x + dx;
+                let wz = c.z + dz;
+                let floor_y = if a.y == b.y {
+                    a.y
+                } else {
+                    center_pts
+                        .iter()
+                        .min_by_key(|pt| (wx - pt.x).pow(2) + (wz - pt.z).pow(2))
+                        .map_or(c.y, |pt| pt.y)
+                };
+
+                let floor_p = IVec3::new(wx, floor_y, wz);
                 if floor_p.y < shed_floor_y {
                     world.set(floor_p, VoxelId::CaveDirt);
                     if floor_p.y > 1 {
                         world.set(floor_p - IVec3::Y, VoxelId::CaveStone);
                     }
+                    if floor_p.y > 2 {
+                        world.set(floor_p - IVec3::new(0, 2, 0), VoxelId::CaveStone);
+                    }
                 }
                 let is_center = dx == 0 && dz == 0;
                 let max_h = if is_center { 4 } else { 3 };
-                for dy in 1..=max_h {
-                    let air_p = floor_p + IVec3::new(0, dy, 0);
-                    if air_p.y > 2 && air_p.y < shed_floor_y {
-                        world.set(air_p, VoxelId::Air);
+                let top_air_y = (floor_y.max(highest_y) + max_h).min(shed_floor_y - 1);
+                for air_y in (floor_y + 1)..=top_air_y {
+                    if air_y > 2 {
+                        world.set(IVec3::new(wx, air_y, wz), VoxelId::Air);
                     }
                 }
             }
@@ -607,12 +933,12 @@ fn place_breakable_barricade(
     world: &mut VoxelWorld,
     mid: IVec3,
     x_major: bool,
-    floor_y: i32,
+    min_floor_y: i32,
+    max_floor_y: i32,
     shed_floor_y: i32,
 ) {
-    for dy in 1..=5 {
-        let y = floor_y + dy;
-        if y >= shed_floor_y {
+    for y in (min_floor_y + 1)..=(max_floor_y + 5) {
+        if y <= 2 || y >= shed_floor_y {
             continue;
         }
         for along in 0..=1 {
@@ -703,7 +1029,7 @@ fn build_level_info(
         elevator_pos_m: elevator_top_pos_m,
         acoustic_beacon_pos_m: config.voxel_to_world_center(IVec3::new(
             alcove_center.x,
-            cave_floor_y + 3,
+            alcove_center.y,
             alcove_center.z + 1,
         )),
         grand_cavern_pos_m: config.voxel_to_world_center(cavern_center),
@@ -1206,6 +1532,147 @@ mod tests {
             assert!(
                 cracked_count >= 12,
                 "expected breakable CrackedRock barricades across tunnel maze, got {cracked_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn depth_tiers_exhibit_distinct_biomes_elevations_and_ruins() {
+        let cfg = VoxelConfig::default();
+        let max = cfg.world_voxels();
+        let (cx, cz, _shed_floor_y, cave_floor_y) = compute_layout_coords(max);
+
+        let (w1, i1) = generate_world_with_tier(2026, 1, cfg);
+        let (w2, i2) = generate_world_with_tier(2026, 2, cfg);
+        let (w3, i3) = generate_world_with_tier(2026, 3, cfg);
+
+        let count_underground = |world: &VoxelWorld, target: VoxelId| -> usize {
+            let mut count = 0usize;
+            for y in (cave_floor_y - 3)..=(cave_floor_y + 8) {
+                for dz in -30..=30 {
+                    for dx in -30..=30 {
+                        if world.get(IVec3::new(cx + dx, y, cz + dz)) == target {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            count
+        };
+
+        // 1. Timber mine support frames: Tier 1 has abundant timber frames, Tier 2 has mid-catacomb
+        //    timber bracing, and Tier 3 replaces timber frames with stone ruin archways & columns.
+        let timber_t1 = count_underground(&w1, VoxelId::Timber);
+        let timber_t2 = count_underground(&w2, VoxelId::Timber);
+        let timber_t3 = count_underground(&w3, VoxelId::Timber);
+        assert!(
+            timber_t1 > timber_t2 && timber_t2 > 0 && timber_t3 == 0,
+            "expected underground Timber counts T1 ({timber_t1}) > T2 ({timber_t2}) > T3 ({timber_t3} == 0)"
+        );
+
+        // 2. Bioluminescent crystals become progressively sparser on deeper tiers.
+        let crystals_t1 = count_underground(&w1, VoxelId::BiolumCrystal);
+        let crystals_t2 = count_underground(&w2, VoxelId::BiolumCrystal);
+        let crystals_t3 = count_underground(&w3, VoxelId::BiolumCrystal);
+        assert!(
+            crystals_t1 > crystals_t2 && crystals_t2 > crystals_t3 && crystals_t3 >= 4,
+            "expected sparser underground BiolumCrystal counts T1 ({crystals_t1}) > T2 ({crystals_t2}) > T3 ({crystals_t3})"
+        );
+
+        // 3. Elevation variety: Tier 1 spawns all sit at `cave_floor_y + 1`, whereas Tier 2 and Tier 3
+        //    spawns span multiple stepped vertical elevations while keeping entry node (3, 2) at `cave_floor_y`.
+        let collect_spawn_ys = |info: &GeneratedLevelInfo| -> Vec<i32> {
+            let mut ys: Vec<i32> = info
+                .relic_spawns_m
+                .iter()
+                .chain(info.bonus_loot_spawns_m.iter())
+                .chain(info.monster_spawns_m.iter())
+                .map(|&p| cfg.world_to_voxel(p).y)
+                .collect();
+            ys.sort_unstable();
+            ys.dedup();
+            ys
+        };
+        let ys_t1 = collect_spawn_ys(&i1);
+        let ys_t2 = collect_spawn_ys(&i2);
+        let ys_t3 = collect_spawn_ys(&i3);
+        assert_eq!(
+            ys_t1,
+            vec![cave_floor_y + 1],
+            "Tier 1 spawns should all lie on the flat cave_floor_y level"
+        );
+        assert!(
+            ys_t2.len() >= 3,
+            "Tier 2 stepped catacombs should place spawns across >= 3 distinct Y elevations, got {ys_t2:?}"
+        );
+        assert!(
+            ys_t3.len() >= 3,
+            "Tier 3 terraced ruins should place spawns across >= 3 distinct Y elevations, got {ys_t3:?}"
+        );
+
+        // Entry junction (3, 2) right outside the shaft vestibule must remain at `cave_floor_y` on all tiers
+        for (tier, world) in [(1, &w1), (2, &w2), (3, &w3)] {
+            let entry_floor = IVec3::new(cx + 11, cave_floor_y, cz);
+            assert!(
+                world.is_solid(entry_floor),
+                "Tier {tier} entry node floor at {entry_floor:?} must be solid at cave_floor_y"
+            );
+            assert_eq!(
+                world.get(entry_floor + IVec3::Y),
+                VoxelId::Air,
+                "Tier {tier} entry node headroom above cave_floor_y must be Air"
+            );
+        }
+
+        // 4. Tier 3 Modular Ancient Ruins: outer corner sanctum vaults feature freestanding
+        //    symmetrical `CaveStone` columns (surrounded on all 4 horizontal sides by `Air`)
+        //    and 1-voxel-high stepped stone altar plinths under each corner relic.
+        let count_freestanding_stone_pillars = |world: &VoxelWorld| -> usize {
+            let mut pillar_voxels = 0usize;
+            for y in (cave_floor_y - 1)..=(cave_floor_y + 5) {
+                for dz in -28..=28 {
+                    for dx in -28..=28 {
+                        let p = IVec3::new(cx + dx, y, cz + dz);
+                        if world.get(p) == VoxelId::CaveStone
+                            && world.get(p + IVec3::X) == VoxelId::Air
+                            && world.get(p - IVec3::X) == VoxelId::Air
+                            && world.get(p + IVec3::Z) == VoxelId::Air
+                            && world.get(p - IVec3::Z) == VoxelId::Air
+                        {
+                            pillar_voxels += 1;
+                        }
+                    }
+                }
+            }
+            pillar_voxels
+        };
+        let pillars_t1 = count_freestanding_stone_pillars(&w1);
+        let pillars_t3 = count_freestanding_stone_pillars(&w3);
+        assert!(
+            pillars_t3 >= 32 && pillars_t3 > pillars_t1 + 24,
+            "expected freestanding CaveStone sanctum column voxels in Tier 3 ({pillars_t3}) >> Tier 1 ({pillars_t1})"
+        );
+
+        // Verify each of the 4 Tier 3 relics rests atop a 1-voxel stepped CaveStone altar plinth
+        // surrounded by walkable Air on the sanctum floor level.
+        assert_eq!(i3.relic_spawns_m.len(), 4);
+        for &rpos in &i3.relic_spawns_m {
+            let rv = cfg.world_to_voxel(rpos);
+            let plinth = rv - IVec3::Y;
+            assert_eq!(
+                w3.get(plinth),
+                VoxelId::CaveStone,
+                "Tier 3 relic at {rv:?} must sit atop a CaveStone altar plinth"
+            );
+            assert_eq!(
+                w3.get(plinth + IVec3::X),
+                VoxelId::Air,
+                "Tier 3 altar plinth at {plinth:?} must rise 1 voxel above the surrounding sanctum floor"
+            );
+            assert_eq!(
+                w3.get(plinth - IVec3::X),
+                VoxelId::Air,
+                "Tier 3 altar plinth at {plinth:?} must rise 1 voxel above the surrounding sanctum floor"
             );
         }
     }
