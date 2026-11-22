@@ -179,7 +179,8 @@ impl Plugin for HudPlugin {
                     handle_name_typing_system,
                     handle_ui_actions_system,
                     update_panel_visibility_system,
-                    update_hud_texts_system,
+                    update_menu_hud_texts_system,
+                    update_ingame_hud_texts_system,
                     update_settings_widgets_system,
                 )
                     .chain(),
@@ -1481,73 +1482,34 @@ fn truncate_device_name(name: Option<&str>) -> String {
 }
 
 #[derive(SystemParam)]
-struct HudStateRead<'w> {
+struct MenuHudRead<'w> {
     telemetry: Res<'w, AcousticTelemetry>,
     coop: Res<'w, CoopState>,
     voice_settings: Res<'w, VoiceSettings>,
     user_settings: Res<'w, UserSettings>,
     name_focused: Res<'w, NameInputFocused>,
-    elevator: Res<'w, ElevatorState>,
     campaign: Res<'w, CampaignState>,
-    inv: Res<'w, PlayerInventory>,
-    health: Res<'w, PlayerHealthState>,
-    station_state: Res<'w, ShedStationState>,
-    item_reg: Res<'w, WorldItemRegistry>,
-    toast: Res<'w, GameplayToast>,
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn update_hud_texts_system(
-    st: HudStateRead,
-    fl_q: Query<&PlayerFlashlight>,
+#[allow(clippy::type_complexity)]
+fn update_menu_hud_texts_system(
+    st: MenuHudRead,
     mut menu_texts: ParamSet<(
         Query<&mut Text, With<MainMenuNameText>>,
         Query<&mut Text, With<MainMenuStatusText>>,
         Query<&mut Text, With<CoopPanelStatusText>>,
         Query<&mut Text, With<ShopHeaderText>>,
     )>,
-    mut ingame_texts: ParamSet<(
-        Query<&mut Text, With<HudText>>,
-        Query<&mut Text, With<PromptText>>,
-        Query<&mut Text, With<ToastText>>,
-        Query<&mut Text, With<BatterySelectorText>>,
-        Query<&mut Text, With<BeltHudText>>,
-    )>,
-    mut name_box_q: Query<
-        &mut BackgroundColor,
-        (
-            With<MainMenuNameBox>,
-            Without<VisorSwatchButton>,
-            Without<DamageFlashOverlay>,
-        ),
-    >,
-    mut swatch_q: Query<
-        (&VisorSwatchButton, &mut BackgroundColor),
-        (Without<MainMenuNameBox>, Without<DamageFlashOverlay>),
-    >,
-    mut flash_q: Query<
-        &mut BackgroundColor,
-        (
-            With<DamageFlashOverlay>,
-            Without<MainMenuNameBox>,
-            Without<VisorSwatchButton>,
-        ),
-    >,
+    mut name_box_q: Query<&mut BackgroundColor, (With<MainMenuNameBox>, Without<VisorSwatchButton>)>,
+    mut swatch_q: Query<(&VisorSwatchButton, &mut BackgroundColor), Without<MainMenuNameBox>>,
 ) {
     let telemetry = &st.telemetry;
     let coop = &st.coop;
     let voice_settings = &st.voice_settings;
     let user_settings = &st.user_settings;
     let name_focused = &st.name_focused;
-    let elevator = &st.elevator;
     let campaign = &st.campaign;
-    let inv = &st.inv;
-    let health = &st.health;
-    let station_state = &st.station_state;
-    let item_reg = &st.item_reg;
-    let toast = &st.toast;
 
-    // 1. Main Menu name box & visor swatch highlight
     if let Ok(mut t) = menu_texts.p0().single_mut() {
         let cursor_ch = if name_focused.0 { "_" } else { "" };
         t.0 = format!("{}{}", user_settings.player_name, cursor_ch);
@@ -1570,10 +1532,67 @@ fn update_hud_texts_system(
         t.0 = coop.status_text.clone();
     }
 
-    // Shared mic formatting
     let mic = telemetry.mic;
     let mic_bar = format_db_meter(mic.rms_db, voice_settings.gate_threshold_db);
-    let voice_state = if !mic.available {
+    let voice_state = format_voice_state(mic, voice_settings);
+    let echo_tag = if voice_settings.self_echo_test {
+        "ON"
+    } else {
+        "OFF"
+    };
+
+    if let Ok(mut t) = menu_texts.p2().single_mut() {
+        let code_preview = match &coop.join_code {
+            Some(c) if c.len() > 44 => {
+                format!("{}...{} ({} chars)", &c[..24], &c[c.len() - 12..], c.len())
+            }
+            Some(c) => c.clone(),
+            None => "Offline / Solo".into(),
+        };
+        let peers: Vec<String> = coop
+            .remote_players
+            .values()
+            .map(|rp| rp.info.name.clone())
+            .collect();
+        let peer_str = if peers.is_empty() {
+            "None".to_string()
+        } else {
+            peers.join(", ")
+        };
+        t.0 = format!(
+            "Session: {}\n\
+             Join Code: {}\n\
+             Miner: {} (Visor: {})  |  Teammates: {}\n\
+             Mic: {} {:.0} dB (Gate {:.0} dB) — {}  |  Self-Echo: {}",
+            coop.status_text,
+            code_preview,
+            coop.local_name,
+            coop.visor_label(),
+            peer_str,
+            mic_bar,
+            mic.rms_db,
+            voice_settings.gate_threshold_db,
+            voice_state,
+            echo_tag,
+        );
+    }
+
+    if let Ok(mut t) = menu_texts.p3().single_mut() {
+        t.0 = format!(
+            "Credits: {} cr  |  Selected Depth: Tier {} (Unlocked: Tier {})  |  Dives Completed: {}",
+            campaign.save.credits,
+            campaign.save.selected_depth_tier,
+            campaign.save.unlocked_depth_tier,
+            campaign.save.dives_completed,
+        );
+    }
+}
+
+fn format_voice_state(
+    mic: voxel_audio_dsp::MicTelemetry,
+    voice_settings: &VoiceSettings,
+) -> &'static str {
+    if !mic.available {
         "NO MIC"
     } else if voice_settings.muted {
         "MUTED"
@@ -1585,14 +1604,56 @@ fn update_hud_texts_system(
         "TALKING"
     } else {
         "LOUD! (alerts AI)"
-    };
+    }
+}
+
+#[derive(SystemParam)]
+struct InGameHudRead<'w> {
+    telemetry: Res<'w, AcousticTelemetry>,
+    coop: Res<'w, CoopState>,
+    voice_settings: Res<'w, VoiceSettings>,
+    elevator: Res<'w, ElevatorState>,
+    campaign: Res<'w, CampaignState>,
+    inv: Res<'w, PlayerInventory>,
+    health: Res<'w, PlayerHealthState>,
+    station_state: Res<'w, ShedStationState>,
+    item_reg: Res<'w, WorldItemRegistry>,
+    toast: Res<'w, GameplayToast>,
+}
+
+#[allow(clippy::type_complexity)]
+fn update_ingame_hud_texts_system(
+    st: InGameHudRead,
+    fl_q: Query<&PlayerFlashlight>,
+    mut ingame_texts: ParamSet<(
+        Query<&mut Text, With<HudText>>,
+        Query<&mut Text, With<PromptText>>,
+        Query<&mut Text, With<ToastText>>,
+        Query<&mut Text, With<BatterySelectorText>>,
+        Query<&mut Text, With<BeltHudText>>,
+    )>,
+    mut flash_q: Query<&mut BackgroundColor, With<DamageFlashOverlay>>,
+) {
+    let telemetry = &st.telemetry;
+    let coop = &st.coop;
+    let voice_settings = &st.voice_settings;
+    let elevator = &st.elevator;
+    let campaign = &st.campaign;
+    let inv = &st.inv;
+    let health = &st.health;
+    let station_state = &st.station_state;
+    let item_reg = &st.item_reg;
+    let toast = &st.toast;
+
+    let mic = telemetry.mic;
+    let mic_bar = format_db_meter(mic.rms_db, voice_settings.gate_threshold_db);
+    let voice_state = format_voice_state(mic, voice_settings);
     let echo_tag = if voice_settings.self_echo_test {
         "ON"
     } else {
         "OFF"
     };
 
-    // 2. Top-left In-Game HUD
     let battery_pct = fl_q
         .single()
         .map(|f| (f.battery * 100.0).round() as i32)
@@ -1646,7 +1707,6 @@ fn update_hud_texts_system(
         );
     }
 
-    // 3. Prompts, Toast, Battery Selector, Belt Bar
     if let Ok(mut t) = ingame_texts.p1().single_mut() {
         t.0 = station_state
             .prompt
@@ -1664,55 +1724,6 @@ fn update_hud_texts_system(
         t.0 = inv.format_belt_hud();
     }
 
-    // 4. Pause / Co-op Menu Status
-    if let Ok(mut t) = menu_texts.p2().single_mut() {
-        let code_preview = match &coop.join_code {
-            Some(c) if c.len() > 44 => {
-                format!("{}...{} ({} chars)", &c[..24], &c[c.len() - 12..], c.len())
-            }
-            Some(c) => c.clone(),
-            None => "Offline / Solo".into(),
-        };
-        let peers: Vec<String> = coop
-            .remote_players
-            .values()
-            .map(|rp| rp.info.name.clone())
-            .collect();
-        let peer_str = if peers.is_empty() {
-            "None".to_string()
-        } else {
-            peers.join(", ")
-        };
-        t.0 = format!(
-            "Session: {}\n\
-             Join Code: {}\n\
-             Miner: {} (Visor: {})  |  Teammates: {}\n\
-             Mic: {} {:.0} dB (Gate {:.0} dB) — {}  |  Self-Echo: {}",
-            coop.status_text,
-            code_preview,
-            coop.local_name,
-            coop.visor_label(),
-            peer_str,
-            mic_bar,
-            mic.rms_db,
-            voice_settings.gate_threshold_db,
-            voice_state,
-            echo_tag,
-        );
-    }
-
-    // 5. Shop Header
-    if let Ok(mut t) = menu_texts.p3().single_mut() {
-        t.0 = format!(
-            "Credits: {} cr  |  Selected Depth: Tier {} (Unlocked: Tier {})  |  Dives Completed: {}",
-            campaign.save.credits,
-            campaign.save.selected_depth_tier,
-            campaign.save.unlocked_depth_tier,
-            campaign.save.dives_completed,
-        );
-    }
-
-    // 6. Damage / Downed Red Overlay
     if let Ok(mut bg) = flash_q.single_mut() {
         let alpha = if health.is_dead() {
             0.42

@@ -73,3 +73,44 @@ fn main() {
         ))
         .run();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Headless ECS schedule verification: catches any Bevy B0001 query-aliasing panics
+    /// across all game plugins during `cargo test` before building an executable!
+    #[test]
+    fn all_game_plugins_schedule_without_ecs_conflicts() {
+        let config = VoxelConfig::half_player_scale(glam::UVec3::splat(3));
+        let (world, level_info) = generate_world(DEFAULT_LEVEL_SEED, config);
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<bevy::input::mouse::MouseMotion>()
+            .add_message::<bevy::input::mouse::MouseWheel>()
+            .add_message::<bevy::input::keyboard::KeyboardInput>()
+            .add_message::<bevy::app::AppExit>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .insert_resource(GlobalAmbientLight::default())
+            .insert_resource(WorldResource(Arc::new(RwLock::new(world))))
+            .insert_resource(LevelInfoResource(level_info))
+            .add_plugins((
+                SettingsPlugin,
+                VoxelRenderPlugin,
+                NetBridgePlugin,
+                PlayerPlugin,
+                ToolsPlugin,
+                GameplayPlugin,
+                AudioBridgePlugin,
+                HudPlugin,
+            ));
+
+        // Run 2 full Startup + Update frames to validate every system's queries & Params!
+        app.update();
+        app.update();
+    }
+}

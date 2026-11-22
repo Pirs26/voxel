@@ -1139,13 +1139,13 @@ fn elevator_runtime_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut res: ElevatorWorldRes,
     mut evs: ElevatorEvents,
-    mut player_q: Query<(&mut PlayerController, &mut Transform), Without<ElevatorCageRoot>>,
+    mut player_q: Query<&mut PlayerController>,
     mut cage_q: Query<&mut Transform, (With<ElevatorCageRoot>, Without<ElevatorDoorVisual>)>,
     mut door_q: Query<&mut Transform, (With<ElevatorDoorVisual>, Without<ElevatorCageRoot>)>,
     mut bulb_q: Query<&mut PointLight, With<ElevatorBulbLight>>,
     mut items_q: Query<
         (Entity, &mut WorldItemEntity, &mut Transform),
-        (Without<PlayerController>, Without<ElevatorCageRoot>, Without<ElevatorDoorVisual>),
+        (Without<ElevatorCageRoot>, Without<ElevatorDoorVisual>),
     >,
     stalkers_q: Query<Entity, Or<(With<BlindStalker>, With<RemoteSyncedStalker>)>>,
 ) {
@@ -1190,7 +1190,7 @@ fn elevator_runtime_system(
                 coop.local_edits.clear();
 
                 // Pull local player safely into cage if they pulled the lever from just outside
-                if let Ok((mut pc, _)) = player_q.single_mut() {
+                if let Ok(mut pc) = player_q.single_mut() {
                     let dist_to_shaft = Vec2::new(
                         pc.feet_pos_m.x - elevator.center_xz_m.x,
                         pc.feet_pos_m.z - elevator.center_xz_m.y,
@@ -1261,7 +1261,7 @@ fn elevator_runtime_system(
 
     // 4. Ride moving elevator cage smoothly (player + items inside cage!)
     let mut player_y = elevator.platform_y_m;
-    if let Ok((mut pc, _)) = player_q.single_mut() {
+    if let Ok(mut pc) = player_q.single_mut() {
         let dx = pc.feet_pos_m.x - elevator.center_xz_m.x;
         let dz = pc.feet_pos_m.z - elevator.center_xz_m.y;
         let in_xz = dx.abs() <= ELEVATOR_CAGE_HALF_EXTENT_M + 0.1
@@ -1698,8 +1698,10 @@ fn blind_stalker_ai_system(
     health: Res<PlayerHealthState>,
     remote_health: Res<RemoteHealthMap>,
     mut timers: ResMut<GameplayTimers>,
-    mut sound_reader: MessageReader<PlaySpatialSoundEvent>,
-    mut sound_writer: MessageWriter<PlaySpatialSoundEvent>,
+    mut sound_io: ParamSet<(
+        MessageReader<PlaySpatialSoundEvent>,
+        MessageWriter<PlaySpatialSoundEvent>,
+    )>,
     mut hit_writer: MessageWriter<MonsterHitLocalPlayerEvent>,
     player_q: Query<(&PlayerController, &Transform)>,
     mut stalkers_q: Query<(&mut BlindStalker, &mut Transform), Without<PlayerController>>,
@@ -1709,7 +1711,7 @@ fn blind_stalker_ai_system(
     >,
 ) {
     if *screen != AppScreen::InGame {
-        sound_reader.clear();
+        sound_io.p0().clear();
         return;
     }
     let dt = time.delta_secs().min(0.05);
@@ -1722,7 +1724,8 @@ fn blind_stalker_ai_system(
     }
 
     // Collect acoustic events emitted this frame
-    let mut ai_events: Vec<AcousticEvent> = sound_reader
+    let mut ai_events: Vec<AcousticEvent> = sound_io
+        .p0()
         .read()
         .filter_map(|ev| ev.ai_event)
         .collect();
@@ -1774,6 +1777,7 @@ fn blind_stalker_ai_system(
         timers.monster_net_timer_s = 0.0;
     }
 
+    let mut sound_writer = sound_io.p1();
     let world = world_res.read();
     for (mut stalker, mut tf) in &mut stalkers_q {
         for &ev in &ai_events {
