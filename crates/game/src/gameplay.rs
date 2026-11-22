@@ -1917,7 +1917,11 @@ fn elevator_runtime_system(
                     Vec3::splat(0.14)
                 };
                 elevator.ride_with_elevator(&mut tf.translation, prev_y, r);
-                item.in_shed = is_pos_in_shed(tf.translation, &level_info.0);
+                // Only demote items leaving the Shed on descent; never prematurely mark
+                // ascending cave relics/loot as `in_shed` before `returned_shed` cashes them in.
+                if delta_y < 0.0 {
+                    item.in_shed = is_pos_in_shed(tf.translation, &level_info.0);
+                }
             }
         }
     }
@@ -2054,41 +2058,44 @@ fn elevator_runtime_system(
 
         let mut despawned_ids: HashSet<u32> = HashSet::new();
         for (ent, mut item, tf) in &mut items_q {
-            if !item.in_shed {
-                if let WorldItemKind::FallenBody { player_id, .. } = item.kind {
+            let inside_cage = elevator.is_pos_inside_cage(tf.translation);
+            match evaluate_returned_shed_item(
+                &item.kind,
+                item.in_shed,
+                inside_cage,
+                item.active_timer_s,
+            ) {
+                ReturnedShedItemAction::CashInRelic(value) => {
+                    payout = payout.saturating_add(value);
+                    relics_extracted += 1;
+                    despawned_ids.insert(item.id);
+                    coop.send_world_item_remove(item.id);
+                    commands.entity(ent).despawn();
+                }
+                ReturnedShedItemAction::CashInBonusLoot(value) => {
+                    payout = payout.saturating_add(value);
+                    despawned_ids.insert(item.id);
+                    coop.send_world_item_remove(item.id);
+                    commands.entity(ent).despawn();
+                }
+                ReturnedShedItemAction::ResolveBody {
+                    player_id,
+                    recovered,
+                } => {
                     dead_player_ids.insert(player_id);
-                    if elevator.is_pos_inside_cage(tf.translation) {
+                    if recovered {
                         recovered_body_ids.insert(player_id);
                     }
                     despawned_ids.insert(item.id);
                     coop.send_world_item_remove(item.id);
                     commands.entity(ent).despawn();
-                } else if elevator.is_pos_inside_cage(tf.translation) {
-                    match item.kind {
-                        WorldItemKind::HeavyRelic { value, .. } => {
-                            payout = payout.saturating_add(value);
-                            relics_extracted += 1;
-                            despawned_ids.insert(item.id);
-                            coop.send_world_item_remove(item.id);
-                            commands.entity(ent).despawn();
-                        }
-                        WorldItemKind::BonusLoot { value } => {
-                            payout = payout.saturating_add(value);
-                            despawned_ids.insert(item.id);
-                            coop.send_world_item_remove(item.id);
-                            commands.entity(ent).despawn();
-                        }
-                        _ if item.active_timer_s.is_none() => {
-                            // Dropped gear brought back up inside the elevator cage stays in the Shed!
-                            item.in_shed = true;
-                        }
-                        _ => {
-                            despawned_ids.insert(item.id);
-                            coop.send_world_item_remove(item.id);
-                            commands.entity(ent).despawn();
-                        }
-                    }
-                } else {
+                }
+                ReturnedShedItemAction::KeepInShed => {
+                    // Dropped utility gear brought back up inside the elevator cage stays in the Shed!
+                    item.in_shed = true;
+                }
+                ReturnedShedItemAction::IgnoreShedProp => {}
+                ReturnedShedItemAction::Despawn => {
                     despawned_ids.insert(item.id);
                     coop.send_world_item_remove(item.id);
                     commands.entity(ent).despawn();
@@ -2476,7 +2483,15 @@ fn world_items_runtime_system(
             }
         }
         tf.translation = pos;
-        item.in_shed = is_pos_in_shed(pos, &level_info.0);
+        let is_extraction_loot = matches!(
+            item.kind,
+            WorldItemKind::HeavyRelic { .. }
+                | WorldItemKind::BonusLoot { .. }
+                | WorldItemKind::FallenBody { .. }
+        );
+        if !is_extraction_loot {
+            item.in_shed = is_pos_in_shed(pos, &level_info.0);
+        }
 
         if bounced && impact_speed > 2.0 {
             let is_heavy = is_two_handed_world_item(&item.kind);
@@ -3195,6 +3210,63 @@ fn sync_shed_props_streaming_system(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReturnedShedItemAction {
+    CashInRelic(u32),
+    CashInBonusLoot(u32),
+    ResolveBody { player_id: u16, recovered: bool },
+    KeepInShed,
+    IgnoreShedProp,
+    Despawn,
+}
+
+/// Classifies how a world item should be handled when the elevator finishes ascending to the Base Shed.
+///
+/// Extraction objectives (`HeavyRelic`, `BonusLoot`, `FallenBody`) are always resolved regardless of
+/// `in_shed` so relics riding up into Shed bounds are never skipped.
+fn evaluate_returned_shed_item(
+    kind: &WorldItemKind,
+    in_shed: bool,
+    inside_cage: bool,
+    active_timer_s: Option<f32>,
+) -> ReturnedShedItemAction {
+    match *kind {
+        WorldItemKind::FallenBody { player_id, .. } => {
+            return ReturnedShedItemAction::ResolveBody {
+                player_id,
+                recovered: inside_cage,
+            };
+        }
+        WorldItemKind::HeavyRelic { value, .. } => {
+            return if inside_cage {
+                ReturnedShedItemAction::CashInRelic(value)
+            } else {
+                ReturnedShedItemAction::Despawn
+            };
+        }
+        WorldItemKind::BonusLoot { value } => {
+            return if inside_cage {
+                ReturnedShedItemAction::CashInBonusLoot(value)
+            } else {
+                ReturnedShedItemAction::Despawn
+            };
+        }
+        _ => {}
+    }
+
+    if inside_cage {
+        if active_timer_s.is_none() {
+            ReturnedShedItemAction::KeepInShed
+        } else {
+            ReturnedShedItemAction::Despawn
+        }
+    } else if in_shed {
+        ReturnedShedItemAction::IgnoreShedProp
+    } else {
+        ReturnedShedItemAction::Despawn
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3311,6 +3383,74 @@ mod tests {
         assert!(
             !aabb_intersects_world(&world, resolved - r, resolved + r),
             "resolved carried relic position must never overlap solid voxels"
+        );
+    }
+
+    #[test]
+    fn returned_shed_counts_relics_and_loot_even_if_in_shed_flag_flipped() {
+        let relic = WorldItemKind::HeavyRelic {
+            value: 140,
+            weight_kg: 28.0,
+        };
+        let bonus = WorldItemKind::BonusLoot { value: 35 };
+        let body = WorldItemKind::FallenBody {
+            player_id: 2,
+            player_name: "Teammate".into(),
+        };
+        let battery = WorldItemKind::BatteryCell { charge: 0.5 };
+        let decoy = WorldItemKind::NoiseDecoy { count: 1 };
+
+        // Inside cage: relics/loot MUST cash in even if `in_shed` was flipped true during ascent!
+        assert_eq!(
+            evaluate_returned_shed_item(&relic, true, true, None),
+            ReturnedShedItemAction::CashInRelic(140)
+        );
+        assert_eq!(
+            evaluate_returned_shed_item(&relic, false, true, None),
+            ReturnedShedItemAction::CashInRelic(140)
+        );
+        assert_eq!(
+            evaluate_returned_shed_item(&bonus, true, true, None),
+            ReturnedShedItemAction::CashInBonusLoot(35)
+        );
+        assert_eq!(
+            evaluate_returned_shed_item(&body, true, true, None),
+            ReturnedShedItemAction::ResolveBody {
+                player_id: 2,
+                recovered: true
+            }
+        );
+
+        // Outside cage in the cave: relics/loot despawn, fallen body counts as unrecovered.
+        assert_eq!(
+            evaluate_returned_shed_item(&relic, false, false, None),
+            ReturnedShedItemAction::Despawn
+        );
+        assert_eq!(
+            evaluate_returned_shed_item(&body, false, false, None),
+            ReturnedShedItemAction::ResolveBody {
+                player_id: 2,
+                recovered: false
+            }
+        );
+
+        // Utility gear: brought back inside cage -> KeepInShed; already on Shed shelf -> IgnoreShedProp;
+        // left in cave or active decoy -> Despawn.
+        assert_eq!(
+            evaluate_returned_shed_item(&battery, false, true, None),
+            ReturnedShedItemAction::KeepInShed
+        );
+        assert_eq!(
+            evaluate_returned_shed_item(&battery, true, false, None),
+            ReturnedShedItemAction::IgnoreShedProp
+        );
+        assert_eq!(
+            evaluate_returned_shed_item(&battery, false, false, None),
+            ReturnedShedItemAction::Despawn
+        );
+        assert_eq!(
+            evaluate_returned_shed_item(&decoy, false, true, Some(4.0)),
+            ReturnedShedItemAction::Despawn
         );
     }
 }

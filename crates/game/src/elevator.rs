@@ -565,6 +565,9 @@ pub fn spawn_elevator_cage(
     let top_beam_z_mesh = meshes.add(Cuboid::new(0.18, 0.16, 6.26));
     let cross_beam_x_mesh = meshes.add(Cuboid::new(5.88, 0.08, 0.14));
     let cross_beam_z_mesh = meshes.add(Cuboid::new(0.14, 0.08, 5.88));
+    // Solid industrial steel ceiling plate enclosing the top of the cage so players never see up the open shaft.
+    // Sized `x in [-3.12, +3.06]` to seal over the top frame without intersecting the `+X` sliding door (`x = 3.135`).
+    let roof_plate_mesh = meshes.add(Cuboid::new(6.18, 0.14, 6.26));
     let rail_x_mesh = meshes.add(Cuboid::new(5.90, 0.08, 0.06));
     let rail_z_mesh = meshes.add(Cuboid::new(0.06, 0.08, 5.90));
     let door_mesh = meshes.add(Cuboid::new(0.10, 2.95, 5.88));
@@ -628,6 +631,12 @@ pub fn spawn_elevator_cage(
                 Mesh3d(cross_beam_z_mesh),
                 MeshMaterial3d(steel_dark_mat.clone()),
                 Transform::from_xyz(0.0, 3.13, 0.0),
+            ));
+            // Solid steel roof plate resting 2mm above the top perimeter beams (y = 3.282..3.422, ZERO Z-fighting!).
+            parent.spawn((
+                Mesh3d(roof_plate_mesh),
+                MeshMaterial3d(steel_dark_mat.clone()),
+                Transform::from_xyz(-0.03, 3.352, 0.0),
             ));
 
             // 4. Mid-posts (slightly inset at +-2.96) & safety bars (outside at +-3.05) — ZERO Z-fighting!
