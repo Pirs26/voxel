@@ -942,6 +942,8 @@ fn parkour_timer_system(
         parkour.reached_north_stage = false;
         parkour.last_finish_ms = None;
         parkour.last_finish_rank = None;
+        parkour.last_finish_is_pb = false;
+        parkour.last_best_ms = None;
         parkour.finish_banner_s = 0.0;
         sound_writer.write(PlaySpatialSoundEvent {
             pos_m: level_info.0.parkour_start_pos_m + Vec3::Y * 1.4,
@@ -1515,6 +1517,8 @@ fn station_and_item_interact_system(
 
                     let outcome = campaign.save.record_parkour_run(&coop.local_name, time_ms);
                     parkour_timer.last_finish_rank = outcome.rank;
+                    parkour_timer.last_finish_is_pb = outcome.is_personal_best;
+                    parkour_timer.last_best_ms = Some(outcome.best_time_ms);
 
                     if coop.is_host_or_solo() {
                         let _ = campaign.save_now();

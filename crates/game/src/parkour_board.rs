@@ -171,6 +171,8 @@ fn compute_board_signature(leaderboard: &[ParkourRecord], parkour: &ParkourTimer
     if show_finish {
         parkour.last_finish_ms.hash(&mut h);
         parkour.last_finish_rank.hash(&mut h);
+        parkour.last_finish_is_pb.hash(&mut h);
+        parkour.last_best_ms.hash(&mut h);
     }
     h.finish()
 }
@@ -203,15 +205,26 @@ pub fn render_parkour_billboard_rgba(
     } else if let Some(finish_ms) = parkour.last_finish_ms
         && parkour.finish_banner_s > 0.0
     {
-        let tag = match parkour.last_finish_rank {
-            Some(1) => "NEW #1!".to_string(),
-            Some(r) => format!("#{r}"),
-            None => "DONE".to_string(),
-        };
-        (
-            format!("FINISH: {}  [{tag}]", format_parkour_time_ms(finish_ms)),
-            [64, 235, 146, 255],
-        )
+        if parkour.last_finish_is_pb {
+            let tag = match parkour.last_finish_rank {
+                Some(1) => "NEW #1!".to_string(),
+                Some(r) => format!("NEW PB #{r}"),
+                None => "NEW PB".to_string(),
+            };
+            (
+                format!("FINISH: {}  [{tag}]", format_parkour_time_ms(finish_ms)),
+                [64, 235, 146, 255],
+            )
+        } else {
+            let tag = match parkour.last_best_ms {
+                Some(best_ms) => format!("PB {}", format_parkour_time_ms(best_ms)),
+                None => "DONE".to_string(),
+            };
+            (
+                format!("FINISH: {}  [{tag}]", format_parkour_time_ms(finish_ms)),
+                [238, 196, 84, 255],
+            )
+        }
     } else {
         (
             "PASS START GATE -> RING SUMMIT BELL".to_string(),
