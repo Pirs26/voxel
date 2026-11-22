@@ -79,6 +79,7 @@ pub enum MonsterBehaviorState {
     Investigate,
     Hunt,
     Attack,
+    Stunned,
 }
 
 /// Ordered, reliable messages sent over each peer's bidirectional QUIC control stream.
@@ -157,6 +158,16 @@ pub enum ReliableMessage {
     MonsterAttack {
         target_player_id: PlayerId,
         monster_pos_m: Vec3,
+    },
+    MonsterDamaged {
+        monster_id: u16,
+        damage: u8,
+        stun_s: f32,
+        knockback_dir: Vec3,
+    },
+    MonsterKilled {
+        monster_id: u16,
+        pos_m: Vec3,
     },
 }
 

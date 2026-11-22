@@ -107,6 +107,16 @@ pub enum NetEvent {
         target_player_id: PlayerId,
         monster_pos_m: Vec3,
     },
+    MonsterDamaged {
+        monster_id: u16,
+        damage: u8,
+        stun_s: f32,
+        knockback_dir: Vec3,
+    },
+    MonsterKilled {
+        monster_id: u16,
+        pos_m: Vec3,
+    },
     PlayerPose {
         player_id: PlayerId,
         tick: u32,
@@ -1226,6 +1236,23 @@ fn emit_reliable_event(events: &EventQueue, msg: ReliableMessage) {
                 monster_pos_m,
             },
         ),
+        ReliableMessage::MonsterDamaged {
+            monster_id,
+            damage,
+            stun_s,
+            knockback_dir,
+        } => push_event(
+            events,
+            NetEvent::MonsterDamaged {
+                monster_id,
+                damage,
+                stun_s,
+                knockback_dir,
+            },
+        ),
+        ReliableMessage::MonsterKilled { monster_id, pos_m } => {
+            push_event(events, NetEvent::MonsterKilled { monster_id, pos_m })
+        }
         ReliableMessage::Handshake { .. } | ReliableMessage::Welcome { .. } => {}
     }
 }
