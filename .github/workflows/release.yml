@@ -63,6 +63,8 @@ jobs:
         run: cargo test --release --workspace --exclude game
 
       - name: Build release binary
+        env:
+          APP_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: cargo build --release -p game
 
       - name: Package release archive (macOS)
@@ -107,6 +109,11 @@ jobs:
         with:
           path: release-artifacts
           merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        run: |
+          (cd release-artifacts && sha256sum echoes-below-windows-x64.zip echoes-below-macos-arm64.zip echoes-below-linux-x64.tar.gz > SHA256SUMS.txt)
+          cat release-artifacts/SHA256SUMS.txt
 
       - name: Classify Big Release (vX.Y / vX.Y.0) vs Pre-release (vX.Y.Z)
         id: classify
