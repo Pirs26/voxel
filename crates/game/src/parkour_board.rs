@@ -28,8 +28,9 @@ pub struct ParkourBillboardTexture {
     pub last_signature: u64,
 }
 
-/// Spawns the diegetic steel-framed LED Parkour Leaderboard & Clock billboard mounted on the
-/// North wall of the Parkour Room (`facing +Z`), plus an isolated child `PointLight` (NO `Mesh3d`).
+/// Spawns the giant diegetic steel-framed LED Parkour Leaderboard & Clock billboard (`7.6m x 4.6m`)
+/// mounted on the far East (`+X`) wall of the Parkour Room (`facing -X` straight toward the archway),
+/// plus an isolated child `PointLight` (NO `Mesh3d`).
 pub fn spawn_parkour_billboard(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -60,9 +61,9 @@ pub fn spawn_parkour_billboard(
         last_signature: sig,
     });
 
-    let frame_mesh = meshes.add(Cuboid::new(3.84, 2.48, 0.14));
-    let trim_mesh = meshes.add(Cuboid::new(3.86, 0.08, 0.16));
-    let screen_mesh = meshes.add(Rectangle::new(3.60, 2.25));
+    let frame_mesh = meshes.add(Cuboid::new(7.92, 4.88, 0.14));
+    let trim_mesh = meshes.add(Cuboid::new(7.96, 0.12, 0.18));
+    let screen_mesh = meshes.add(Rectangle::new(7.60, 4.60));
 
     let frame_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.16, 0.19, 0.23),
@@ -79,21 +80,24 @@ pub fn spawn_parkour_billboard(
     let screen_mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         base_color_texture: Some(image_handle.clone()),
-        emissive: LinearRgba::new(1.30, 1.30, 1.30, 1.0),
+        emissive: LinearRgba::new(1.35, 1.35, 1.35, 1.0),
         emissive_texture: Some(image_handle),
         perceptual_roughness: 0.32,
         metallic: 0.05,
         ..default()
     });
 
+    // Rotate by -90 deg around +Y so local +Z (screen normal) maps to world -X (facing the archway)
+    // and local +X (U=0..1 left-to-right text axis) maps to world +Z (right side when facing +X).
     commands
         .spawn((
-            Transform::from_translation(info.parkour_billboard_pos_m),
+            Transform::from_translation(info.parkour_billboard_pos_m)
+                .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
             Visibility::default(),
             ShedLandmarkVisual,
         ))
         .with_children(|parent| {
-            // Industrial dark steel backing frame flush against the North wall
+            // Industrial dark steel backing frame flush against the East (+X) wall
             parent.spawn((
                 Mesh3d(frame_mesh),
                 MeshMaterial3d(frame_mat),
@@ -103,24 +107,24 @@ pub fn spawn_parkour_billboard(
             parent.spawn((
                 Mesh3d(trim_mesh),
                 MeshMaterial3d(cyan_trim_mat),
-                Transform::from_xyz(0.0, 1.25, 0.01),
+                Transform::from_xyz(0.0, 2.46, 0.02),
             ));
-            // Dynamic LED scoreboard quad facing +Z (upright, un-mirrored)
+            // Giant 7.6m x 4.6m dynamic LED scoreboard quad facing -X (upright, un-mirrored)
             parent.spawn((
                 Mesh3d(screen_mesh),
                 MeshMaterial3d(screen_mat),
-                Transform::from_xyz(0.0, 0.0, 0.082),
+                Transform::from_xyz(0.0, 0.0, 0.10),
             ));
-            // Dedicated child PointLight illuminating the billboard & wall (NO Mesh3d)
+            // Dedicated child PointLight illuminating the giant billboard & East wall (NO Mesh3d)
             parent.spawn((
                 PointLight {
                     color: Color::srgb(0.55, 0.92, 1.0),
-                    intensity: 18_000.0,
-                    range: 9.0,
+                    intensity: 55_000.0,
+                    range: 20.0,
                     shadow_maps_enabled: false,
                     ..default()
                 },
-                Transform::from_xyz(0.0, 0.30, 0.95),
+                Transform::from_xyz(0.0, 0.30, 1.50),
             ));
         });
 }
@@ -438,6 +442,17 @@ mod tests {
         world.flush();
 
         assert!(world.contains_resource::<ParkourBillboardTexture>());
+        let mut root_q = world.query_filtered::<&Transform, With<ShedLandmarkVisual>>();
+        let root_tf = root_q.single(&world).expect("billboard root transform");
+        assert!(
+            root_tf.translation.x > info.parkour_bell_pos_m.x,
+            "billboard must be mounted on the far East (+X) wall beyond the center Summit Bell"
+        );
+        // Verify orientation: local +Z faces -X (toward archway), local +X maps to +Z (un-mirrored)
+        assert!((root_tf.local_z().as_vec3() - Vec3::NEG_X).length() < 1e-4);
+        assert!((root_tf.local_x().as_vec3() - Vec3::Z).length() < 1e-4);
+        assert!((root_tf.local_y().as_vec3() - Vec3::Y).length() < 1e-4);
+
         let mut light_q = world.query::<(&PointLight, Option<&Mesh3d>)>();
         let lights: Vec<_> = light_q.iter(&world).collect();
         assert_eq!(lights.len(), 1);

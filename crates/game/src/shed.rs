@@ -392,7 +392,7 @@ pub fn spawn_shed_landmarks(
             ));
         });
 
-    // 3. Parkour Room Summit Trophy Bell + overhead industrial Parkour Hall lights
+    // 3. Parkour Room Summit Trophy Bell + generous multi-quadrant Parkour Hall lighting rig
     let bell_base_mesh = meshes.add(Cuboid::new(0.46, 0.72, 0.46));
     let bell_dome_mesh = meshes.add(Cylinder::new(0.20, 0.30));
     let bell_cap_mesh = meshes.add(Sphere::new(0.11));
@@ -409,6 +409,71 @@ pub fn spawn_shed_landmarks(
         perceptual_roughness: 0.42,
         ..default()
     });
+
+    // Compute world-space offsets relative to `parkour_bell_pos_m` for the 7 distributed
+    // Parkour Hall floodlights covering all 4 quadrants, the West entrance/runway, the East
+    // billboard wall, and the high center rafters (every PointLight on its own child entity
+    // with NO Mesh3d!).
+    let bell_pos = info.parkour_bell_pos_m;
+    let room_min_x = info.parkour_room_min_x_m;
+    let room_max_x = info.shed_bounds_max_m.x;
+    let room_mid_x = 0.5 * (room_min_x + room_max_x);
+    let room_min_z = info.shed_bounds_min_m.z;
+    let room_max_z = info.shed_bounds_max_m.z;
+    let room_mid_z = 0.5 * (room_min_z + room_max_z);
+    let floor_y = info.shed_floor_y_m;
+
+    let hall_lights: [(Vec3, Color, f32, f32); 7] = [
+        // West Entrance & Start Gate Sprint Runway light
+        (
+            Vec3::new(room_min_x + 4.2, floor_y + 5.5, room_mid_z + 2.5) - bell_pos,
+            Color::srgb(0.95, 0.96, 1.0),
+            72_000.0,
+            26.0,
+        ),
+        // Southwest Stage 1 (P1..P4) warm industrial light
+        (
+            Vec3::new(room_min_x + 7.5, floor_y + 6.5, room_max_z - 3.2) - bell_pos,
+            Color::srgb(1.0, 0.93, 0.84),
+            72_000.0,
+            26.0,
+        ),
+        // Southeast Stage 2 switchback climb (P4..P10) industrial amber-white light
+        (
+            Vec3::new(room_max_x - 4.2, floor_y + 7.8, room_max_z - 3.2) - bell_pos,
+            Color::srgb(1.0, 0.90, 0.78),
+            75_000.0,
+            28.0,
+        ),
+        // East Center Leaderboard Billboard & High Overpass (P10..P12) cyan-white accent light
+        (
+            Vec3::new(room_max_x - 4.5, floor_y + 7.2, room_mid_z) - bell_pos,
+            Color::srgb(0.84, 0.95, 1.0),
+            76_000.0,
+            28.0,
+        ),
+        // Northeast Stage 3 high rafters (P13..P15) sky-white light
+        (
+            Vec3::new(room_max_x - 4.2, floor_y + 9.2, room_min_z + 3.2) - bell_pos,
+            Color::srgb(0.90, 0.96, 1.0),
+            75_000.0,
+            28.0,
+        ),
+        // Northwest Stage 3 rafters & West Summit launch pad (P16..P19) warm-white light
+        (
+            Vec3::new(room_min_x + 4.8, floor_y + 9.2, room_min_z + 3.5) - bell_pos,
+            Color::srgb(0.98, 0.95, 0.88),
+            75_000.0,
+            28.0,
+        ),
+        // Central High Ceiling floodlight illuminating the entire hall & summit exterior
+        (
+            Vec3::new(room_mid_x, floor_y + 10.5, room_mid_z) - bell_pos,
+            Color::srgb(0.96, 0.97, 1.0),
+            80_000.0,
+            30.0,
+        ),
+    ];
 
     commands
         .spawn((
@@ -432,28 +497,30 @@ pub fn spawn_shed_landmarks(
                 MeshMaterial3d(gold_bell_mat),
                 Transform::from_xyz(0.0, 1.06, 0.0),
             ));
-            // Dedicated child PointLight illuminating the Summit Bell (NO Mesh3d)
+            // Dedicated child PointLight illuminating the Summit Bell booth (NO Mesh3d)
             parent.spawn((
                 PointLight {
-                    color: Color::srgb(1.0, 0.84, 0.38),
-                    intensity: 42_000.0,
-                    range: 16.0,
+                    color: Color::srgb(1.0, 0.86, 0.42),
+                    intensity: 65_000.0,
+                    range: 24.0,
                     shadow_maps_enabled: false,
                     ..default()
                 },
-                Transform::from_xyz(0.0, 1.65, 0.0),
+                Transform::from_xyz(0.0, 1.85, 0.0),
             ));
-            // Dedicated lower hall PointLight illuminating the entrance & warm-up steps (NO Mesh3d)
-            parent.spawn((
-                PointLight {
-                    color: Color::srgb(0.86, 0.92, 1.0),
-                    intensity: 52_000.0,
-                    range: 22.0,
-                    shadow_maps_enabled: false,
-                    ..default()
-                },
-                Transform::from_xyz(-3.2, -3.2, 2.2),
-            ));
+            // 7 dedicated Parkour Hall PointLights covering every quadrant, wall stage & ceiling (NO Mesh3d)
+            for (rel_pos, color, intensity, range) in hall_lights {
+                parent.spawn((
+                    PointLight {
+                        color,
+                        intensity,
+                        range,
+                        shadow_maps_enabled: false,
+                        ..default()
+                    },
+                    Transform::from_translation(rel_pos),
+                ));
+            }
         });
 
     // 4. Parkour Room Start Gate Arch (glowing emerald/cyan laser gate in front of Stage 1!)
@@ -506,12 +573,12 @@ pub fn spawn_shed_landmarks(
                 MeshMaterial3d(gate_glow_mat),
                 Transform::from_xyz(0.0, 0.015, 0.0),
             ));
-            // Dedicated child PointLight illuminating the Start Gate (NO Mesh3d)
+            // Dedicated child PointLight illuminating the Start Gate & sprint runway (NO Mesh3d)
             parent.spawn((
                 PointLight {
                     color: Color::srgb(0.22, 1.0, 0.65),
-                    intensity: 26_000.0,
-                    range: 10.0,
+                    intensity: 48_000.0,
+                    range: 16.0,
                     shadow_maps_enabled: false,
                     ..default()
                 },
@@ -654,7 +721,7 @@ mod tests {
 
         let mut light_q = world.query::<(&PointLight, Option<&Mesh3d>)>();
         let lights: Vec<_> = light_q.iter(&world).collect();
-        assert_eq!(lights.len(), 5);
+        assert_eq!(lights.len(), 11);
         for (_, mesh) in lights {
             assert!(
                 mesh.is_none(),
