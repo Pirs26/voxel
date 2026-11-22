@@ -256,6 +256,7 @@ impl SaveSlotBrowser {
             .unwrap_or(DEFAULT_SAVE_SLOT)
     }
 
+    #[allow(dead_code)]
     pub fn step(&mut self, delta: i32) {
         if self.slots.is_empty() {
             return;

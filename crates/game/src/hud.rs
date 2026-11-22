@@ -33,13 +33,14 @@ use crate::{
     player::PlayerFlashlight,
     relic::{WorldItemEntity, world_item_display_name},
     save::{CampaignState, SaveSlotBrowser},
-    settings::{AppScreen, FOV_MAX_DEG, FOV_MIN_DEG, SettingsMenuOpen, UserSettings},
+    settings::{AppScreen, DisplayMode, FOV_MAX_DEG, FOV_MIN_DEG, SettingsMenuOpen, UserSettings},
     shed::{CrosshairTargetState, ShopOverlayOpen, TargetAccent},
     updater_bridge::{UpdaterCommand, UpdaterState, UpdaterUiStatus},
 };
 
 const SLIDER_HIT_STEPS: usize = 20;
 const MIC_LED_BARS: usize = 10;
+const SAVE_DROPDOWN_ROWS: usize = 6;
 
 // ---- Color Palette (Subterranean Tactical Dive UI) ----
 const COL_PANEL_BG: Color = Color::srgba(0.04, 0.06, 0.09, 0.94);
@@ -58,6 +59,12 @@ struct NameInputFocused(bool);
 
 #[derive(Resource, Default)]
 struct DiagnosticsDrawerOpen(bool);
+
+#[derive(Resource, Default)]
+struct SaveDropdownState {
+    open: bool,
+    page: usize,
+}
 
 // ---- Unified Panel Visibility Marker (Zero B0001 conflicts!) ----
 
@@ -92,6 +99,27 @@ struct MainMenuSaveNameText;
 
 #[derive(Component)]
 struct MainMenuSaveMetaText;
+
+#[derive(Component)]
+struct SaveDropdownChevron;
+
+#[derive(Component)]
+struct SaveDropdownList;
+
+#[derive(Component, Clone, Copy)]
+struct SaveDropdownRow(usize);
+
+#[derive(Component, Clone, Copy)]
+struct SaveDropdownRowName(usize);
+
+#[derive(Component, Clone, Copy)]
+struct SaveDropdownRowMeta(usize);
+
+#[derive(Component)]
+struct SaveDropdownPagerRow;
+
+#[derive(Component)]
+struct SaveDropdownPageLabel;
 
 #[derive(Component, Clone, Copy)]
 struct SaveTierPip(u8);
@@ -293,8 +321,9 @@ enum UiAction {
     CancelConnecting,
     FocusNameInput,
     SelectVisor(usize),
-    PrevSaveSlot,
-    NextSaveSlot,
+    ToggleSaveDropdown,
+    SelectSaveRow(usize),
+    SaveListPage(i32),
     NewSaveSlot,
     RefreshSaveSlots,
     OpenSettings,
@@ -337,6 +366,7 @@ impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NameInputFocused>()
             .init_resource::<DiagnosticsDrawerOpen>()
+            .init_resource::<SaveDropdownState>()
             .add_message::<TriggerUiAction>()
             .add_systems(Startup, setup_hud)
             .add_systems(
@@ -346,6 +376,7 @@ impl Plugin for HudPlugin {
                     handle_ui_actions_system,
                     update_panel_visibility_system,
                     update_menu_and_shop_system,
+                    update_save_dropdown_system,
                     update_ingame_bars_system,
                     update_crosshair_and_target_system,
                     update_hotbar_and_pouch_system,
@@ -1010,47 +1041,183 @@ fn setup_hud(mut commands: Commands) {
                                     });
                                 });
 
-                                sec.spawn(Node {
-                                    flex_direction: FlexDirection::Row,
-                                    align_items: AlignItems::Center,
-                                    column_gap: Val::Px(6.0),
-                                    width: Val::Percent(100.0),
-                                    ..default()
-                                })
-                                .with_children(|row| {
-                                    spawn_std_btn(row, "<", UiAction::PrevSaveSlot);
-                                    row.spawn((
-                                        Node {
-                                            flex_grow: 1.0,
-                                            padding: UiRect::axes(Val::Px(10.0), Val::Px(7.0)),
-                                            border_radius: BorderRadius::all(Val::Px(6.0)),
-                                            flex_direction: FlexDirection::Column,
-                                            row_gap: Val::Px(2.0),
-                                            ..default()
-                                        },
-                                        BackgroundColor(Color::srgba(0.05, 0.08, 0.12, 0.96)),
-                                    ))
-                                    .with_children(|slot_box| {
-                                        slot_box.spawn((
-                                            Text::new("default"),
-                                            TextFont {
-                                                font_size: FontSize::Px(14.0),
+                                // Clickable Save Selector Dropdown Header
+                                let dd_base = Color::srgba(0.05, 0.08, 0.12, 0.96);
+                                let dd_hover = Color::srgba(0.09, 0.15, 0.22, 0.98);
+                                sec.spawn((
+                                    Node {
+                                        width: Val::Percent(100.0),
+                                        padding: UiRect::axes(Val::Px(11.0), Val::Px(8.0)),
+                                        border: UiRect::all(Val::Px(1.5)),
+                                        border_radius: BorderRadius::all(Val::Px(6.0)),
+                                        flex_direction: FlexDirection::Row,
+                                        justify_content: JustifyContent::SpaceBetween,
+                                        align_items: AlignItems::Center,
+                                        column_gap: Val::Px(8.0),
+                                        ..default()
+                                    },
+                                    BackgroundColor(dd_base),
+                                    BorderColor::all(COL_BORDER_DIM),
+                                ))
+                                .observe(
+                                    |_click: On<PointerClick>,
+                                     mut writer: MessageWriter<TriggerUiAction>| {
+                                        writer.write(TriggerUiAction(UiAction::ToggleSaveDropdown));
+                                    },
+                                )
+                                .observe(
+                                    move |over: On<PointerOver>,
+                                          mut bg_q: Query<&mut BackgroundColor>| {
+                                        if let Ok(mut bg) = bg_q.get_mut(over.entity) {
+                                            *bg = BackgroundColor(dd_hover);
+                                        }
+                                    },
+                                )
+                                .observe(
+                                    move |out: On<PointerOut>,
+                                          mut bg_q: Query<&mut BackgroundColor>| {
+                                        if let Ok(mut bg) = bg_q.get_mut(out.entity) {
+                                            *bg = BackgroundColor(dd_base);
+                                        }
+                                    },
+                                )
+                                .with_children(|slot_box| {
+                                    slot_box
+                                        .spawn((
+                                            Node {
+                                                flex_direction: FlexDirection::Column,
+                                                row_gap: Val::Px(2.0),
                                                 ..default()
                                             },
-                                            TextColor(COL_ACCENT_CYAN),
-                                            MainMenuSaveNameText,
-                                        ));
-                                        slot_box.spawn((
-                                            Text::new("New Campaign • 100 cr"),
+                                            Pickable::IGNORE,
+                                        ))
+                                        .with_children(|col| {
+                                            col.spawn((
+                                                Text::new("default"),
+                                                TextFont {
+                                                    font_size: FontSize::Px(14.0),
+                                                    ..default()
+                                                },
+                                                TextColor(COL_ACCENT_CYAN),
+                                                Pickable::IGNORE,
+                                                MainMenuSaveNameText,
+                                            ));
+                                            col.spawn((
+                                                Text::new("New Campaign • 100 cr"),
+                                                TextFont {
+                                                    font_size: FontSize::Px(11.5),
+                                                    ..default()
+                                                },
+                                                TextColor(COL_TEXT_MUTED),
+                                                Pickable::IGNORE,
+                                                MainMenuSaveMetaText,
+                                            ));
+                                        });
+
+                                    slot_box.spawn((
+                                        Text::new("▼"),
+                                        TextFont {
+                                            font_size: FontSize::Px(12.0),
+                                            ..default()
+                                        },
+                                        TextColor(COL_ACCENT_CYAN),
+                                        Pickable::IGNORE,
+                                        SaveDropdownChevron,
+                                    ));
+                                });
+
+                                // Expandable Clickable Save Slot List (up to 6 visible rows + optional pager)
+                                sec.spawn((
+                                    Node {
+                                        width: Val::Percent(100.0),
+                                        padding: UiRect::all(Val::Px(6.0)),
+                                        border: UiRect::all(Val::Px(1.0)),
+                                        border_radius: BorderRadius::all(Val::Px(6.0)),
+                                        flex_direction: FlexDirection::Column,
+                                        row_gap: Val::Px(4.0),
+                                        display: Display::None,
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgba(0.035, 0.055, 0.085, 0.98)),
+                                    BorderColor::all(COL_ACCENT_CYAN),
+                                    SaveDropdownList,
+                                ))
+                                .with_children(|list| {
+                                    for row_idx in 0..SAVE_DROPDOWN_ROWS {
+                                        list.spawn((
+                                            Node {
+                                                width: Val::Percent(100.0),
+                                                padding: UiRect::axes(Val::Px(9.0), Val::Px(6.0)),
+                                                border: UiRect::all(Val::Px(1.0)),
+                                                border_radius: BorderRadius::all(Val::Px(5.0)),
+                                                flex_direction: FlexDirection::Row,
+                                                justify_content: JustifyContent::SpaceBetween,
+                                                align_items: AlignItems::Center,
+                                                column_gap: Val::Px(8.0),
+                                                display: Display::None,
+                                                ..default()
+                                            },
+                                            BackgroundColor(COL_CARD_BG),
+                                            BorderColor::all(COL_BORDER_DIM),
+                                            SaveDropdownRow(row_idx),
+                                        ))
+                                        .observe(
+                                            move |_click: On<PointerClick>,
+                                                  mut writer: MessageWriter<TriggerUiAction>| {
+                                                writer.write(TriggerUiAction(
+                                                    UiAction::SelectSaveRow(row_idx),
+                                                ));
+                                            },
+                                        )
+                                        .with_children(|r| {
+                                            r.spawn((
+                                                Text::new(""),
+                                                TextFont {
+                                                    font_size: FontSize::Px(13.0),
+                                                    ..default()
+                                                },
+                                                TextColor(COL_TEXT_BRIGHT),
+                                                Pickable::IGNORE,
+                                                SaveDropdownRowName(row_idx),
+                                            ));
+                                            r.spawn((
+                                                Text::new(""),
+                                                TextFont {
+                                                    font_size: FontSize::Px(11.0),
+                                                    ..default()
+                                                },
+                                                TextColor(COL_TEXT_MUTED),
+                                                Pickable::IGNORE,
+                                                SaveDropdownRowMeta(row_idx),
+                                            ));
+                                        });
+                                    }
+
+                                    list.spawn((
+                                        Node {
+                                            width: Val::Percent(100.0),
+                                            flex_direction: FlexDirection::Row,
+                                            justify_content: JustifyContent::SpaceBetween,
+                                            align_items: AlignItems::Center,
+                                            margin: UiRect::top(Val::Px(2.0)),
+                                            display: Display::None,
+                                            ..default()
+                                        },
+                                        SaveDropdownPagerRow,
+                                    ))
+                                    .with_children(|pager| {
+                                        spawn_std_btn(pager, "Prev", UiAction::SaveListPage(-1));
+                                        pager.spawn((
+                                            Text::new("1 / 1"),
                                             TextFont {
-                                                font_size: FontSize::Px(11.5),
+                                                font_size: FontSize::Px(11.0),
                                                 ..default()
                                             },
                                             TextColor(COL_TEXT_MUTED),
-                                            MainMenuSaveMetaText,
+                                            SaveDropdownPageLabel,
                                         ));
+                                        spawn_std_btn(pager, "Next", UiAction::SaveListPage(1));
                                     });
-                                    spawn_std_btn(row, ">", UiAction::NextSaveSlot);
                                 });
 
                                 sec.spawn(Node {
@@ -3066,6 +3233,7 @@ struct ActionResources<'w> {
     voice_settings: ResMut<'w, VoiceSettings>,
     device_catalog: ResMut<'w, AudioDeviceCatalog>,
     save_browser: ResMut<'w, SaveSlotBrowser>,
+    save_dropdown: ResMut<'w, SaveDropdownState>,
     inv: Res<'w, PlayerInventory>,
 }
 
@@ -3092,6 +3260,7 @@ fn handle_ui_actions_system(
     let voice_settings = &mut *res.voice_settings;
     let device_catalog = &mut *res.device_catalog;
     let save_browser = &mut *res.save_browser;
+    let save_dropdown = &mut *res.save_dropdown;
     let inv = &*res.inv;
 
     for TriggerUiAction(action) in actions.read().copied() {
@@ -3108,16 +3277,30 @@ fn handle_ui_actions_system(
                     coop.sync_local_profile(inv);
                 }
             }
-            UiAction::PrevSaveSlot => {
-                save_browser.step(-1);
-                coop.status_text = format!("Save slot '{}' selected", save_browser.selected_slot_name());
+            UiAction::ToggleSaveDropdown => {
+                save_dropdown.open = !save_dropdown.open;
+                if save_dropdown.open {
+                    save_browser.refresh();
+                    save_dropdown.page = save_browser.selected_idx / SAVE_DROPDOWN_ROWS;
+                }
             }
-            UiAction::NextSaveSlot => {
-                save_browser.step(1);
-                coop.status_text = format!("Save slot '{}' selected", save_browser.selected_slot_name());
+            UiAction::SelectSaveRow(row_idx) => {
+                let abs_idx = save_dropdown.page * SAVE_DROPDOWN_ROWS + row_idx;
+                if abs_idx < save_browser.slots.len() {
+                    save_browser.selected_idx = abs_idx;
+                    coop.status_text =
+                        format!("Save slot '{}' selected", save_browser.selected_slot_name());
+                }
+                save_dropdown.open = false;
+            }
+            UiAction::SaveListPage(delta) => {
+                let total_pages = save_browser.slots.len().div_ceil(SAVE_DROPDOWN_ROWS).max(1);
+                let next = (save_dropdown.page as i32 + delta).rem_euclid(total_pages as i32);
+                save_dropdown.page = next as usize;
             }
             UiAction::RefreshSaveSlots => {
                 save_browser.refresh();
+                save_dropdown.page = save_browser.selected_idx / SAVE_DROPDOWN_ROWS;
                 coop.status_text = format!(
                     "Found {} save slot(s) — '{}'",
                     save_browser.slots.len(),
@@ -3125,7 +3308,11 @@ fn handle_ui_actions_system(
                 );
             }
             UiAction::NewSaveSlot => match save_browser.create_new_slot() {
-                Ok(name) => coop.status_text = format!("Created new save slot '{name}'"),
+                Ok(name) => {
+                    save_dropdown.page = save_browser.selected_idx / SAVE_DROPDOWN_ROWS;
+                    save_dropdown.open = false;
+                    coop.status_text = format!("Created new save slot '{name}'");
+                }
                 Err(e) => coop.status_text = format!("Save creation error: {e}"),
             },
             UiAction::PlaySolo => {
@@ -3207,7 +3394,7 @@ fn handle_ui_actions_system(
                 menu_open.0 = false;
                 settings_open.0 = false;
             }
-            UiAction::ToggleFullscreen => user_settings.fullscreen = !user_settings.fullscreen,
+            UiAction::ToggleFullscreen => user_settings.cycle_display_mode(),
             UiAction::ToggleIncludePrereleases => {
                 user_settings.include_prereleases = !user_settings.include_prereleases;
                 let _ = user_settings.save_default();
@@ -3470,6 +3657,97 @@ fn update_menu_and_shop_system(
             *b = BorderColor::all(Color::srgba(0.16, 0.18, 0.22, 0.55));
             *bg = BackgroundColor(Color::srgba(0.05, 0.06, 0.08, 0.72));
         }
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn update_save_dropdown_system(
+    save_browser: Res<SaveSlotBrowser>,
+    mut dropdown: ResMut<SaveDropdownState>,
+    mut nodes: ParamSet<(
+        Query<&mut Node, With<SaveDropdownList>>,
+        Query<(&SaveDropdownRow, &mut Node, &mut BackgroundColor, &mut BorderColor)>,
+        Query<&mut Node, With<SaveDropdownPagerRow>>,
+    )>,
+    mut texts: ParamSet<(
+        Query<&mut Text, With<SaveDropdownChevron>>,
+        Query<(&SaveDropdownRowName, &mut Text, &mut TextColor)>,
+        Query<(&SaveDropdownRowMeta, &mut Text)>,
+        Query<&mut Text, With<SaveDropdownPageLabel>>,
+    )>,
+) {
+    let total_pages = save_browser.slots.len().div_ceil(SAVE_DROPDOWN_ROWS).max(1);
+    if dropdown.page >= total_pages {
+        dropdown.page = total_pages - 1;
+    }
+
+    if let Ok(mut ch) = texts.p0().single_mut() {
+        ch.0 = if dropdown.open { "▲" } else { "▼" }.to_string();
+    }
+    if let Ok(mut list_node) = nodes.p0().single_mut() {
+        list_node.display = if dropdown.open {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    if !dropdown.open {
+        return;
+    }
+
+    let start = dropdown.page * SAVE_DROPDOWN_ROWS;
+    for (row, mut node, mut bg, mut border) in &mut nodes.p1() {
+        let abs_idx = start + row.0;
+        if abs_idx < save_browser.slots.len() {
+            node.display = Display::Flex;
+            let selected = abs_idx == save_browser.selected_idx;
+            *bg = BackgroundColor(if selected {
+                Color::srgba(0.09, 0.24, 0.28, 0.98)
+            } else {
+                COL_CARD_BG
+            });
+            *border = BorderColor::all(if selected {
+                COL_ACCENT_CYAN
+            } else {
+                COL_BORDER_DIM
+            });
+        } else {
+            node.display = Display::None;
+        }
+    }
+    for (rn, mut t, mut col) in &mut texts.p1() {
+        let abs_idx = start + rn.0;
+        if let Some(slot) = save_browser.slots.get(abs_idx) {
+            t.0 = slot.slot_name.clone();
+            *col = TextColor(if abs_idx == save_browser.selected_idx {
+                COL_ACCENT_CYAN
+            } else {
+                COL_TEXT_BRIGHT
+            });
+        }
+    }
+    for (rm, mut t) in &mut texts.p2() {
+        let abs_idx = start + rm.0;
+        if let Some(slot) = save_browser.slots.get(abs_idx) {
+            t.0 = if slot.exists_on_disk {
+                format!(
+                    "{} cr • T{} • {}d",
+                    slot.credits, slot.unlocked_depth_tier, slot.dives_completed
+                )
+            } else {
+                format!("New • {} cr", slot.credits)
+            };
+        }
+    }
+    if let Ok(mut pager) = nodes.p2().single_mut() {
+        pager.display = if total_pages > 1 {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    if let Ok(mut lbl) = texts.p3().single_mut() {
+        lbl.0 = format!("Page {} / {}", dropdown.page + 1, total_pages);
     }
 }
 
@@ -4050,21 +4328,23 @@ fn update_settings_widgets_system(
                     )
                 }
             }
-            ToggleKind::Fullscreen => {
-                if user_settings.fullscreen {
-                    (
-                        Color::srgba(0.09, 0.30, 0.34, 0.98),
-                        Color::srgba(0.14, 0.43, 0.47, 0.98),
-                        COL_ACCENT_CYAN,
-                    )
-                } else {
-                    (
-                        Color::srgba(0.11, 0.16, 0.22, 0.96),
-                        Color::srgba(0.18, 0.28, 0.36, 0.98),
-                        COL_BORDER_DIM,
-                    )
-                }
-            }
+            ToggleKind::Fullscreen => match user_settings.effective_display_mode() {
+                DisplayMode::Windowed => (
+                    Color::srgba(0.11, 0.16, 0.22, 0.96),
+                    Color::srgba(0.18, 0.28, 0.36, 0.98),
+                    COL_BORDER_DIM,
+                ),
+                DisplayMode::Borderless => (
+                    Color::srgba(0.09, 0.30, 0.34, 0.98),
+                    Color::srgba(0.14, 0.43, 0.47, 0.98),
+                    COL_ACCENT_CYAN,
+                ),
+                DisplayMode::Fullscreen => (
+                    Color::srgba(0.09, 0.28, 0.19, 0.98),
+                    Color::srgba(0.13, 0.39, 0.27, 0.98),
+                    COL_ACCENT_GREEN,
+                ),
+            },
             ToggleKind::IncludePrereleases => {
                 if user_settings.include_prereleases {
                     (
@@ -4117,13 +4397,7 @@ fn update_settings_widgets_system(
                     "Self-Echo: OFF [V]".to_string()
                 }
             }
-            ToggleKind::Fullscreen => {
-                if user_settings.fullscreen {
-                    "Borderless Fullscreen".to_string()
-                } else {
-                    "Windowed".to_string()
-                }
-            }
+            ToggleKind::Fullscreen => user_settings.effective_display_mode().label().to_string(),
             ToggleKind::IncludePrereleases => {
                 if user_settings.include_prereleases {
                     "Pre-releases: ON".to_string()
