@@ -609,6 +609,8 @@ struct InventoryInputRes<'w> {
     settings_open: Res<'w, SettingsMenuOpen>,
     health: Res<'w, PlayerHealthState>,
     coop: Res<'w, CoopState>,
+    world_res: Res<'w, WorldResource>,
+    elevator: Option<Res<'w, ElevatorState>>,
     level_info: Res<'w, LevelInfoResource>,
     inv: ResMut<'w, PlayerInventory>,
     item_reg: ResMut<'w, WorldItemRegistry>,
@@ -635,6 +637,8 @@ fn inventory_input_system(
     let settings_open = &res.settings_open;
     let health = &res.health;
     let coop = &res.coop;
+    let world_res = &res.world_res;
+    let elevator = res.elevator.as_deref();
     let level_info = &res.level_info;
     let inv = &mut res.inv;
     let item_reg = &mut res.item_reg;
@@ -719,7 +723,16 @@ fn inventory_input_system(
 
         if keys.just_pressed(KeyCode::KeyQ) {
             if let Some(cell) = inv.drop_selected_pouch_battery() {
-                let drop_pos = cam_tf.translation + forward * 0.65;
+                let drop_pos = {
+                    let world = world_res.read();
+                    resolve_carried_item_position(
+                        &world,
+                        elevator,
+                        cam_tf.translation,
+                        cam_tf.translation + forward * 0.65,
+                        Vec3::splat(0.14),
+                    )
+                };
                 let drop_vel = forward * 3.8 + Vec3::Y * 1.4;
                 let id = item_reg.alloc_id();
                 let net_state = WorldItemNetState {
@@ -809,7 +822,16 @@ fn inventory_input_system(
                 let loaded_charge = inv.loaded_battery_charge();
                 if let Some(dropped_item) = inv.drop_active_belt_item() {
                     let kind = belt_item_to_world_kind(&dropped_item, loaded_charge);
-                    let drop_pos = cam_tf.translation + forward * 0.65;
+                    let drop_pos = {
+                        let world = world_res.read();
+                        resolve_carried_item_position(
+                            &world,
+                            elevator,
+                            cam_tf.translation,
+                            cam_tf.translation + forward * 0.65,
+                            Vec3::splat(0.14),
+                        )
+                    };
                     let drop_vel = forward * 3.4 + Vec3::Y * 1.1;
                     let id = item_reg.alloc_id();
                     let net_state = WorldItemNetState {
@@ -850,7 +872,16 @@ fn inventory_input_system(
         && matches!(inv.active_item(), Some(BeltItem::NoiseDecoys { .. }));
     if (rmb_held_decoy || keys.just_pressed(KeyCode::KeyT)) && !inv.is_hands_occupied() {
         if inv.consume_decoy() {
-            let origin = cam_tf.translation + forward * 0.6;
+            let origin = {
+                let world = world_res.read();
+                resolve_carried_item_position(
+                    &world,
+                    elevator,
+                    cam_tf.translation,
+                    cam_tf.translation + forward * 0.6,
+                    Vec3::splat(0.14),
+                )
+            };
             let vel = forward * 11.0 + Vec3::Y * 2.5;
             let id = item_reg.alloc_id();
             let net_state = WorldItemNetState {
@@ -2125,6 +2156,58 @@ fn elevator_runtime_system(
     }
 }
 
+/// Sweeps a carried or freshly dropped physical item (`anchor_m -> desired_m`, AABB half-extents
+/// `half_extents`) against solid voxels and the moving elevator floor/closed steel gates so Heavy
+/// Relics, Fallen Bodies, and dropped tools slide smoothly along walls and can NEVER phase through them.
+pub fn resolve_carried_item_position(
+    world: &voxel_core::VoxelWorld,
+    elevator: Option<&ElevatorState>,
+    anchor_m: Vec3,
+    desired_m: Vec3,
+    half_extents: Vec3,
+) -> Vec3 {
+    let mut safe_anchor = anchor_m;
+    if aabb_intersects_world(world, safe_anchor - half_extents, safe_anchor + half_extents) {
+        for lift in [0.25_f32, 0.50, 0.75] {
+            let cand = anchor_m + Vec3::Y * lift;
+            if !aabb_intersects_world(world, cand - half_extents, cand + half_extents) {
+                safe_anchor = cand;
+                break;
+            }
+        }
+    }
+
+    let mut pos = safe_anchor;
+    let delta = desired_m - safe_anchor;
+    let dist = delta.length();
+    let steps = ((dist / 0.10).ceil() as usize).clamp(1, 20);
+    let step_delta = delta / steps as f32;
+
+    for _ in 0..steps {
+        for axis in [0usize, 2, 1] {
+            let mut next = pos;
+            next[axis] += step_delta[axis];
+            if !aabb_intersects_world(world, next - half_extents, next + half_extents) {
+                pos = next;
+            }
+        }
+    }
+
+    if let Some(elev) = elevator {
+        let mut dummy_vel = Vec3::ZERO;
+        elev.collide_dynamic_with_elevator(
+            safe_anchor,
+            &mut pos,
+            &mut dummy_vel,
+            half_extents,
+            0.0,
+            1.0,
+        );
+    }
+
+    pos
+}
+
 #[derive(SystemParam)]
 struct WorldItemsEnv<'w> {
     world_res: Res<'w, WorldResource>,
@@ -2223,7 +2306,9 @@ fn world_items_runtime_system(
         if !item.carried_by.is_empty() && is_two_handed_world_item(&item.kind) {
             let carrier_count = item.carried_by.len();
             let carrying_body = is_fallen_body(&item.kind);
+            let carry_r = Vec3::splat(0.32);
             let mut sum_pos = Vec3::ZERO;
+            let mut sum_anchor = Vec3::ZERO;
             let mut valid_carriers = 0usize;
             let mut local_moving = false;
 
@@ -2232,33 +2317,42 @@ fn world_items_runtime_system(
                     if let Some((pc, cam_tf)) = local_player {
                         let fwd = cam_tf.forward().as_vec3();
                         let horiz_fwd = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
-                        let (reach, hold_y) = if carrying_body {
+                        let (reach, hold_y): (f32, f32) = if carrying_body {
                             (0.85, 0.72)
                         } else if carrier_count >= 2 {
                             (1.15, 0.85)
                         } else {
                             (1.15, 0.35)
                         };
+                        let anchor = pc.feet_pos_m + Vec3::Y * hold_y.max(0.45);
+                        sum_anchor += anchor;
                         sum_pos += pc.feet_pos_m + horiz_fwd * reach + Vec3::Y * hold_y;
                         valid_carriers += 1;
                         local_moving = pc.velocity_m.xz().length() > 0.35;
                     }
                 } else if let Some(rp) = coop.remote_players.get(&cid) {
-                    let hold_y = if carrying_body {
+                    let hold_y: f32 = if carrying_body {
                         0.72
                     } else if carrier_count >= 2 {
                         0.85
                     } else {
                         0.35
                     };
+                    let anchor = rp.current_feet_m + Vec3::Y * hold_y.max(0.45);
+                    sum_anchor += anchor;
                     sum_pos += rp.current_feet_m + Vec3::Y * hold_y;
                     valid_carriers += 1;
                 }
             }
 
             if valid_carriers > 0 {
-                let target = sum_pos / valid_carriers as f32;
-                tf.translation = tf.translation.lerp(target, (dt * 12.0).min(1.0));
+                let anchor = sum_anchor / valid_carriers as f32;
+                let raw_target = sum_pos / valid_carriers as f32;
+                let safe_target =
+                    resolve_carried_item_position(&world, elevator, anchor, raw_target, carry_r);
+                let lerped = tf.translation.lerp(safe_target, (dt * 14.0).min(1.0));
+                tf.translation =
+                    resolve_carried_item_position(&world, elevator, anchor, lerped, carry_r);
                 item.vel_m = Vec3::ZERO;
                 item.settled = false;
             }
@@ -2327,21 +2421,33 @@ fn world_items_runtime_system(
         let mut bounced = false;
         let impact_speed = item.vel_m.length();
 
-        for axis in 0..3 {
-            let mut next = pos;
-            next[axis] += item.vel_m[axis] * dt;
-            if aabb_intersects_world(&world, next - r, next + r) {
-                item.vel_m[axis] *= -0.32;
-                item.vel_m *= 0.72;
-                bounced = true;
-            } else {
-                pos = next;
+        let sub_steps = ((impact_speed * dt) / 0.16).ceil().clamp(1.0, 6.0) as usize;
+        let sub_dt = dt / sub_steps as f32;
+        for _ in 0..sub_steps {
+            let step_prev = pos;
+            for axis in 0..3 {
+                let mut next = pos;
+                next[axis] += item.vel_m[axis] * sub_dt;
+                if aabb_intersects_world(&world, next - r, next + r) {
+                    item.vel_m[axis] *= -0.32;
+                    item.vel_m *= 0.72;
+                    bounced = true;
+                } else {
+                    pos = next;
+                }
             }
-        }
-        if let Some(elev) = elevator
-            && elev.collide_dynamic_with_elevator(prev_pos, &mut pos, &mut item.vel_m, r, 0.32, 0.72)
-        {
-            bounced = true;
+            if let Some(elev) = elevator
+                && elev.collide_dynamic_with_elevator(
+                    step_prev,
+                    &mut pos,
+                    &mut item.vel_m,
+                    r,
+                    0.32,
+                    0.72,
+                )
+            {
+                bounced = true;
+            }
         }
         tf.translation = pos;
         item.in_shed = is_pos_in_shed(pos, &level_info.0);
@@ -3143,5 +3249,42 @@ mod tests {
         assert_eq!(fine2, 0);
         assert_eq!(recovered_balance, balance + 150);
         assert!(recovered_balance > 0);
+    }
+
+    #[test]
+    fn carried_relic_cannot_phase_through_wall_or_closed_elevator_door() {
+        let cfg = VoxelConfig::half_player_scale(UVec3::splat(3));
+        let mut world = voxel_core::VoxelWorld::new(cfg);
+        let vs = cfg.voxel_size_m;
+
+        // Build a solid stone wall at voxel x = 10 (`x_m in [9.0, 9.9]`) and floor at y = 4.
+        for z in 6..=14 {
+            for x in 6..=14 {
+                world.set(glam::IVec3::new(x, 4, z), voxel_core::VoxelId::CaveStone);
+            }
+            for y in 5..=9 {
+                world.set(glam::IVec3::new(10, y, z), voxel_core::VoxelId::CaveStone);
+            }
+        }
+
+        let r = Vec3::splat(0.32);
+        let wall_face_x = 10.0 * vs;
+        // Player stands right beside the wall on the -X side (`x = wall_face_x - 0.45`)
+        // trying to push a Heavy Relic 1.15m forward straight through the wall!
+        let anchor = Vec3::new(wall_face_x - 0.45, 5.0 * vs + 0.50, 10.5 * vs);
+        let desired_through_wall = anchor + Vec3::X * 1.15;
+
+        let resolved = resolve_carried_item_position(&world, None, anchor, desired_through_wall, r);
+        assert!(
+            resolved.x + r.x <= wall_face_x + 1e-3,
+            "carried relic phased into wall: resolved.x={} + r={} > wall={}",
+            resolved.x,
+            r.x,
+            wall_face_x
+        );
+        assert!(
+            !aabb_intersects_world(&world, resolved - r, resolved + r),
+            "resolved carried relic position must never overlap solid voxels"
+        );
     }
 }
