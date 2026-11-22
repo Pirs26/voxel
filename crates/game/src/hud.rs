@@ -4603,18 +4603,21 @@ fn update_parkour_hud_system(
         if parkour.running {
             t.0 = "RUNNING • Ring Summit Bell [E]".to_string();
             *col = TextColor(COL_ACCENT_CYAN);
-        } else if let Some(rank) = parkour.last_finish_rank
-            && parkour.finish_banner_s > 0.0
-        {
-            t.0 = if rank == 1 {
-                "NEW #1 RECORD!".to_string()
-            } else {
-                format!("FINISHED • Best #{rank}")
-            };
-            *col = TextColor(COL_ACCENT_GREEN);
         } else if parkour.last_finish_ms.is_some() && parkour.finish_banner_s > 0.0 {
-            t.0 = "FINISHED!".to_string();
-            *col = TextColor(COL_ACCENT_GREEN);
+            if parkour.last_finish_is_pb {
+                t.0 = match parkour.last_finish_rank {
+                    Some(1) => "NEW #1 RECORD!".to_string(),
+                    Some(rank) => format!("NEW PB • Rank #{rank}"),
+                    None => "NEW PERSONAL BEST!".to_string(),
+                };
+                *col = TextColor(COL_ACCENT_GREEN);
+            } else {
+                t.0 = match parkour.last_best_ms {
+                    Some(best_ms) => format!("FINISHED • PB {}", format_parkour_time_ms(best_ms)),
+                    None => "FINISHED!".to_string(),
+                };
+                *col = TextColor(COL_ACCENT_AMBER);
+            }
         } else {
             t.0 = "Pass emerald Start Gate to begin".to_string();
             *col = TextColor(COL_TEXT_MUTED);

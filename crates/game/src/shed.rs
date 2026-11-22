@@ -99,6 +99,8 @@ pub struct ParkourTimerState {
     pub reached_north_stage: bool,
     pub last_finish_ms: Option<u32>,
     pub last_finish_rank: Option<usize>,
+    pub last_finish_is_pb: bool,
+    pub last_best_ms: Option<u32>,
     pub finish_banner_s: f32,
 }
 
