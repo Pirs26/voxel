@@ -194,240 +194,15 @@ pub fn regenerate_underground(
         }
     }
 
-    // Deterministic subtle offsets per (seed, depth_tier) so each dive feels fresh
-    // while keeping every chamber safely within bedrock bounds even on 3x3x3 test worlds.
-    let cavern_z_off = deterministic_range(cave_seed, 1, -2, 2);
-    let west_z_off = deterministic_range(cave_seed, 2, -2, 2);
-    let south_x_off = deterministic_range(cave_seed, 3, -2, 2);
+    // 2. Carve a claustrophobic tunnel-maze labyrinth around the central shaft with
+    //    breakable `CrackedRock` walls sealing shortcuts, flanking loops, and relic vaults.
+    let (cavern_center, alcove_center, relic_voxels, bonus_voxels, monster_voxels, crystal_spots) =
+        carve_tunnel_maze(world, cave_seed, tier, cx, cz, cave_floor_y, shed_floor_y);
 
-    // 2. Carve connected walkable cave arteries, grand cavern, sealed alcove & deep wings.
-    carve_sphere(world, IVec3::new(cx, cave_floor_y + 7, cz), 8.5, shed_floor_y);
-
-    // Grand Echoing Cavern to the +X side (huge vaulted stone ceiling for dramatic reverb!)
-    let cavern_center = IVec3::new(cx + 26, cave_floor_y + 10, cz + cavern_z_off);
-    carve_ellipsoid(
-        world,
-        cavern_center,
-        Vec3::new(17.0, 11.5 + tier as f32, 15.0),
-        shed_floor_y,
-    );
-    // Main tunnel from +X shaft opening to grand cavern
-    carve_tunnel(
-        world,
-        IVec3::new(cx + 4, cave_floor_y + 3, cz),
-        IVec3::new(cx + 16, cave_floor_y + 3, cz + cavern_z_off),
-        3.3,
-        shed_floor_y,
-    );
-
-    // Secondary winding tunnel to the -Z side leading to a sealed Cracked Rock chamber
-    let hallway_mid = IVec3::new(cx + 22, cave_floor_y + 3, cz - 14);
-    let alcove_center = IVec3::new(cx + 22, cave_floor_y + 4, cz - 26);
-    carve_tunnel(
-        world,
-        IVec3::new(cx + 22, cave_floor_y + 3, cz - 6 + cavern_z_off),
-        hallway_mid,
-        2.9,
-        shed_floor_y,
-    );
-    carve_ellipsoid(
-        world,
-        alcove_center,
-        Vec3::new(7.5, 5.5, 7.0),
-        shed_floor_y,
-    );
-    carve_tunnel(world, hallway_mid, alcove_center, 2.6, shed_floor_y);
-
-    // Seal alcove entrance with a 2-voxel-thick CrackedRock breachable wall!
-    for dy in 0..7 {
-        let y = cave_floor_y + 1 + dy;
-        if y >= shed_floor_y {
-            continue;
-        }
-        for dx in -4..=4 {
-            for dz in 0..2 {
-                let p = IVec3::new(cx + 22 + dx, y, cz - 19 - dz);
-                if world.get(p) == VoxelId::Air {
-                    world.set(p, VoxelId::CrackedRock);
-                }
-            }
-        }
-    }
-
-    // Wrap-around galleries outside the steel shaft so +X exit loops cleanly to West & South wings
-    carve_tunnel(
-        world,
-        IVec3::new(cx + 6, cave_floor_y + 3, cz),
-        IVec3::new(cx + 6, cave_floor_y + 3, cz - 7),
-        2.8,
-        shed_floor_y,
-    );
-    carve_tunnel(
-        world,
-        IVec3::new(cx + 6, cave_floor_y + 3, cz - 7),
-        IVec3::new(cx - 7, cave_floor_y + 3, cz - 8),
-        2.8,
-        shed_floor_y,
-    );
-    carve_tunnel(
-        world,
-        IVec3::new(cx + 6, cave_floor_y + 3, cz),
-        IVec3::new(cx + 6, cave_floor_y + 3, cz + 7),
-        2.8,
-        shed_floor_y,
-    );
-    carve_tunnel(
-        world,
-        IVec3::new(cx + 6, cave_floor_y + 3, cz + 7),
-        IVec3::new(cx - 6, cave_floor_y + 3, cz + 8),
-        2.8,
-        shed_floor_y,
-    );
-
-    // West Cavern (-X, -Z) for circular exploration
-    let west_center = IVec3::new(cx - 20, cave_floor_y + 6, cz - 14 + west_z_off);
-    carve_tunnel(
-        world,
-        IVec3::new(cx - 7, cave_floor_y + 3, cz - 8),
-        IVec3::new(west_center.x + 2, cave_floor_y + 3, west_center.z + 2),
-        3.0,
-        shed_floor_y,
-    );
-    carve_ellipsoid(world, west_center, Vec3::new(9.0, 7.0, 9.0), shed_floor_y);
-
-    // Deep South Vault (+X/+Z wing; expanded with cracked rock threshold on Tier >= 2)
-    let south_center = IVec3::new(cx + 12 + south_x_off, cave_floor_y + 6, cz + 24);
-    carve_tunnel(
-        world,
-        IVec3::new(cx + 20, cave_floor_y + 3, cz + 9 + cavern_z_off),
-        IVec3::new(south_center.x + 2, cave_floor_y + 3, south_center.z - 4),
-        2.9,
-        shed_floor_y,
-    );
-    carve_tunnel(
-        world,
-        IVec3::new(cx + 6, cave_floor_y + 3, cz + 8),
-        IVec3::new(south_center.x - 2, cave_floor_y + 3, south_center.z - 4),
-        2.6,
-        shed_floor_y,
-    );
-    carve_ellipsoid(
-        world,
-        south_center,
-        Vec3::new(8.5 + (tier - 1) as f32, 6.0 + tier as f32, 8.5),
-        shed_floor_y,
-    );
-
-    // Deep Southwest Chamber (-X/+Z wing; connects West Cavern & Deep South Vault)
-    let sw_center = IVec3::new(cx - 22, cave_floor_y + 7, cz + 20);
-    if tier >= 2 {
-        carve_tunnel(
-            world,
-            IVec3::new(west_center.x, cave_floor_y + 3, west_center.z + 6),
-            IVec3::new(sw_center.x, cave_floor_y + 3, sw_center.z - 5),
-            2.9,
-            shed_floor_y,
-        );
-        carve_tunnel(
-            world,
-            IVec3::new(south_center.x - 5, cave_floor_y + 3, south_center.z),
-            IVec3::new(sw_center.x + 6, cave_floor_y + 3, sw_center.z + 2),
-            2.9,
-            shed_floor_y,
-        );
-        carve_ellipsoid(
-            world,
-            sw_center,
-            Vec3::new(9.5, 7.0 + (tier - 1) as f32, 9.5),
-            shed_floor_y,
-        );
-    } else {
-        // Tier 1 still carves a modest southern loop gallery to keep navigation flowing
-        carve_tunnel(
-            world,
-            IVec3::new(cx - 6, cave_floor_y + 3, cz + 8),
-            IVec3::new(west_center.x + 2, cave_floor_y + 3, west_center.z + 6),
-            2.7,
-            shed_floor_y,
-        );
-    }
-
-    // 3. Flat walkable floors in all cave hubs (strictly `< shed_floor_y`)
-    flatten_floor(
-        world,
-        IVec3::new(cx, cave_floor_y, cz),
-        9,
-        VoxelId::CaveDirt,
-        shed_floor_y,
-    );
-    flatten_floor(
-        world,
-        IVec3::new(cavern_center.x, cave_floor_y, cavern_center.z),
-        15,
-        VoxelId::CaveDirt,
-        shed_floor_y,
-    );
-    flatten_floor(
-        world,
-        IVec3::new(alcove_center.x, cave_floor_y, alcove_center.z),
-        6,
-        VoxelId::CaveStone,
-        shed_floor_y,
-    );
-    flatten_floor(
-        world,
-        IVec3::new(west_center.x, cave_floor_y, west_center.z),
-        8,
-        VoxelId::CaveDirt,
-        shed_floor_y,
-    );
-    flatten_floor(
-        world,
-        IVec3::new(south_center.x, cave_floor_y, south_center.z),
-        8,
-        VoxelId::CaveStone,
-        shed_floor_y,
-    );
-    if tier >= 2 {
-        flatten_floor(
-            world,
-            IVec3::new(sw_center.x, cave_floor_y, sw_center.z),
-            8,
-            VoxelId::CaveDirt,
-            shed_floor_y,
-        );
-    }
-
-    // 4. Build unobstructed 7x7 vertical steel mineshaft strictly below `shed_floor_y`.
+    // 3. Build unobstructed 7x7 vertical steel mineshaft strictly below `shed_floor_y`.
     build_shaft(world, cx, cz, cave_floor_y, shed_floor_y);
 
-    // 5. Scatter glowing Bioluminescent Crystals (varies by tier: deeper = sparser/moodier).
-    let mut crystal_spots = vec![
-        IVec3::new(cx + 12, cave_floor_y + 1, cz + 2),
-        IVec3::new(cavern_center.x, cave_floor_y + 1, cavern_center.z + 10),
-        IVec3::new(alcove_center.x - 2, cave_floor_y + 1, alcove_center.z),
-        IVec3::new(west_center.x + 2, cave_floor_y + 1, west_center.z + 2),
-    ];
-    if tier == 1 {
-        crystal_spots.push(IVec3::new(
-            cavern_center.x + 9,
-            cave_floor_y + 1,
-            cavern_center.z - 5,
-        ));
-        crystal_spots.push(IVec3::new(cx + 6, cave_floor_y + 1, cz - 3));
-    } else if tier == 2 {
-        crystal_spots.push(IVec3::new(
-            south_center.x + 3,
-            cave_floor_y + 1,
-            south_center.z - 2,
-        ));
-    } else {
-        crystal_spots.push(IVec3::new(
-            sw_center.x + 3,
-            cave_floor_y + 1,
-            sw_center.z - 3,
-        ));
-    }
+    // 4. Scatter glowing Bioluminescent Crystals at key tunnel intersections (sparser on deeper tiers).
     for spot in crystal_spots {
         if spot.y + 1 < shed_floor_y {
             world.set(spot, VoxelId::BiolumCrystal);
@@ -435,76 +210,24 @@ pub fn regenerate_underground(
         }
     }
 
-    // 6. Compute and guarantee walkable spawn points for relics, bonus loot, and monsters.
-    let mut relic_voxels = vec![
-        // Relic 1: inside the sealed Cracked Rock alcove
-        IVec3::new(alcove_center.x, cave_floor_y + 1, alcove_center.z - 1),
-        // Relic 2: inside the Grand Echoing Cavern
-        IVec3::new(cavern_center.x + 5, cave_floor_y + 1, cavern_center.z + 4),
-    ];
-    if tier >= 2 {
-        // Relic 3: Deep South Vault
-        relic_voxels.push(IVec3::new(
-            south_center.x,
-            cave_floor_y + 1,
-            south_center.z + 2,
-        ));
-    }
-    if tier >= 3 {
-        // Relic 4: Deep Southwest Chamber
-        relic_voxels.push(IVec3::new(
-            sw_center.x - 2,
-            cave_floor_y + 1,
-            sw_center.z + 2,
-        ));
-    }
+    // 5. Guarantee walkable spawn points for relics, bonus loot, and blind predators.
     let relic_spawns_m = relic_voxels
         .into_iter()
         .map(|v| ensure_walkable_spawn(world, v, VoxelId::CaveStone, shed_floor_y))
         .collect();
 
-    let mut bonus_voxels = vec![
-        IVec3::new(west_center.x - 2, cave_floor_y + 1, west_center.z - 1),
-        IVec3::new(cavern_center.x + 1, cave_floor_y + 1, cavern_center.z - 7),
-    ];
-    if tier >= 2 {
-        bonus_voxels.push(IVec3::new(
-            south_center.x + 3,
-            cave_floor_y + 1,
-            south_center.z - 3,
-        ));
-    }
-    if tier >= 3 {
-        bonus_voxels.push(IVec3::new(
-            sw_center.x + 3,
-            cave_floor_y + 1,
-            sw_center.z - 2,
-        ));
-    }
     let bonus_loot_spawns_m = bonus_voxels
         .into_iter()
         .map(|v| ensure_walkable_spawn(world, v, VoxelId::CaveDirt, shed_floor_y))
         .collect();
 
-    let mut monster_voxels = vec![
-        // Deep South Vault — far from shaft landing & around a bend (no instant spawn camping!)
-        IVec3::new(south_center.x + 1, cave_floor_y + 1, south_center.z + 1),
-    ];
-    if tier >= 2 {
-        // Second predator in the opposite West / Deep Southwest Chamber
-        monster_voxels.push(IVec3::new(
-            sw_center.x,
-            cave_floor_y + 1,
-            sw_center.z - 1,
-        ));
-    }
     let monster_spawns_m = monster_voxels
         .into_iter()
         .map(|v| ensure_walkable_spawn(world, v, VoxelId::CaveDirt, shed_floor_y))
         .collect();
 
-    // Ensure cave winch station landing spot is clear right next to the +X shaft exit
-    let winch_voxel = IVec3::new(cx + 5, cave_floor_y + 1, cz + 3);
+    // Ensure vestibule right outside the +X shaft exit is clear and walkable
+    let winch_voxel = IVec3::new(cx + 5, cave_floor_y + 1, cz + 1);
     ensure_walkable_spawn(world, winch_voxel, VoxelId::CaveDirt, shed_floor_y);
 
     build_level_info(
@@ -520,6 +243,391 @@ pub fn regenerate_underground(
         bonus_loot_spawns_m,
         monster_spawns_m,
     )
+}
+
+#[allow(clippy::type_complexity)]
+fn carve_tunnel_maze(
+    world: &mut VoxelWorld,
+    cave_seed: u64,
+    tier: u8,
+    cx: i32,
+    cz: i32,
+    cave_floor_y: i32,
+    shed_floor_y: i32,
+) -> (
+    IVec3,
+    IVec3,
+    Vec<IVec3>,
+    Vec<IVec3>,
+    Vec<IVec3>,
+    Vec<IVec3>,
+) {
+    // 5x5 maze junction grid (indices 0..5 correspond to grid offsets -2..=2 around the shaft).
+    // Center cell (2, 2) is occupied by the 7x7 vertical steel mineshaft.
+    const GRID: usize = 5;
+    const STEP: i32 = 11;
+
+    let mut nodes = [[IVec3::ZERO; GRID]; GRID];
+    for (gz, row) in nodes.iter_mut().enumerate() {
+        for (gx, slot) in row.iter_mut().enumerate() {
+            let ox = gx as i32 - 2;
+            let oz = gz as i32 - 2;
+            let salt = (gx as u64 + 1) * 31 + (gz as u64 + 1) * 131;
+            let (jx, jz) = if (gx == 2 && gz == 2) || (gx == 3 && gz == 2) {
+                // Keep shaft cell & immediate +X vestibule entrance aligned
+                (0, 0)
+            } else {
+                (
+                    deterministic_range(cave_seed, salt, -2, 2),
+                    deterministic_range(cave_seed, salt + 7, -2, 2),
+                )
+            };
+            *slot = IVec3::new(cx + ox * STEP + jx, cave_floor_y, cz + oz * STEP + jz);
+        }
+    }
+
+    // 1. Compact shaft landing vestibule directly outside +X shaft opening (`dx = 4..=8`)
+    let vestibule = IVec3::new(cx + 6, cave_floor_y, cz);
+    carve_junction_pocket(world, vestibule, 2, 4, VoxelId::CaveDirt, shed_floor_y);
+    carve_maze_corridor(
+        world,
+        IVec3::new(cx + 4, cave_floor_y, cz),
+        nodes[2][3],
+        cave_floor_y,
+        shed_floor_y,
+    );
+
+    // 2. Carve small organic tunnel junctions at every non-shaft grid cell
+    for (gz, row) in nodes.iter().enumerate() {
+        for (gx, &node) in row.iter().enumerate() {
+            if gx == 2 && gz == 2 {
+                continue;
+            }
+            let is_corner = (gx == 0 || gx == 4) && (gz == 0 || gz == 4);
+            let radius = if is_corner { 3 } else { 2 };
+            let height = if is_corner { 5 } else { 4 };
+            let floor_mat = if (gx + gz) % 2 == 0 {
+                VoxelId::CaveStone
+            } else {
+                VoxelId::CaveDirt
+            };
+            carve_junction_pocket(world, node, radius, height, floor_mat, shed_floor_y);
+        }
+    }
+
+    // Modest resonant echo chamber at east-mid node (4, 2) so acoustic cavern reverb still shines
+    // without turning the level into an open arena.
+    let cavern_center = IVec3::new(nodes[2][4].x, cave_floor_y + 4, nodes[2][4].z);
+    carve_ellipsoid(
+        world,
+        cavern_center,
+        Vec3::new(5.8, 5.2 + tier as f32 * 0.5, 5.8),
+        shed_floor_y,
+    );
+    flatten_floor(
+        world,
+        IVec3::new(cavern_center.x, cave_floor_y, cavern_center.z),
+        5,
+        VoxelId::CaveDirt,
+        shed_floor_y,
+    );
+
+    // 3. Build a deterministic randomized DFS spanning tree starting at entry node (3, 2)
+    //    so EVERY maze cell is guaranteed reachable through winding tunnels!
+    let mut visited = [[false; GRID]; GRID];
+    visited[2][2] = true; // shaft cell is not a walkable maze node
+    let mut tree_edges: Vec<((usize, usize), (usize, usize))> = Vec::new();
+    let mut stack: Vec<(usize, usize)> = vec![(3, 2)];
+    visited[2][3] = true;
+    let mut step_salt = 500u64;
+
+    while let Some((gx, gz)) = stack.last().copied() {
+        let mut neighbors = Vec::with_capacity(4);
+        if gx > 0 && !visited[gz][gx - 1] {
+            neighbors.push((gx - 1, gz));
+        }
+        if gx + 1 < GRID && !visited[gz][gx + 1] {
+            neighbors.push((gx + 1, gz));
+        }
+        if gz > 0 && !visited[gz - 1][gx] {
+            neighbors.push((gx, gz - 1));
+        }
+        if gz + 1 < GRID && !visited[gz + 1][gx] {
+            neighbors.push((gx, gz + 1));
+        }
+
+        if neighbors.is_empty() {
+            stack.pop();
+        } else {
+            step_salt += 1;
+            let pick = deterministic_range(cave_seed, step_salt, 0, neighbors.len() as i32 - 1)
+                as usize;
+            let next = neighbors[pick];
+            visited[next.1][next.0] = true;
+            tree_edges.push(((gx, gz), next));
+            stack.push(next);
+        }
+    }
+
+    // Helper to check if an undirected edge is already in the spanning tree
+    let has_tree_edge = |a: (usize, usize), b: (usize, usize)| -> bool {
+        tree_edges
+            .iter()
+            .any(|&(u, v)| (u == a && v == b) || (u == b && v == a))
+    };
+
+    // Carve all spanning-tree main tunnels!
+    // Seal the final entrance into the NE sealed relic vault (4, 0) with a CrackedRock wall
+    // so players discover a breachable vault + acoustic demo beacon behind it.
+    let alcove_cell = (4usize, 0usize);
+    let mut barricade_spots: Vec<(IVec3, bool)> = Vec::new();
+
+    for &(a, b) in &tree_edges {
+        let pa = nodes[a.1][a.0];
+        let pb = nodes[b.1][b.0];
+        carve_maze_corridor(world, pa, pb, cave_floor_y, shed_floor_y);
+        if a == alcove_cell || b == alcove_cell {
+            let mid = (pa + pb) / 2;
+            let x_major = (pb.x - pa.x).abs() >= (pb.z - pa.z).abs();
+            barricade_spots.push((mid, x_major));
+        }
+    }
+
+    // 4. Add hidden shortcut/loop tunnels between non-tree adjacent cells, and block most of
+    //    them with breakable `CrackedRock` barricades so smashing walls uncovers new tunnels!
+    let mut loop_salt = 900u64;
+    for gz in 0..GRID {
+        for gx in 0..GRID {
+            if gx == 2 && gz == 2 {
+                continue;
+            }
+            for (nx, nz) in [(gx + 1, gz), (gx, gz + 1)] {
+                if nx >= GRID || nz >= GRID || (nx == 2 && nz == 2) {
+                    continue;
+                }
+                if has_tree_edge((gx, gz), (nx, nz)) {
+                    continue;
+                }
+                loop_salt += 1;
+                let roll = deterministic_range(cave_seed, loop_salt, 0, 99);
+                // ~60% of remaining walls become extra connecting tunnels (so the cave feels like
+                // a rich bundle of tunnels rather than a single linear snake)
+                if roll < 60 {
+                    let pa = nodes[gz][gx];
+                    let pb = nodes[nz][nx];
+                    carve_maze_corridor(world, pa, pb, cave_floor_y, shed_floor_y);
+                    // ~70% of extra loop corridors are sealed with breakable `CrackedRock` walls!
+                    // Always seal extra corridors entering the NE relic vault too.
+                    let touches_alcove = (gx, gz) == alcove_cell || (nx, nz) == alcove_cell;
+                    if touches_alcove || roll < 44 {
+                        let mid = (pa + pb) / 2;
+                        let x_major = (pb.x - pa.x).abs() >= (pb.z - pa.z).abs();
+                        barricade_spots.push((mid, x_major));
+                    }
+                }
+            }
+        }
+    }
+
+    // Stamp all breakable `CrackedRock` barricades cleanly across their carved tunnel sections
+    for (mid, x_major) in barricade_spots {
+        place_breakable_barricade(world, mid, x_major, cave_floor_y, shed_floor_y);
+    }
+
+    // 5. Pick well-spaced landmarks across the tunnel maze
+    let alcove_node = nodes[alcove_cell.1][alcove_cell.0];
+    let alcove_center = IVec3::new(alcove_node.x, cave_floor_y + 3, alcove_node.z);
+
+    let mut relic_voxels = vec![
+        // Relic 1: NE sealed CrackedRock vault
+        IVec3::new(alcove_node.x, cave_floor_y + 1, alcove_node.z),
+        // Relic 2: NW far vault
+        IVec3::new(nodes[0][0].x, cave_floor_y + 1, nodes[0][0].z),
+    ];
+    if tier >= 2 {
+        // Relic 3: Deep SE corner vault
+        relic_voxels.push(IVec3::new(nodes[4][4].x, cave_floor_y + 1, nodes[4][4].z));
+    }
+    if tier >= 3 {
+        // Relic 4: Deep SW corner vault
+        relic_voxels.push(IVec3::new(nodes[4][0].x, cave_floor_y + 1, nodes[4][0].z));
+    }
+
+    let mut bonus_voxels = vec![
+        IVec3::new(nodes[0][2].x, cave_floor_y + 1, nodes[0][2].z),
+        IVec3::new(nodes[2][0].x, cave_floor_y + 1, nodes[2][0].z),
+    ];
+    if tier >= 2 {
+        bonus_voxels.push(IVec3::new(nodes[3][4].x, cave_floor_y + 1, nodes[3][4].z));
+    }
+    if tier >= 3 {
+        bonus_voxels.push(IVec3::new(nodes[4][2].x, cave_floor_y + 1, nodes[4][2].z));
+    }
+
+    // Monsters spawn in the far southern corner vaults (~28m from the shaft around multiple bends)
+    let mut monster_voxels = vec![IVec3::new(
+        nodes[4][4].x,
+        cave_floor_y + 1,
+        nodes[4][4].z,
+    )];
+    if tier >= 2 {
+        monster_voxels.push(IVec3::new(
+            nodes[4][0].x,
+            cave_floor_y + 1,
+            nodes[4][0].z,
+        ));
+    }
+
+    // Subtle bioluminescent crystals tucked into corners of select tunnel junctions
+    let mut crystal_spots = vec![
+        IVec3::new(nodes[2][3].x + 2, cave_floor_y + 1, nodes[2][3].z - 2),
+        IVec3::new(nodes[0][4].x - 2, cave_floor_y + 1, nodes[0][4].z + 1),
+        IVec3::new(nodes[0][0].x + 2, cave_floor_y + 1, nodes[0][0].z + 2),
+    ];
+    if tier == 1 {
+        crystal_spots.push(IVec3::new(
+            nodes[2][4].x + 2,
+            cave_floor_y + 1,
+            nodes[2][4].z + 2,
+        ));
+        crystal_spots.push(IVec3::new(
+            nodes[2][0].x + 1,
+            cave_floor_y + 1,
+            nodes[2][0].z - 2,
+        ));
+    } else if tier == 2 {
+        crystal_spots.push(IVec3::new(
+            nodes[4][3].x - 1,
+            cave_floor_y + 1,
+            nodes[4][3].z - 2,
+        ));
+    } else {
+        crystal_spots.push(IVec3::new(
+            nodes[4][1].x + 1,
+            cave_floor_y + 1,
+            nodes[4][1].z - 1,
+        ));
+    }
+
+    (
+        cavern_center,
+        alcove_center,
+        relic_voxels,
+        bonus_voxels,
+        monster_voxels,
+        crystal_spots,
+    )
+}
+
+/// Carves a compact subterranean tunnel junction chamber with flat walkable floor and arched roof.
+fn carve_junction_pocket(
+    world: &mut VoxelWorld,
+    center: IVec3,
+    radius: i32,
+    height: i32,
+    floor_mat: VoxelId,
+    shed_floor_y: i32,
+) {
+    let r2 = radius * radius + 1;
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            let d2 = dx * dx + dz * dz;
+            if d2 > r2 {
+                continue;
+            }
+            let floor_p = IVec3::new(center.x + dx, center.y, center.z + dz);
+            if floor_p.y < shed_floor_y {
+                world.set(floor_p, floor_mat);
+                if floor_p.y > 1 {
+                    world.set(floor_p - IVec3::Y, VoxelId::CaveStone);
+                }
+            }
+            let local_h = if d2 <= 2 { height } else { (height - 1).max(3) };
+            for dy in 1..=local_h {
+                let p = floor_p + IVec3::new(0, dy, 0);
+                if p.y > 2 && p.y < shed_floor_y {
+                    world.set(p, VoxelId::Air);
+                }
+            }
+        }
+    }
+}
+
+/// Carves a narrow, tense winding subterranean mine tunnel (3 voxels wide × 3–4 voxels tall)
+/// with guaranteed solid floor and subtle organic curve.
+fn carve_maze_corridor(
+    world: &mut VoxelWorld,
+    a: IVec3,
+    b: IVec3,
+    floor_y: i32,
+    shed_floor_y: i32,
+) {
+    let dist = a.as_vec3().distance(b.as_vec3());
+    let steps = (dist * 2.0).ceil().max(1.0) as i32;
+    let delta = b - a;
+    let perp = Vec3::new(-delta.z as f32, 0.0, delta.x as f32).normalize_or_zero();
+    // Slight deterministic S-bend so tunnels feel hand-dug rather than laser-straight
+    let bend_dir = if ((a.x.wrapping_mul(7) ^ b.z.wrapping_mul(13)) & 1) == 0 {
+        1.0
+    } else {
+        -1.0
+    };
+
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let curve = (t * std::f32::consts::PI).sin() * 1.15 * bend_dir;
+        let p_f = a.as_vec3().lerp(b.as_vec3(), t) + perp * curve;
+        let c = IVec3::new(p_f.x.round() as i32, floor_y, p_f.z.round() as i32);
+
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let floor_p = IVec3::new(c.x + dx, floor_y, c.z + dz);
+                if floor_p.y < shed_floor_y {
+                    world.set(floor_p, VoxelId::CaveDirt);
+                    if floor_p.y > 1 {
+                        world.set(floor_p - IVec3::Y, VoxelId::CaveStone);
+                    }
+                }
+                let is_center = dx == 0 && dz == 0;
+                let max_h = if is_center { 4 } else { 3 };
+                for dy in 1..=max_h {
+                    let air_p = floor_p + IVec3::new(0, dy, 0);
+                    if air_p.y > 2 && air_p.y < shed_floor_y {
+                        world.set(air_p, VoxelId::Air);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Seals a carved tunnel midpoint with a 2-voxel-thick breakable `CrackedRock` wall
+/// so smashing it with `[LMB]` uncovers the hidden tunnel/shortcut beyond.
+fn place_breakable_barricade(
+    world: &mut VoxelWorld,
+    mid: IVec3,
+    x_major: bool,
+    floor_y: i32,
+    shed_floor_y: i32,
+) {
+    for dy in 1..=5 {
+        let y = floor_y + dy;
+        if y >= shed_floor_y {
+            continue;
+        }
+        for along in 0..=1 {
+            for across in -3..=3 {
+                let p = if x_major {
+                    IVec3::new(mid.x + along, y, mid.z + across)
+                } else {
+                    IVec3::new(mid.x + across, y, mid.z + along)
+                };
+                if world.get(p) == VoxelId::Air {
+                    world.set(p, VoxelId::CrackedRock);
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -667,11 +775,11 @@ fn sample_underground_voxel(
         return VoxelId::Bedrock;
     }
 
-    // Underground: 3D cave noise creates natural side pockets while keeping strong stone walls.
-    // Higher depth tiers open slightly more irregular rock pockets and cracked seams.
-    let freq = 0.055 + (depth_tier.saturating_sub(1) as f64) * 0.006;
-    let air_threshold = 0.56 - (depth_tier.saturating_sub(1) as f64) * 0.03;
-    let cracked_threshold = 0.62 - (depth_tier.saturating_sub(1) as f64) * 0.04;
+    // Underground: keep solid stone walls crisp between carved maze tunnels while leaving
+    // occasional cracked seams and rare natural pockets.
+    let freq = 0.065 + (depth_tier.saturating_sub(1) as f64) * 0.006;
+    let air_threshold = 0.78 - (depth_tier.saturating_sub(1) as f64) * 0.02;
+    let cracked_threshold = 0.66 - (depth_tier.saturating_sub(1) as f64) * 0.03;
 
     let n = simplex.get([p.x as f64 * freq, p.y as f64 * 0.075, p.z as f64 * freq]);
     let n2 = simplex.get([
@@ -688,23 +796,6 @@ fn sample_underground_voxel(
         VoxelId::CrackedRock
     } else {
         VoxelId::CaveStone
-    }
-}
-
-fn carve_sphere(world: &mut VoxelWorld, center: IVec3, radius: f32, shed_floor_y: i32) {
-    let r = radius.ceil() as i32;
-    let r2 = radius * radius;
-    for dy in -r..=r {
-        for dz in -r..=r {
-            for dx in -r..=r {
-                if (dx * dx + dy * dy + dz * dz) as f32 <= r2 {
-                    let p = center + IVec3::new(dx, dy, dz);
-                    if p.y > 2 && p.y < shed_floor_y {
-                        world.set(p, VoxelId::Air);
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -726,16 +817,6 @@ fn carve_ellipsoid(world: &mut VoxelWorld, center: IVec3, radii: Vec3, shed_floo
                 }
             }
         }
-    }
-}
-
-fn carve_tunnel(world: &mut VoxelWorld, a: IVec3, b: IVec3, radius: f32, shed_floor_y: i32) {
-    let dist = a.as_vec3().distance(b.as_vec3());
-    let steps = (dist * 1.5).ceil().max(1.0) as i32;
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
-        let p = a.as_vec3().lerp(b.as_vec3(), t).round().as_ivec3();
-        carve_sphere(world, p, radius, shed_floor_y);
     }
 }
 
@@ -1109,6 +1190,22 @@ mod tests {
             assert_eq!(
                 world.get(IVec3::new(cx, shed_floor_y + 1, cz + SHAFT_RADIUS)),
                 VoxelId::Steel
+            );
+
+            // Tunnel maze must include breakable CrackedRock barricades at tunnel floor height
+            let mut cracked_count = 0usize;
+            for dz in -28..=28 {
+                for dx in -28..=28 {
+                    if world.get(IVec3::new(cx + dx, cave_floor_y + 2, cz + dz))
+                        == VoxelId::CrackedRock
+                    {
+                        cracked_count += 1;
+                    }
+                }
+            }
+            assert!(
+                cracked_count >= 12,
+                "expected breakable CrackedRock barricades across tunnel maze, got {cracked_count}"
             );
         }
     }
