@@ -39,6 +39,8 @@ pub struct GeneratedLevelInfo {
     pub charger_bench_pos_m: Vec3,
     /// Wooden workbench counter top inside the Shed for starter spare items.
     pub shed_workbench_pos_m: Vec3,
+    /// Wall-mounted diegetic 3D Decibel Calibration Wall center on the main Shed North wall (facing +Z).
+    pub decibel_wall_pos_m: Vec3,
     /// Start Gate floor center in front of the Parkour Room's Stage 1 launch steps.
     pub parkour_start_pos_m: Vec3,
     /// Minimum X coordinate (in meters) separating the main Shed from the attached Parkour Room.
@@ -1023,6 +1025,13 @@ fn build_level_info(
         (shed_floor_y + 2) as f32 * vs + 0.05,
         ((cz + 7) as f32 + 0.5) * vs,
     );
+    // Diegetic 3D Decibel Calibration Wall mounted flush against the inner North wall (z = cz - 8)
+    // facing +Z, centered between the Charger Bench (cx+4, cz-7) and Shop Terminal (cx+9, cz-5).
+    let decibel_wall_pos_m = Vec3::new(
+        (cx as f32 + 6.5) * vs,
+        shed_floor_y_m + 2.15,
+        (cz - SHED_HALF_Z + 1) as f32 * vs + 0.08,
+    );
     // Start Gate arch centered right in front of Stage 1 start steps (P1 at x=14..=15, z=5..=6)
     let parkour_start_pos_m = Vec3::new(
         ((cx + 14) as f32 + 1.0) * vs,
@@ -1072,6 +1081,7 @@ fn build_level_info(
         shop_terminal_pos_m,
         charger_bench_pos_m,
         shed_workbench_pos_m,
+        decibel_wall_pos_m,
         parkour_start_pos_m,
         parkour_room_min_x_m,
         parkour_billboard_pos_m,
@@ -1329,6 +1339,11 @@ fn build_starter_shed(world: &mut VoxelWorld, cx: i32, cz: i32, shed_floor_y: i3
     // Wooden workbench counter along the +Z wall for starter spare items
     for x in (cx + 5)..=(cx + 8) {
         world.set(IVec3::new(x, shed_floor_y + 1, cz + 7), VoxelId::Timber);
+    }
+
+    // Wooden gear storage shelf along the quiet -X wall behind the elevator
+    for z in (cz - 4)..=(cz + 4) {
+        world.set(IVec3::new(cx - 9, shed_floor_y + 1, z), VoxelId::Timber);
     }
 
     // Attached high-ceiling Parkour Room off the +X wall of the Base Shed so players
@@ -1630,6 +1645,30 @@ mod tests {
             assert_eq!(
                 world.get(IVec3::new(cx, shed_floor_y + 1, cz + SHAFT_RADIUS)),
                 VoxelId::Steel
+            );
+
+            // Wooden gear storage shelf along the -X wall has solid Timber counter + clear Air above
+            for dz in -4..=4 {
+                assert_eq!(
+                    world.get(IVec3::new(cx - 9, shed_floor_y + 1, cz + dz)),
+                    VoxelId::Timber
+                );
+                assert_eq!(
+                    world.get(IVec3::new(cx - 9, shed_floor_y + 2, cz + dz)),
+                    VoxelId::Air
+                );
+            }
+            // Decibel Calibration Wall sits inside main Shed North wall bounds without overlapping stations
+            assert!(info.decibel_wall_pos_m.x < info.parkour_room_min_x_m);
+            assert!(info.decibel_wall_pos_m.x >= info.shed_bounds_min_m.x);
+            assert!(info.decibel_wall_pos_m.z >= info.shed_bounds_min_m.z);
+            assert!(
+                info.decibel_wall_pos_m.distance(info.charger_bench_pos_m) > 1.8,
+                "decibel wall must not overlap Charger Bench"
+            );
+            assert!(
+                info.decibel_wall_pos_m.distance(info.shop_terminal_pos_m) > 1.8,
+                "decibel wall must not overlap Shop Terminal"
             );
 
             // Tunnel maze must include breakable CrackedRock barricades at tunnel floor height

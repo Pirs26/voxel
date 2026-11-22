@@ -28,7 +28,9 @@ use crate::{
     },
     audio_bridge::{
         AcousticBeaconState, AcousticTelemetry, PlaySpatialSoundEvent, RemoveVoiceSpeakerEvent,
+        VoiceSettings,
     },
+    decibel_wall::{spawn_decibel_wall, update_decibel_wall_system},
     elevator::{
         ELEVATOR_CAGE_HALF_EXTENT_M, ELEVATOR_DOOR_CLOSED_Y_M, ELEVATOR_DOOR_OPEN_Y_M,
         ELEVATOR_WINCH_DURATION_S, ElevatorArrivedCaveEvent, ElevatorBulbLight, ElevatorCageRoot,
@@ -159,6 +161,7 @@ impl Plugin for GameplayPlugin {
                     parkour_timer_system,
                     station_and_item_interact_system,
                     update_parkour_billboard_system,
+                    update_decibel_wall_system,
                     elevator_runtime_system,
                     world_items_runtime_system,
                     blind_stalker_ai_system,
@@ -177,6 +180,8 @@ fn setup_week3_world(
     mut images: ResMut<Assets<Image>>,
     level_info: Res<LevelInfoResource>,
     parkour_timer: Res<ParkourTimerState>,
+    telemetry: Res<AcousticTelemetry>,
+    voice_settings: Res<VoiceSettings>,
     mut coop: ResMut<CoopState>,
     mut inv: ResMut<PlayerInventory>,
     mut item_reg: ResMut<WorldItemRegistry>,
@@ -195,8 +200,8 @@ fn setup_week3_world(
     spawn_elevator_cage(&mut commands, &mut meshes, &mut materials, &elevator);
     commands.insert_resource(elevator);
 
-    // 3. Spawn Base Shed & Cave station props (Shop Terminal, Charger Bench, Start Gate, Summit Bell)
-    //    and the diegetic North-wall Parkour Leaderboard billboard.
+    // 3. Spawn Base Shed & Cave station props (Shop Terminal, Charger Bench, Start Gate, Summit Bell),
+    //    the diegetic North-wall Parkour Leaderboard billboard, and the Main Shed Decibel Calibration Wall.
     spawn_shed_landmarks(&mut commands, &mut meshes, &mut materials, &level_info.0);
     spawn_parkour_billboard(
         &mut commands,
@@ -206,6 +211,15 @@ fn setup_week3_world(
         &level_info.0,
         &campaign.save.parkour_leaderboard,
         &parkour_timer,
+    );
+    spawn_decibel_wall(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &level_info.0,
+        &telemetry,
+        &voice_settings,
     );
 
     // 4. Restore persisted Base Shed world items (or place starter workbench items once for brand-new saves)

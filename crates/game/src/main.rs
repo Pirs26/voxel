@@ -1,5 +1,6 @@
 mod ai_blind;
 mod audio_bridge;
+mod decibel_wall;
 mod elevator;
 mod gameplay;
 mod health;
