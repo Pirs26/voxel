@@ -14,10 +14,7 @@ pub const GITHUB_OWNER: &str = "Pirs26";
 pub const GITHUB_REPO: &str = "voxel";
 pub const RELEASES_API_URL: &str = "https://api.github.com/repos/Pirs26/voxel/releases?per_page=15";
 pub const CHECKSUMS_ASSET_NAME: &str = "SHA256SUMS.txt";
-pub const APP_VERSION: &str = match option_env!("APP_VERSION") {
-    Some(v) if !v.is_empty() => v,
-    _ => concat!("v", env!("CARGO_PKG_VERSION")),
-};
+pub const APP_VERSION: &str = env!("RESOLVED_APP_VERSION");
 
 const STREAM_CHUNK_SIZE: usize = 64 * 1024;
 
@@ -988,25 +985,53 @@ pub fn format_release_notes_preview(notes: &str, max_chars: usize) -> String {
         return String::new();
     }
 
-    let mut collapsed = String::new();
-    let mut blank_streak = 0usize;
+    let mut clean_lines: Vec<String> = Vec::new();
     for raw_line in notes.trim().lines() {
-        let line = raw_line.trim_end();
+        let mut line = raw_line.trim().to_string();
         if line.is_empty() {
-            blank_streak += 1;
-            if blank_streak == 1 && !collapsed.is_empty() {
-                collapsed.push('\n');
-            }
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        // Skip noisy auto-generated GitHub Release boilerplate
+        if lower.starts_with("## what's changed")
+            || lower.starts_with("### what's changed")
+            || lower.starts_with("**full changelog**")
+            || lower.starts_with("full changelog")
+        {
+            continue;
+        }
+
+        // Strip markdown heading hashes & bold asterisks
+        line = line.trim_start_matches('#').trim().replace("**", "");
+        // Strip trailing " by @author in https://..." GitHub PR attribution
+        if let Some(idx) = line.find(" by @") {
+            line.truncate(idx);
+            line = line.trim_end().to_string();
+        }
+        // Strip any trailing raw URL
+        if let Some(idx) = line.find(" http://").or_else(|| line.find(" https://")) {
+            line.truncate(idx);
+            line = line.trim_end().to_string();
+        }
+        if line.is_empty() {
+            continue;
+        }
+
+        // Convert markdown list markers (* / -) to clean bullet points
+        let formatted = if let Some(rest) = line.strip_prefix("* ").or_else(|| line.strip_prefix("- ")) {
+            format!("• {}", rest.trim())
         } else {
-            blank_streak = 0;
-            if !collapsed.is_empty() {
-                collapsed.push('\n');
-            }
-            collapsed.push_str(line);
+            line
+        };
+
+        clean_lines.push(formatted);
+        if clean_lines.len() >= 5 {
+            break;
         }
     }
 
-    let cleaned = collapsed.trim();
+    let joined = clean_lines.join("\n");
+    let cleaned = joined.trim();
     if cleaned.chars().count() <= max_chars {
         return cleaned.to_string();
     }
