@@ -7,13 +7,15 @@ use voxel_acoustics::{
 };
 use voxel_audio_dsp::{
     AudioCommand, AudioEngine, LOCAL_LOOPBACK_SPEAKER_ID, MicCapture, MicTelemetry, SynthClip,
-    VoiceDecoderPool,
+    VoiceDecoderPool, list_input_devices, list_output_devices,
 };
 use voxel_net::PlayerId;
 
 use crate::{
     net_bridge::{CoopMenuOpen, CoopState, remote_player_head_pos},
     player::PlayerController,
+    settings::{AppScreen, SettingsMenuOpen, UserSettings},
+    shed::ShopOverlayOpen,
     voxel_render::{LevelInfoResource, WorldResource},
 };
 
@@ -46,7 +48,22 @@ pub struct RemoveVoiceSpeakerEvent {
     pub speaker_id: PlayerId,
 }
 
-/// User-adjustable voice & mic calibration controls (Shed calibration + hotkeys).
+/// Cached list of system audio output and input devices for the Settings UI.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct AudioDeviceCatalog {
+    pub output_devices: Vec<String>,
+    pub input_devices: Vec<String>,
+}
+
+impl AudioDeviceCatalog {
+    pub fn refresh(&mut self) {
+        self.output_devices = list_output_devices();
+        self.input_devices = list_input_devices();
+    }
+}
+
+/// User-adjustable live voice controls (mute & self-echo test).
+/// Persistent levels/devices live in `UserSettings`.
 #[derive(Resource, Clone, Debug)]
 pub struct VoiceSettings {
     pub muted: bool,
@@ -110,31 +127,62 @@ struct AudioEngineHolder {
     engine: AudioEngine,
     mic: MicCapture,
     decoder_pool: VoiceDecoderPool,
+    active_output_device: Option<String>,
+    active_input_device: Option<String>,
+    last_master_volume: f32,
+    last_voice_volume: f32,
 }
 
 pub struct AudioBridgePlugin;
 
 impl Plugin for AudioBridgePlugin {
     fn build(&self, app: &mut App) {
-        let engine = AudioEngine::start();
+        let initial_settings = app
+            .world()
+            .get_resource::<UserSettings>()
+            .cloned()
+            .unwrap_or_default();
+
+        let mut engine = AudioEngine::start_with_device(initial_settings.output_device.as_deref());
+        engine.send(AudioCommand::SetVolumes {
+            master: initial_settings.master_volume,
+            voice: initial_settings.voice_volume,
+        });
         let decoder_pool = VoiceDecoderPool::new(engine.sample_rate);
-        let mic = MicCapture::start(-45.0);
+        let mic = MicCapture::start_with_device(
+            initial_settings.gate_threshold_db,
+            initial_settings.input_device.as_deref(),
+        );
+        mic.set_input_gain(initial_settings.mic_gain);
+
+        let mut catalog = AudioDeviceCatalog::default();
+        catalog.refresh();
 
         app.add_message::<PlaySpatialSoundEvent>()
             .add_message::<IncomingVoiceFrame>()
             .add_message::<RemoveVoiceSpeakerEvent>()
-            .init_resource::<VoiceSettings>()
+            .insert_resource(VoiceSettings {
+                muted: false,
+                self_echo_test: false,
+                gate_threshold_db: initial_settings.gate_threshold_db,
+            })
+            .insert_resource(catalog)
             .init_resource::<AcousticTelemetry>()
             .insert_non_send(AudioEngineHolder {
                 engine,
                 mic,
                 decoder_pool,
+                active_output_device: initial_settings.output_device,
+                active_input_device: initial_settings.input_device,
+                last_master_volume: initial_settings.master_volume,
+                last_voice_volume: initial_settings.voice_volume,
             })
             .add_systems(Startup, setup_beacon_and_acoustics)
             .add_systems(
                 Update,
                 (
                     voice_hotkeys_system,
+                    sync_audio_user_settings_system,
                     sync_beacon_visual,
                     submit_and_poll_acoustics,
                     process_mic_and_voice_frames,
@@ -196,10 +244,14 @@ fn setup_beacon_and_acoustics(
 
 fn voice_hotkeys_system(
     keys: Res<ButtonInput<KeyCode>>,
+    screen: Res<AppScreen>,
     menu_open: Res<CoopMenuOpen>,
+    shop_open: Res<ShopOverlayOpen>,
+    settings_open: Res<SettingsMenuOpen>,
     mut settings: ResMut<VoiceSettings>,
+    mut user_settings: ResMut<UserSettings>,
 ) {
-    if menu_open.0 {
+    if *screen != AppScreen::InGame || menu_open.0 || shop_open.0 || settings_open.0 {
         return;
     }
     if keys.just_pressed(KeyCode::KeyM) {
@@ -209,11 +261,66 @@ fn voice_hotkeys_system(
         settings.self_echo_test = !settings.self_echo_test;
     }
     if keys.just_pressed(KeyCode::BracketLeft) {
-        settings.gate_threshold_db = (settings.gate_threshold_db - 3.0).clamp(-65.0, -15.0);
+        user_settings.gate_threshold_db =
+            (user_settings.gate_threshold_db - 3.0).clamp(-65.0, -15.0);
+        settings.gate_threshold_db = user_settings.gate_threshold_db;
     }
     if keys.just_pressed(KeyCode::BracketRight) {
-        settings.gate_threshold_db = (settings.gate_threshold_db + 3.0).clamp(-65.0, -15.0);
+        user_settings.gate_threshold_db =
+            (user_settings.gate_threshold_db + 3.0).clamp(-65.0, -15.0);
+        settings.gate_threshold_db = user_settings.gate_threshold_db;
     }
+}
+
+fn sync_audio_user_settings_system(
+    user_settings: Res<UserSettings>,
+    mut voice_settings: ResMut<VoiceSettings>,
+    mut audio: NonSendMut<AudioEngineHolder>,
+) {
+    voice_settings.gate_threshold_db = user_settings.gate_threshold_db;
+
+    // Hot-swap output device if changed in Settings
+    if user_settings.output_device != audio.active_output_device {
+        let mut new_engine =
+            AudioEngine::start_with_device(user_settings.output_device.as_deref());
+        new_engine.send(AudioCommand::SetVolumes {
+            master: user_settings.master_volume,
+            voice: user_settings.voice_volume,
+        });
+        let new_pool = VoiceDecoderPool::new(new_engine.sample_rate);
+        audio.engine = new_engine;
+        audio.decoder_pool = new_pool;
+        audio.active_output_device = user_settings.output_device.clone();
+        audio.last_master_volume = user_settings.master_volume;
+        audio.last_voice_volume = user_settings.voice_volume;
+    }
+
+    // Hot-swap input microphone device if changed in Settings
+    if user_settings.input_device != audio.active_input_device {
+        let new_mic = MicCapture::start_with_device(
+            user_settings.gate_threshold_db,
+            user_settings.input_device.as_deref(),
+        );
+        new_mic.set_input_gain(user_settings.mic_gain);
+        new_mic.set_muted(voice_settings.muted);
+        audio.mic = new_mic;
+        audio.active_input_device = user_settings.input_device.clone();
+    }
+
+    // Push master & voice output volumes only when changed
+    if (user_settings.master_volume - audio.last_master_volume).abs() > 1e-4
+        || (user_settings.voice_volume - audio.last_voice_volume).abs() > 1e-4
+    {
+        audio.engine.send(AudioCommand::SetVolumes {
+            master: user_settings.master_volume,
+            voice: user_settings.voice_volume,
+        });
+        audio.last_master_volume = user_settings.master_volume;
+        audio.last_voice_volume = user_settings.voice_volume;
+    }
+
+    // Sync mic input gain (atomic lock-free store)
+    audio.mic.set_input_gain(user_settings.mic_gain);
 }
 
 fn sync_beacon_visual(
@@ -227,8 +334,10 @@ fn sync_beacon_visual(
 
 /// Submits 20 Hz acoustic raytracing work to the background `AcousticWorker` and polls
 /// completed snapshots without ever blocking Bevy's main render thread!
+#[allow(clippy::too_many_arguments)]
 fn submit_and_poll_acoustics(
     time: Res<Time>,
+    screen: Res<AppScreen>,
     level_info: Res<LevelInfoResource>,
     coop: Res<CoopState>,
     settings: Res<VoiceSettings>,
@@ -311,41 +420,47 @@ fn submit_and_poll_acoustics(
             }
         }
 
-        if settings.self_echo_test {
-            if let Some(beacon_params) = telemetry.beacon_params {
-                audio
-                    .engine
-                    .update_voice_acoustics(LOCAL_LOOPBACK_SPEAKER_ID, beacon_params);
-            }
+        if settings.self_echo_test
+            && let Some(beacon_params) = telemetry.beacon_params
+        {
+            audio
+                .engine
+                .update_voice_acoustics(LOCAL_LOOPBACK_SPEAKER_ID, beacon_params);
         }
+    }
+
+    // Keep the Main Menu quiet (no repeating beacon pings/drips until InGame)
+    if *screen != AppScreen::InGame {
+        return;
     }
 
     // 3. Trigger periodic Acoustic Beacon Ping using already-solved params (zero raycasts!)
-    if beacon.ping_timer.just_finished() && !settings.self_echo_test {
-        if let Some(params) = telemetry.beacon_params {
-            audio.engine.send(AudioCommand::PlayClip {
-                source_id: BEACON_SOURCE_ID,
-                clip: SynthClip::BeaconPing,
-                volume: 0.78,
-                pitch: 1.0,
-                looping: false,
-                initial_params: params,
-            });
-        }
+    if beacon.ping_timer.just_finished()
+        && !settings.self_echo_test
+        && let Some(params) = telemetry.beacon_params
+    {
+        audio.engine.send(AudioCommand::PlayClip {
+            source_id: BEACON_SOURCE_ID,
+            clip: SynthClip::BeaconPing,
+            volume: 0.78,
+            pitch: 1.0,
+            looping: false,
+            initial_params: params,
+        });
     }
 
     // 4. Trigger periodic Grand Cavern water drip using already-solved drip params (zero raycasts!)
-    if beacon.drip_timer.just_finished() {
-        if let Some(params) = telemetry.drip_params {
-            audio.engine.send(AudioCommand::PlayClip {
-                source_id: DRIP_SOURCE_ID,
-                clip: SynthClip::WaterDrip,
-                volume: 0.65,
-                pitch: 1.0,
-                looping: false,
-                initial_params: params,
-            });
-        }
+    if beacon.drip_timer.just_finished()
+        && let Some(params) = telemetry.drip_params
+    {
+        audio.engine.send(AudioCommand::PlayClip {
+            source_id: DRIP_SOURCE_ID,
+            clip: SynthClip::WaterDrip,
+            volume: 0.65,
+            pitch: 1.0,
+            looping: false,
+            initial_params: params,
+        });
     }
 }
 

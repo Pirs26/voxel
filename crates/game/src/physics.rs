@@ -1,5 +1,5 @@
-use glam::Vec3;
-use voxel_core::VoxelWorld;
+use glam::{IVec3, Vec3};
+use voxel_core::{VoxelConfig, VoxelWorld};
 
 /// Scale-agnostic meter-based player AABB dimensions.
 /// Works identically at 1/2-height voxels (0.9m) and 1/4-height voxels (0.45m).
@@ -8,9 +8,41 @@ pub const PLAYER_HEIGHT_STAND_M: f32 = 1.75;
 pub const PLAYER_HEIGHT_CROUCH_M: f32 = 1.15;
 pub const PLAYER_EYE_STAND_M: f32 = 1.58;
 pub const PLAYER_EYE_CROUCH_M: f32 = 0.98;
+/// Heavy, snappy gravity (m/s²) so characters feel grounded rather than floaty.
+pub const PLAYER_GRAVITY_M_S2: f32 = 32.0;
+/// Single-tick upward jump impulse (m/s): apex ~1.17m (clears 0.90m block crisply) in ~0.54s.
+pub const PLAYER_JUMP_VELOCITY_M_S: f32 = 8.65;
 /// Only auto-step ledges up to knee height (~0.50m).
 /// At 1/2-height voxels (0.90m), players must jump onto blocks; at 1/4-height (0.45m), 1-voxel steps are smooth.
 pub const MAX_AUTO_STEP_M: f32 = 0.50;
+
+/// Returns `true` if placing a solid voxel at `voxel` would intersect a player's AABB hitbox
+/// (with a small 2 cm safety margin so blocks never clip a player's camera or trap them inside).
+pub fn voxel_overlaps_player_aabb(
+    cfg: VoxelConfig,
+    voxel: IVec3,
+    feet_pos_m: Vec3,
+    height_m: f32,
+) -> bool {
+    let vs = cfg.voxel_size_m;
+    let vmin = voxel.as_vec3() * vs;
+    let vmax = (voxel + IVec3::ONE).as_vec3() * vs;
+
+    let pad_xz = PLAYER_HALF_WIDTH_M + 0.02;
+    let pmin = Vec3::new(feet_pos_m.x - pad_xz, feet_pos_m.y + 0.01, feet_pos_m.z - pad_xz);
+    let pmax = Vec3::new(
+        feet_pos_m.x + pad_xz,
+        feet_pos_m.y + height_m + 0.02,
+        feet_pos_m.z + pad_xz,
+    );
+
+    vmin.x < pmax.x
+        && vmax.x > pmin.x
+        && vmin.y < pmax.y
+        && vmax.y > pmin.y
+        && vmin.z < pmax.z
+        && vmax.z > pmin.z
+}
 
 /// Checks whether an axis-aligned box `[min_m, max_m]` overlaps any solid voxel.
 pub fn aabb_intersects_world(world: &VoxelWorld, min_m: Vec3, max_m: Vec3) -> bool {
@@ -112,4 +144,58 @@ pub fn move_and_slide(
     }
 
     (feet_pos_m, vel_m, grounded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heavy_jump_physics_clears_one_voxel_without_floatiness() {
+        let apex_m = (PLAYER_JUMP_VELOCITY_M_S * PLAYER_JUMP_VELOCITY_M_S)
+            / (2.0 * PLAYER_GRAVITY_M_S2);
+        let airtime_s = (2.0 * PLAYER_JUMP_VELOCITY_M_S) / PLAYER_GRAVITY_M_S2;
+        assert!(
+            apex_m > 1.05 && apex_m < 1.35,
+            "expected crisp 1-block jump apex, got {apex_m} m"
+        );
+        assert!(
+            airtime_s > 0.40 && airtime_s < 0.62,
+            "expected non-floaty airtime, got {airtime_s} s"
+        );
+    }
+
+    #[test]
+    fn voxel_overlaps_player_aabb_blocks_body_and_allows_floor_or_clear_space() {
+        let cfg = VoxelConfig::default(); // 0.90m voxels
+        let feet = Vec3::new(4.95, 1.80, 4.95); // center of voxel (5, 2, 5) standing on y=2
+
+        // Feet voxel (5,2,5) and head voxel (5,3,5) MUST overlap
+        assert!(voxel_overlaps_player_aabb(
+            cfg,
+            IVec3::new(5, 2, 5),
+            feet,
+            PLAYER_HEIGHT_STAND_M
+        ));
+        assert!(voxel_overlaps_player_aabb(
+            cfg,
+            IVec3::new(5, 3, 5),
+            feet,
+            PLAYER_HEIGHT_STAND_M
+        ));
+        // Floor voxel directly below feet (5,1,5) must NOT overlap
+        assert!(!voxel_overlaps_player_aabb(
+            cfg,
+            IVec3::new(5, 1, 5),
+            feet,
+            PLAYER_HEIGHT_STAND_M
+        ));
+        // Adjacent voxel 2 away must NOT overlap
+        assert!(!voxel_overlaps_player_aabb(
+            cfg,
+            IVec3::new(7, 2, 5),
+            feet,
+            PLAYER_HEIGHT_STAND_M
+        ));
+    }
 }

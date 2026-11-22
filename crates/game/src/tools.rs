@@ -8,9 +8,17 @@ use voxel_core::{Destructibility, VoxelId, raycast_solid};
 
 use crate::{
     audio_bridge::{AcousticBeaconState, PlaySpatialSoundEvent},
+    gameplay::GameplayToast,
+    health::PlayerHealthState,
+    inventory::PlayerInventory,
     net_bridge::{CoopMenuOpen, CoopState},
-    physics::aabb_intersects_world,
+    physics::{
+        PLAYER_HEIGHT_CROUCH_M, PLAYER_HEIGHT_STAND_M, aabb_intersects_world,
+        voxel_overlaps_player_aabb,
+    },
     player::PlayerController,
+    settings::{AppScreen, SettingsMenuOpen},
+    shed::ShopOverlayOpen,
     voxel_render::WorldResource,
 };
 
@@ -72,10 +80,17 @@ fn setup_flare_assets(
 }
 
 /// Left click: Break `CrackedRock` or `AcousticFoam` (breaching shortcuts / opening sound paths!).
-/// Right click: Spray/place `AcousticFoam` (sealing passages to muffle sound & deaden echoes!).
+/// Right click: Spray/place `AcousticFoam` (consumes 1 charge from belt AcousticFoam canister!).
+#[allow(clippy::too_many_arguments)]
 fn voxel_interact_system(
     mouse: Res<ButtonInput<MouseButton>>,
+    screen: Res<AppScreen>,
     menu_open: Res<CoopMenuOpen>,
+    shop_open: Res<ShopOverlayOpen>,
+    settings_open: Res<SettingsMenuOpen>,
+    health: Res<PlayerHealthState>,
+    mut inv: ResMut<PlayerInventory>,
+    mut toast: ResMut<GameplayToast>,
     cursor_q: Query<&CursorOptions, With<PrimaryWindow>>,
     player_q: Query<(&PlayerController, &Transform)>,
     world_res: Res<WorldResource>,
@@ -85,7 +100,14 @@ fn voxel_interact_system(
     let Ok(cursor) = cursor_q.single() else {
         return;
     };
-    if menu_open.0 || cursor.grab_mode == CursorGrabMode::None {
+    if *screen != AppScreen::InGame
+        || menu_open.0
+        || shop_open.0
+        || settings_open.0
+        || !health.is_healthy()
+        || inv.is_hands_occupied()
+        || cursor.grab_mode == CursorGrabMode::None
+    {
         return;
     }
     let Ok((pc, cam_tf)) = player_q.single() else {
@@ -127,7 +149,6 @@ fn voxel_interact_system(
                 });
             }
             Destructibility::Unbreakable => {
-                // Dull clink on unbreakable rock/steel
                 sound_writer.write(PlaySpatialSoundEvent {
                     pos_m: hit.point_m,
                     clip: SynthClip::PickaxeHit,
@@ -144,12 +165,42 @@ fn voxel_interact_system(
         }
     } else if place_pressed {
         let target = hit.previous_voxel;
-        // Prevent placing foam directly inside the player's own body
+        let local_height = if pc.crouching {
+            PLAYER_HEIGHT_CROUCH_M
+        } else {
+            PLAYER_HEIGHT_STAND_M
+        };
+
+        // Prevent building inside the local player's OR any remote player's hitbox
+        // (avoids trapping teammates or creating X-ray clipping!).
+        let cfg = world_res.read().config();
+        let blocked_by_local = voxel_overlaps_player_aabb(cfg, target, pc.feet_pos_m, local_height);
+        let blocked_by_remote = coop.remote_players.values().any(|rp| {
+            let h = if rp.crouching {
+                PLAYER_HEIGHT_CROUCH_M
+            } else {
+                PLAYER_HEIGHT_STAND_M
+            };
+            voxel_overlaps_player_aabb(cfg, target, rp.current_feet_m, h)
+                || voxel_overlaps_player_aabb(cfg, target, rp.target_feet_m, h)
+        });
+        if blocked_by_local || blocked_by_remote {
+            toast.show("Blocked — cannot build inside a player!", 1.8);
+            return;
+        }
+
+        if !inv.consume_foam() {
+            toast.show(
+                "No Acoustic Foam canister in belt — grab one from the Shed workbench or Shop!",
+                2.5,
+            );
+            return;
+        }
+
         let (v_center, placed) = {
             let mut world = world_res.write();
             let vc = world.config().voxel_to_world_center(target);
-            let player_mid = pc.feet_pos_m + Vec3::Y * 0.9;
-            let ok = vc.distance(player_mid) > 0.78 && world.set(target, VoxelId::AcousticFoam);
+            let ok = !world.is_solid(target) && world.set(target, VoxelId::AcousticFoam);
             (vc, ok)
         };
         if placed {
@@ -166,19 +217,40 @@ fn voxel_interact_system(
                     kind: AcousticEventKind::ItemImpact,
                 }),
             });
+        } else {
+            // Refund foam charge if placement was already solid or out of bounds
+            let _ = inv.try_add_belt_item(crate::inventory::BeltItem::AcousticFoam { charges: 1 });
         }
     }
 }
 
-/// Press `G` to throw a glowing flare that bounces off voxel walls with real impact echoes.
+/// Press `G` to throw a glowing flare from belt inventory that bounces off voxel walls.
+#[allow(clippy::too_many_arguments)]
 fn throw_flare_system(
     keys: Res<ButtonInput<KeyCode>>,
+    screen: Res<AppScreen>,
     menu_open: Res<CoopMenuOpen>,
+    shop_open: Res<ShopOverlayOpen>,
+    settings_open: Res<SettingsMenuOpen>,
+    health: Res<PlayerHealthState>,
+    mut inv: ResMut<PlayerInventory>,
+    mut toast: ResMut<GameplayToast>,
     coop: Res<CoopState>,
     player_q: Query<&Transform, With<PlayerController>>,
     mut flare_writer: MessageWriter<SpawnFlareEvent>,
 ) {
-    if menu_open.0 || !keys.just_pressed(KeyCode::KeyG) {
+    if *screen != AppScreen::InGame
+        || menu_open.0
+        || shop_open.0
+        || settings_open.0
+        || !health.is_healthy()
+        || inv.is_hands_occupied()
+        || !keys.just_pressed(KeyCode::KeyG)
+    {
+        return;
+    }
+    if !inv.consume_flare() {
+        toast.show("Out of flares! Buy more at the Base Shed Shop.", 2.2);
         return;
     }
     let Ok(cam_tf) = player_q.single() else {
@@ -203,9 +275,6 @@ fn spawn_flare_entities_system(
     mut sound_writer: MessageWriter<PlaySpatialSoundEvent>,
 ) {
     for ev in events.read() {
-        // Put PointLight on a dedicated child entity (with NO Mesh3d!) so Bevy culls the light
-        // using its full 18m range sphere rather than the tiny 0.08m flare mesh AABB!
-        // Reuses cached FlareAssets mesh & material handles (zero GPU asset leak!).
         commands
             .spawn((
                 Mesh3d(flare_assets.mesh.clone()),
@@ -265,7 +334,6 @@ fn update_flares_system(
             continue;
         }
 
-        // Lifespan dimming & subtle flame flicker on the child PointLight
         let life_frac = (flare.life_remaining_s / 8.0).clamp(0.0, 1.0);
         let flicker = 0.88 + 0.12 * (time.elapsed_secs() * 19.0 + ent.index_u32() as f32).sin();
         for child in children.iter() {
@@ -319,16 +387,25 @@ fn update_flares_system(
     }
 }
 
-/// Press `E` to move the looping Acoustic Test Beacon right to your position
-/// so you can walk behind stone walls or spray Acoustic Foam around it to test muffling + echoes!
+/// Press `K` to move the looping Acoustic Test Beacon right to your position
+/// for A/B muffling & echo tests (freed `[E]` for contextual gameplay interactions!).
+#[allow(clippy::too_many_arguments)]
 fn move_beacon_system(
     keys: Res<ButtonInput<KeyCode>>,
+    screen: Res<AppScreen>,
     menu_open: Res<CoopMenuOpen>,
+    shop_open: Res<ShopOverlayOpen>,
+    settings_open: Res<SettingsMenuOpen>,
     coop: Res<CoopState>,
     player_q: Query<&Transform, With<PlayerController>>,
     mut beacon: ResMut<AcousticBeaconState>,
 ) {
-    if menu_open.0 || !keys.just_pressed(KeyCode::KeyE) {
+    if *screen != AppScreen::InGame
+        || menu_open.0
+        || shop_open.0
+        || settings_open.0
+        || !keys.just_pressed(KeyCode::KeyK)
+    {
         return;
     }
     if let Ok(cam_tf) = player_q.single() {
