@@ -44,7 +44,7 @@ pub enum NetEvent {
         level_seed: u64,
         depth_tier: u8,
         elevator_phase: ElevatorPhase,
-        credits: u32,
+        credits: i32,
         world_items: Vec<WorldItemNetState>,
         players: Vec<PlayerInfo>,
         voxel_edits: Vec<(IVec3, VoxelId)>,
@@ -90,8 +90,14 @@ pub enum NetEvent {
         target_id: PlayerId,
         reviver_id: PlayerId,
     },
+    PlayerCarrySync {
+        carrier_id: PlayerId,
+        target_id: PlayerId,
+        target_feet_m: Vec3,
+        active: bool,
+    },
     CreditsSync {
-        credits: u32,
+        credits: i32,
         unlocked_depth_tier: u8,
     },
     PlayerProfileSync {
@@ -370,7 +376,7 @@ struct HostState {
     level_seed: u64,
     depth_tier: u8,
     elevator_phase: ElevatorPhase,
-    credits: u32,
+    credits: i32,
     unlocked_depth_tier: u8,
     world_items: HashMap<u32, WorldItemNetState>,
     beacon_pos_m: Vec3,
@@ -1197,6 +1203,20 @@ fn emit_reliable_event(events: &EventQueue, msg: ReliableMessage) {
             NetEvent::PlayerRevived {
                 target_id,
                 reviver_id,
+            },
+        ),
+        ReliableMessage::PlayerCarrySync {
+            carrier_id,
+            target_id,
+            target_feet_m,
+            active,
+        } => push_event(
+            events,
+            NetEvent::PlayerCarrySync {
+                carrier_id,
+                target_id,
+                target_feet_m,
+                active,
             },
         ),
         ReliableMessage::CreditsSync {

@@ -44,6 +44,10 @@ pub enum WorldItemKind {
     NoiseDecoy { count: u8 },
     AidKit,
     Flashlight { battery: f32 },
+    FallenBody {
+        player_id: PlayerId,
+        player_name: String,
+    },
 }
 
 /// Networked state snapshot of a physical item in the Shed or Cave.
@@ -94,7 +98,7 @@ pub enum ReliableMessage {
         level_seed: u64,
         depth_tier: u8,
         elevator_phase: ElevatorPhase,
-        credits: u32,
+        credits: i32,
         world_items: Vec<WorldItemNetState>,
         players: Vec<PlayerInfo>,
         voxel_edits: Vec<(IVec3, VoxelId)>,
@@ -142,8 +146,14 @@ pub enum ReliableMessage {
         target_id: PlayerId,
         reviver_id: PlayerId,
     },
+    PlayerCarrySync {
+        carrier_id: PlayerId,
+        target_id: PlayerId,
+        target_feet_m: Vec3,
+        active: bool,
+    },
     CreditsSync {
-        credits: u32,
+        credits: i32,
         unlocked_depth_tier: u8,
     },
     PlayerProfileSync {
