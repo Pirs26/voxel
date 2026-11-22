@@ -13,6 +13,7 @@ mod save;
 mod settings;
 mod shed;
 mod tools;
+mod viewmodel;
 mod voxel_render;
 
 use std::sync::{Arc, RwLock};
@@ -28,6 +29,7 @@ use crate::{
     player::PlayerPlugin,
     settings::SettingsPlugin,
     tools::ToolsPlugin,
+    viewmodel::ViewmodelPlugin,
     voxel_render::{LevelInfoResource, VoxelRenderPlugin, WorldResource},
 };
 
@@ -67,6 +69,7 @@ fn main() {
             NetBridgePlugin,
             PlayerPlugin,
             ToolsPlugin,
+            ViewmodelPlugin,
             GameplayPlugin,
             AudioBridgePlugin,
             HudPlugin,
@@ -104,6 +107,7 @@ mod tests {
                 NetBridgePlugin,
                 PlayerPlugin,
                 ToolsPlugin,
+                ViewmodelPlugin,
                 GameplayPlugin,
                 AudioBridgePlugin,
                 HudPlugin,
