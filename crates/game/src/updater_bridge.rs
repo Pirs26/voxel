@@ -132,14 +132,7 @@ impl UpdaterState {
 
     pub fn popup_status_line(&self) -> (String, bool) {
         match &self.status {
-            UpdaterUiStatus::UpdateAvailable(info) => (
-                format!(
-                    "Ready to download {} ({})",
-                    info.archive_name,
-                    format_bytes_opt(info.archive_size_bytes)
-                ),
-                false,
-            ),
+            UpdaterUiStatus::UpdateAvailable(_) => (String::new(), false),
             UpdaterUiStatus::Downloading {
                 downloaded_bytes,
                 total_bytes,
@@ -154,11 +147,11 @@ impl UpdaterState {
                 };
                 (format!("Downloading… {pct}"), false)
             }
-            UpdaterUiStatus::Verifying(_) => ("Verifying SHA-256 checksum…".to_string(), false),
-            UpdaterUiStatus::Extracting(_) => ("Extracting archive…".to_string(), false),
-            UpdaterUiStatus::Installing(_) => ("Installing executable & assets…".to_string(), false),
-            UpdaterUiStatus::Restarting(_) => ("Restarting Echoes Below…".to_string(), false),
-            UpdaterUiStatus::Failed { message, .. } => (format!("Update failed: {message}"), true),
+            UpdaterUiStatus::Verifying(_) => ("Verifying checksum…".to_string(), false),
+            UpdaterUiStatus::Extracting(_) => ("Extracting files…".to_string(), false),
+            UpdaterUiStatus::Installing(_) => ("Installing update…".to_string(), false),
+            UpdaterUiStatus::Restarting(_) => ("Restarting…".to_string(), false),
+            UpdaterUiStatus::Failed { message, .. } => (message.clone(), true),
             _ => (String::new(), false),
         }
     }
@@ -166,24 +159,15 @@ impl UpdaterState {
     pub fn notes_preview(&self) -> String {
         match self.active_update_info() {
             Some(info) => {
-                let preview = format_release_notes_preview(&info.release_notes, 680);
+                let preview = format_release_notes_preview(&info.release_notes, 340);
                 if preview.is_empty() {
-                    "No release notes provided for this build.".to_string()
+                    "New build ready to install.".to_string()
                 } else {
                     preview
                 }
             }
             None => String::new(),
         }
-    }
-}
-
-fn format_bytes_opt(bytes: Option<u64>) -> String {
-    match bytes {
-        Some(b) if b >= 1024 * 1024 => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
-        Some(b) if b >= 1024 => format!("{:.0} KB", b as f64 / 1024.0),
-        Some(b) => format!("{b} B"),
-        None => "size unknown".to_string(),
     }
 }
 

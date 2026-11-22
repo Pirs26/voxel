@@ -134,16 +134,16 @@ struct ToggleButtonLabel(ToggleKind);
 struct SettingsUpdaterStatusText;
 
 #[derive(Component)]
-struct UpdatePopupTitleText;
-
-#[derive(Component)]
-struct UpdatePopupBadgeText;
+struct UpdatePopupVersionText;
 
 #[derive(Component)]
 struct UpdatePopupNotesText;
 
 #[derive(Component)]
 struct UpdatePopupStatusText;
+
+#[derive(Component)]
+struct UpdatePopupProgressWrap;
 
 #[derive(Component)]
 struct UpdatePopupProgressFill;
@@ -2766,8 +2766,8 @@ fn setup_hud(mut commands: Commands) {
             backdrop
                 .spawn((
                     Node {
-                        width: Val::Px(560.0),
-                        padding: UiRect::all(Val::Px(22.0)),
+                        width: Val::Px(460.0),
+                        padding: UiRect::all(Val::Px(24.0)),
                         border: UiRect {
                             top: Val::Px(3.0),
                             left: Val::Px(1.5),
@@ -2776,7 +2776,7 @@ fn setup_hud(mut commands: Commands) {
                         },
                         border_radius: BorderRadius::all(Val::Px(12.0)),
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(12.0),
+                        row_gap: Val::Px(14.0),
                         ..default()
                     },
                     BackgroundColor(COL_PANEL_BG),
@@ -2788,55 +2788,40 @@ fn setup_hud(mut commands: Commands) {
                     },
                 ))
                 .with_children(|modal| {
-                    // Header: Title + Release Tag Badge
+                    // Clean stacked header: Title + Version delta subtitle
                     modal
                         .spawn(Node {
-                            flex_direction: FlexDirection::Row,
-                            justify_content: JustifyContent::SpaceBetween,
-                            align_items: AlignItems::Center,
-                            width: Val::Percent(100.0),
+                            flex_direction: FlexDirection::Column,
+                            row_gap: Val::Px(4.0),
                             ..default()
                         })
                         .with_children(|hdr| {
                             hdr.spawn((
                                 Text::new("Update Available"),
                                 TextFont {
-                                    font_size: FontSize::Px(20.0),
+                                    font_size: FontSize::Px(22.0),
                                     ..default()
                                 },
                                 TextColor(COL_ACCENT_CYAN),
-                                UpdatePopupTitleText,
                             ));
                             hdr.spawn((
-                                Node {
-                                    padding: UiRect::axes(Val::Px(9.0), Val::Px(4.0)),
-                                    border: UiRect::all(Val::Px(1.0)),
-                                    border_radius: BorderRadius::all(Val::Px(10.0)),
+                                Text::new(format!("{APP_VERSION}  →  ...")),
+                                TextFont {
+                                    font_size: FontSize::Px(14.0),
                                     ..default()
                                 },
-                                BackgroundColor(Color::srgba(0.14, 0.11, 0.04, 0.95)),
-                                BorderColor::all(COL_ACCENT_AMBER),
-                            ))
-                            .with_children(|b| {
-                                b.spawn((
-                                    Text::new("PRE-RELEASE"),
-                                    TextFont {
-                                        font_size: FontSize::Px(11.0),
-                                        ..default()
-                                    },
-                                    TextColor(COL_ACCENT_AMBER),
-                                    UpdatePopupBadgeText,
-                                ));
-                            });
+                                TextColor(COL_TEXT_MUTED),
+                                UpdatePopupVersionText,
+                            ));
                         });
 
-                    // Truncated Release Notes Card
+                    // Clean, airy highlights box (bulleted, stripped of markdown/URL clutter)
                     modal
                         .spawn((
                             Node {
                                 width: Val::Percent(100.0),
-                                max_height: Val::Px(210.0),
-                                padding: UiRect::all(Val::Px(12.0)),
+                                max_height: Val::Px(170.0),
+                                padding: UiRect::all(Val::Px(14.0)),
                                 border: UiRect::all(Val::Px(1.0)),
                                 border_radius: BorderRadius::all(Val::Px(8.0)),
                                 overflow: Overflow::clip(),
@@ -2849,7 +2834,7 @@ fn setup_hud(mut commands: Commands) {
                             notes_box.spawn((
                                 Text::new(""),
                                 TextFont {
-                                    font_size: FontSize::Px(12.5),
+                                    font_size: FontSize::Px(13.5),
                                     ..default()
                                 },
                                 TextColor(COL_TEXT_BRIGHT),
@@ -2857,19 +2842,23 @@ fn setup_hud(mut commands: Commands) {
                             ));
                         });
 
-                    // Live Progress Bar + Status Text
+                    // Progress bar & status line (hidden until Update is clicked or an error occurs!)
                     modal
-                        .spawn(Node {
-                            flex_direction: FlexDirection::Column,
-                            row_gap: Val::Px(6.0),
-                            width: Val::Percent(100.0),
-                            ..default()
-                        })
+                        .spawn((
+                            Node {
+                                flex_direction: FlexDirection::Column,
+                                row_gap: Val::Px(6.0),
+                                width: Val::Percent(100.0),
+                                display: Display::None,
+                                ..default()
+                            },
+                            UpdatePopupProgressWrap,
+                        ))
                         .with_children(|prog| {
                             prog.spawn((
                                 Node {
                                     width: Val::Percent(100.0),
-                                    height: Val::Px(8.0),
+                                    height: Val::Px(7.0),
                                     border_radius: BorderRadius::all(Val::Px(4.0)),
                                     overflow: Overflow::clip(),
                                     ..default()
@@ -2892,7 +2881,7 @@ fn setup_hud(mut commands: Commands) {
                             prog.spawn((
                                 Text::new(""),
                                 TextFont {
-                                    font_size: FontSize::Px(12.5),
+                                    font_size: FontSize::Px(13.0),
                                     ..default()
                                 },
                                 TextColor(COL_TEXT_MUTED),
@@ -2900,7 +2889,7 @@ fn setup_hud(mut commands: Commands) {
                             ));
                         });
 
-                    // Action Buttons: [Update & Restart] + [Later / Stay on vX.Y.Z]
+                    // Simple two-button footer: [Not Now]  [Update & Restart]
                     modal
                         .spawn(Node {
                             flex_direction: FlexDirection::Row,
@@ -2912,7 +2901,7 @@ fn setup_hud(mut commands: Commands) {
                         .with_children(|btns| {
                             let dismiss_txt = spawn_std_btn(
                                 btns,
-                                &format!("Later / Stay on {APP_VERSION}"),
+                                &format!("Stay on {APP_VERSION}"),
                                 UiAction::UpdateDismiss,
                             );
                             btns.commands()
@@ -4174,37 +4163,41 @@ fn update_settings_widgets_system(
 fn update_updater_popup_system(
     updater: Res<UpdaterState>,
     mut texts: ParamSet<(
-        Query<&mut Text, With<UpdatePopupTitleText>>,
-        Query<&mut Text, With<UpdatePopupBadgeText>>,
+        Query<&mut Text, With<UpdatePopupVersionText>>,
         Query<&mut Text, With<UpdatePopupNotesText>>,
         Query<(&mut Text, &mut TextColor), With<UpdatePopupStatusText>>,
         Query<&mut Text, With<UpdatePopupInstallLabel>>,
         Query<&mut Text, With<UpdatePopupDismissLabel>>,
     )>,
-    mut fill_q: Query<(&mut Node, &mut BackgroundColor), With<UpdatePopupProgressFill>>,
+    mut progress_nodes: ParamSet<(
+        Query<&mut Node, With<UpdatePopupProgressWrap>>,
+        Query<(&mut Node, &mut BackgroundColor), With<UpdatePopupProgressFill>>,
+    )>,
 ) {
     if !updater.popup_open {
         return;
     }
 
-    if let Some(info) = updater.active_update_info() {
-        if let Ok(mut t) = texts.p0().single_mut() {
-            t.0 = format!("Update Available: {APP_VERSION} → {}", info.version_tag);
-        }
-        if let Ok(mut t) = texts.p1().single_mut() {
-            t.0 = if info.prerelease {
-                "PRE-RELEASE".to_string()
-            } else {
-                "RELEASE".to_string()
-            };
-        }
+    if let Some(info) = updater.active_update_info()
+        && let Ok(mut t) = texts.p0().single_mut()
+    {
+        let kind = if info.prerelease { "  •  Pre-release" } else { "" };
+        t.0 = format!("{APP_VERSION}  →  {}{kind}", info.version_tag);
     }
-    if let Ok(mut t) = texts.p2().single_mut() {
+    if let Ok(mut t) = texts.p1().single_mut() {
         t.0 = updater.notes_preview();
     }
 
     let (status_line, is_err) = updater.popup_status_line();
-    if let Ok((mut t, mut col)) = texts.p3().single_mut() {
+    let show_progress = !status_line.is_empty();
+    if let Ok(mut wrap) = progress_nodes.p0().single_mut() {
+        wrap.display = if show_progress {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    if let Ok((mut t, mut col)) = texts.p2().single_mut() {
         t.0 = status_line;
         *col = TextColor(if is_err {
             COL_ACCENT_RED
@@ -4213,7 +4206,7 @@ fn update_updater_popup_system(
         });
     }
 
-    if let Ok((mut node, mut bg)) = fill_q.single_mut() {
+    if let Ok((mut node, mut bg)) = progress_nodes.p1().single_mut() {
         let frac = updater.progress_fraction();
         node.width = Val::Percent((frac * 100.0).clamp(0.0, 100.0));
         *bg = BackgroundColor(if is_err {
@@ -4225,22 +4218,22 @@ fn update_updater_popup_system(
         });
     }
 
-    if let Ok(mut t) = texts.p4().single_mut() {
+    if let Ok(mut t) = texts.p3().single_mut() {
         t.0 = match updater.status {
             UpdaterUiStatus::Downloading { .. }
             | UpdaterUiStatus::Verifying(_)
             | UpdaterUiStatus::Extracting(_)
             | UpdaterUiStatus::Installing(_)
             | UpdaterUiStatus::Restarting(_) => "Updating…".to_string(),
-            UpdaterUiStatus::Failed { .. } => "Retry Update".to_string(),
+            UpdaterUiStatus::Failed { .. } => "Retry".to_string(),
             _ => "Update & Restart".to_string(),
         };
     }
-    if let Ok(mut t) = texts.p5().single_mut() {
+    if let Ok(mut t) = texts.p4().single_mut() {
         t.0 = if matches!(updater.status, UpdaterUiStatus::Failed { .. }) {
-            "Dismiss".to_string()
+            "Close".to_string()
         } else {
-            format!("Later / Stay on {APP_VERSION}")
+            format!("Stay on {APP_VERSION}")
         };
     }
 }
