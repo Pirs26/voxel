@@ -376,20 +376,31 @@ pub fn generate_clip(clip: SynthClip, sample_rate: f32) -> Vec<f32> {
                 .collect()
         }
         SynthClip::MonsterGrowl => {
-            let len = (sample_rate * 0.68) as usize;
-            let mut lp = 0.0f32;
+            // Haunting blind-predator vocalization: resonant guttural throat growl (92/184/295 Hz
+            // audible on all speakers + penetrates stone as muffled rumble), raspy snarl, and
+            // crisp bony echolocation jaw-clicks that slap-back down winding tunnels!
+            let len = (sample_rate * 0.96) as usize;
+            let mut lp_low = 0.0f32;
+            let mut lp_mid = 0.0f32;
             (0..len)
                 .map(|i| {
                     let t = i as f32 / sample_rate;
-                    let env = (t * 8.0).min(1.0) * (-t * 3.0).exp();
-                    // Guttural low rasp + eerie insectoid clicks
-                    let click_pulse = ((TAU * 18.0 * t).sin().max(0.0)).powf(8.0);
-                    let growl = (TAU * (58.0 + (TAU * 6.0 * t).sin() * 8.0) * t).sin() * 0.55
-                        + (TAU * 116.0 * t).sin() * 0.30;
+                    let env = (t * 7.0).min(1.0) * (-t * 2.1).exp();
+                    let vib = (TAU * 5.2 * t).sin() * 7.5;
+                    let f0 = 92.0 + vib - t * 14.0;
+                    let throat = (TAU * f0 * t).sin() * 0.44
+                        + (TAU * (f0 * 2.02) * t).sin() * 0.34
+                        + (TAU * (f0 * 3.18) * t).sin() * 0.22;
                     let n = next_noise();
-                    lp += (n - lp) * 0.14;
-                    let click = (n - lp) * click_pulse * 0.65;
-                    (growl + lp * 0.35 + click) * env * 0.80
+                    lp_low += (n - lp_low) * 0.09;
+                    lp_mid += (n - lp_mid) * 0.32;
+                    let rasp = (lp_mid - lp_low) * 0.55;
+                    // 4 sharp bony echolocation clicks during the middle of the exhale
+                    let click_env = ((TAU * 10.5 * t).sin().max(0.0)).powf(12.0)
+                        * if t > 0.10 && t < 0.72 { 1.0 } else { 0.0 };
+                    let click_tone = (TAU * 1580.0 * t).sin() * 0.45 + (n - lp_mid) * 0.55;
+                    let clicks = click_tone * click_env * 0.72;
+                    ((throat + rasp) * env + clicks) * 0.88
                 })
                 .collect()
         }
