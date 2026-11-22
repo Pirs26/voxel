@@ -487,11 +487,11 @@ pub fn regenerate_underground(
         .collect();
 
     let mut monster_voxels = vec![
-        // Deep far side of the Grand Cavern — far from shaft landing!
-        IVec3::new(cavern_center.x + 9, cave_floor_y + 1, cavern_center.z - 1),
+        // Deep South Vault — far from shaft landing & around a bend (no instant spawn camping!)
+        IVec3::new(south_center.x + 1, cave_floor_y + 1, south_center.z + 1),
     ];
     if tier >= 2 {
-        // Second predator in the opposite Deep Southwest Chamber
+        // Second predator in the opposite West / Deep Southwest Chamber
         monster_voxels.push(IVec3::new(
             sw_center.x,
             cave_floor_y + 1,
