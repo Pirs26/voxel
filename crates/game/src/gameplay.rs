@@ -1643,14 +1643,12 @@ fn elevator_runtime_system(
     if delta_y.abs() > 1e-5 {
         for (_, item, mut tf) in &mut items_q {
             if item.carried_by.is_empty() {
-                let dx = (tf.translation.x - elevator.center_xz_m.x).abs();
-                let dz = (tf.translation.z - elevator.center_xz_m.y).abs();
-                if dx <= ELEVATOR_CAGE_HALF_EXTENT_M
-                    && dz <= ELEVATOR_CAGE_HALF_EXTENT_M
-                    && (tf.translation.y - prev_y).abs() <= 2.2
-                {
-                    tf.translation.y += delta_y;
-                }
+                let r = if is_two_handed_world_item(&item.kind) {
+                    Vec3::splat(0.32)
+                } else {
+                    Vec3::splat(0.14)
+                };
+                elevator.ride_with_elevator(&mut tf.translation, prev_y, r);
             }
         }
     }
@@ -1891,6 +1889,13 @@ fn elevator_runtime_system(
     }
 }
 
+#[derive(SystemParam)]
+struct WorldItemsEnv<'w> {
+    world_res: Res<'w, WorldResource>,
+    level_info: Res<'w, LevelInfoResource>,
+    elevator: Option<Res<'w, ElevatorState>>,
+}
+
 /// Simulates physical world items: Heavy Relic carry/scrape acoustics, dropped item gravity/bounces,
 /// active Noise Decoy loud acoustic lures, and passive Shed Charger Pad battery charging.
 #[allow(clippy::too_many_arguments)]
@@ -1899,8 +1904,7 @@ fn world_items_runtime_system(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    world_res: Res<WorldResource>,
-    level_info: Res<LevelInfoResource>,
+    env: WorldItemsEnv,
     coop: Res<CoopState>,
     mut inv: ResMut<PlayerInventory>,
     mut item_reg: ResMut<WorldItemRegistry>,
@@ -1936,7 +1940,9 @@ fn world_items_runtime_system(
 
     let local_id = coop.local_player_id();
     let local_player = player_q.single().ok();
-    let world = world_res.read();
+    let world = env.world_res.read();
+    let level_info = &env.level_info;
+    let elevator = env.elevator.as_deref();
 
     item_reg.active_carry_speed_mult = 1.0;
     item_reg.active_carry_is_scraping = false;
@@ -2079,8 +2085,9 @@ fn world_items_runtime_system(
         } else {
             Vec3::splat(0.14)
         };
+        let prev_pos = tf.translation;
         item.vel_m.y -= 16.0 * dt;
-        let mut pos = tf.translation;
+        let mut pos = prev_pos;
         let mut bounced = false;
         let impact_speed = item.vel_m.length();
 
@@ -2094,6 +2101,11 @@ fn world_items_runtime_system(
             } else {
                 pos = next;
             }
+        }
+        if let Some(elev) = elevator
+            && elev.collide_dynamic_with_elevator(prev_pos, &mut pos, &mut item.vel_m, r, 0.32, 0.72)
+        {
+            bounced = true;
         }
         tf.translation = pos;
         item.in_shed = is_pos_in_shed(pos, &level_info.0);

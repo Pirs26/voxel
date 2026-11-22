@@ -137,6 +137,100 @@ impl ElevatorState {
             && pos_m.y <= self.platform_y_m + 3.2 + EPS
     }
 
+    /// Resolves collision between a dynamic dropped item or throwable (`prev_pos -> pos`,
+    /// half-extents `radius`, velocity `vel`) and the moving steel elevator floor plate +
+    /// closed cage walls.
+    ///
+    /// Returns `true` if the body bounced on the steel deck or against a closed cage wall.
+    pub fn collide_dynamic_with_elevator(
+        &self,
+        prev_pos: Vec3,
+        pos: &mut Vec3,
+        vel: &mut Vec3,
+        radius: Vec3,
+        restitution: f32,
+        damping: f32,
+    ) -> bool {
+        let mut bounced = false;
+        let deck_half_extent = ELEVATOR_CAGE_HALF_EXTENT_M + 0.15;
+        let ref_floor_y = self.platform_y_m.min(self.prev_platform_y_m);
+
+        // 1. Prevent dropped/thrown objects from escaping through closed steel cage doors/walls
+        // while traveling up or down the shaft (run before deck check so diagonal corner throws
+        // clamp back over the deck and bounce on the floor in the same tick).
+        if self.doors_closed {
+            let prev_in_cage_xz = (prev_pos.x - self.center_xz_m.x).abs() <= deck_half_extent
+                && (prev_pos.z - self.center_xz_m.y).abs() <= deck_half_extent;
+            let max_floor_y = self.platform_y_m.max(self.prev_platform_y_m);
+            let in_cage_y = pos.y >= ref_floor_y - 0.25 && pos.y <= max_floor_y + 3.25;
+            if prev_in_cage_xz && in_cage_y {
+                let wall_limit_x = (ELEVATOR_CAGE_HALF_EXTENT_M - radius.x - 0.06).max(0.5);
+                let wall_limit_z = (ELEVATOR_CAGE_HALF_EXTENT_M - radius.z - 0.06).max(0.5);
+                let dx = pos.x - self.center_xz_m.x;
+                let dz = pos.z - self.center_xz_m.y;
+                if dx.abs() > wall_limit_x {
+                    pos.x = self.center_xz_m.x + dx.clamp(-wall_limit_x, wall_limit_x);
+                    vel.x *= -restitution;
+                    *vel *= damping;
+                    bounced = true;
+                }
+                if dz.abs() > wall_limit_z {
+                    pos.z = self.center_xz_m.y + dz.clamp(-wall_limit_z, wall_limit_z);
+                    vel.z *= -restitution;
+                    *vel *= damping;
+                    bounced = true;
+                }
+            }
+        }
+
+        // 2. Steel floor plate collision: top sits +2 cm above `platform_y_m`.
+        // Catches normal drops, fast shaft falls, and upward-moving decks while leaving
+        // objects strictly below the elevator in the cave untouched.
+        let over_deck = (pos.x - self.center_xz_m.x).abs() <= deck_half_extent
+            && (pos.z - self.center_xz_m.y).abs() <= deck_half_extent;
+        let deck_center_y = self.platform_y_m + 0.02 + radius.y;
+        if over_deck
+            && prev_pos.y >= ref_floor_y - ELEVATOR_FLOOR_THICKNESS_M - 0.15
+            && pos.y <= deck_center_y
+        {
+            pos.y = deck_center_y;
+            if vel.y < 0.0 {
+                vel.y = -vel.y * restitution;
+            }
+            *vel *= damping;
+            bounced = true;
+        }
+
+        bounced
+    }
+
+    /// Translates an item or throwable vertically with the moving elevator deck when inside
+    /// the cage footprint, keeping it seated on top of the steel plate and inside closed gates.
+    pub fn ride_with_elevator(&self, pos: &mut Vec3, prev_platform_y_m: f32, radius: Vec3) {
+        let delta_y = self.platform_y_m - prev_platform_y_m;
+        let deck_half_extent = ELEVATOR_CAGE_HALF_EXTENT_M + 0.15;
+        let dx = pos.x - self.center_xz_m.x;
+        let dz = pos.z - self.center_xz_m.y;
+        if dx.abs() <= deck_half_extent
+            && dz.abs() <= deck_half_extent
+            && (pos.y - prev_platform_y_m).abs() <= 2.4
+        {
+            if delta_y.abs() > 1e-5 {
+                pos.y += delta_y;
+            }
+            let min_y = self.platform_y_m + 0.02 + radius.y;
+            if pos.y < min_y {
+                pos.y = min_y;
+            }
+            if self.doors_closed {
+                let wall_limit_x = (ELEVATOR_CAGE_HALF_EXTENT_M - radius.x - 0.06).max(0.5);
+                let wall_limit_z = (ELEVATOR_CAGE_HALF_EXTENT_M - radius.z - 0.06).max(0.5);
+                pos.x = self.center_xz_m.x + dx.clamp(-wall_limit_x, wall_limit_x);
+                pos.z = self.center_xz_m.y + dz.clamp(-wall_limit_z, wall_limit_z);
+            }
+        }
+    }
+
     /// Transitions `ShedIdle -> Descending`, closes the cage gate, and spawns a background
     /// worker thread to regenerate the underground cave (`y < shed_floor_y`) seamlessly
     /// during the descent without touching the persistent Base Shed.
@@ -896,6 +990,94 @@ mod tests {
         assert!(
             lights[0].2.is_none(),
             "ElevatorBulbLight must NOT share an entity with Mesh3d (frustum culling rule)"
+        );
+    }
+
+    #[test]
+    fn collide_dynamic_with_elevator_stops_falling_items_and_flares() {
+        let (_world_arc, _info, mut state) = sample_world_and_state();
+        let floor_y = state.platform_y_m;
+
+        // 1. Dropped Heavy Relic (r = 0.32) inside the shaft bounces onto the steel deck instead of falling through.
+        let relic_r = Vec3::splat(0.32);
+        let prev_relic = Vec3::new(state.center_xz_m.x, floor_y + 0.55, state.center_xz_m.y);
+        let mut relic_pos = Vec3::new(state.center_xz_m.x, floor_y - 0.10, state.center_xz_m.y);
+        let mut relic_vel = Vec3::new(0.4, -6.0, 0.0);
+        let bounced = state.collide_dynamic_with_elevator(
+            prev_relic,
+            &mut relic_pos,
+            &mut relic_vel,
+            relic_r,
+            0.32,
+            0.72,
+        );
+        assert!(bounced, "heavy relic must bounce on elevator deck");
+        assert!(
+            (relic_pos.y - (floor_y + 0.02 + relic_r.y)).abs() < 1e-4,
+            "heavy relic should rest on top of the +2cm steel plate"
+        );
+        assert!(relic_vel.y > 0.0, "downward velocity should invert on bounce");
+
+        // 2. Thrown Flare (r = 0.10) bounces on the deck AND stays contained when doors are closed.
+        state.doors_closed = true;
+        let flare_r = Vec3::splat(0.10);
+        let prev_flare = Vec3::new(state.center_xz_m.x + 2.9, floor_y + 0.40, state.center_xz_m.y);
+        let mut flare_pos = Vec3::new(state.center_xz_m.x + 3.40, floor_y - 0.05, state.center_xz_m.y);
+        let mut flare_vel = Vec3::new(5.0, -4.0, 0.0);
+        let flare_bounced = state.collide_dynamic_with_elevator(
+            prev_flare,
+            &mut flare_pos,
+            &mut flare_vel,
+            flare_r,
+            0.42,
+            0.78,
+        );
+        assert!(flare_bounced, "thrown flare must bounce on elevator deck/wall");
+        assert!(
+            (flare_pos.y - (floor_y + 0.02 + flare_r.y)).abs() < 1e-4,
+            "flare should not fall through steel floor"
+        );
+        assert!(
+            (flare_pos.x - state.center_xz_m.x).abs() <= ELEVATOR_CAGE_HALF_EXTENT_M - flare_r.x,
+            "flare should stay inside closed elevator gate"
+        );
+        assert!(flare_vel.x < 0.0, "flare hitting +X closed door should reflect inward");
+
+        // 3. Item far below the elevator (down in the cave) or outside the shaft XZ is unaffected.
+        let cave_prev = Vec3::new(state.center_xz_m.x, floor_y - 25.0, state.center_xz_m.y);
+        let mut cave_pos = Vec3::new(state.center_xz_m.x, floor_y - 25.5, state.center_xz_m.y);
+        let mut cave_vel = Vec3::new(0.0, -5.0, 0.0);
+        assert!(!state.collide_dynamic_with_elevator(
+            cave_prev,
+            &mut cave_pos,
+            &mut cave_vel,
+            flare_r,
+            0.42,
+            0.78
+        ));
+        assert!((cave_pos.y - (floor_y - 25.5)).abs() < 1e-4);
+
+        let outside_prev = Vec3::new(state.center_xz_m.x + 8.0, floor_y + 0.5, state.center_xz_m.y);
+        let mut outside_pos = Vec3::new(state.center_xz_m.x + 8.0, floor_y - 0.2, state.center_xz_m.y);
+        let mut outside_vel = Vec3::new(0.0, -4.0, 0.0);
+        assert!(!state.collide_dynamic_with_elevator(
+            outside_prev,
+            &mut outside_pos,
+            &mut outside_vel,
+            relic_r,
+            0.32,
+            0.72
+        ));
+
+        // 4. Settled flare rides vertically with the descending elevator deck.
+        let prev_y = state.platform_y_m;
+        state.prev_platform_y_m = prev_y;
+        state.platform_y_m -= 2.5;
+        let mut riding_flare = Vec3::new(state.center_xz_m.x, prev_y + 0.02 + flare_r.y, state.center_xz_m.y);
+        state.ride_with_elevator(&mut riding_flare, prev_y, flare_r);
+        assert!(
+            (riding_flare.y - (state.platform_y_m + 0.02 + flare_r.y)).abs() < 1e-4,
+            "settled flare should move smoothly with the descending deck"
         );
     }
 }

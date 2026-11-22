@@ -10,6 +10,7 @@ use voxel_core::{Destructibility, VoxelId, raycast_solid};
 use crate::{
     ai_blind::{BlindStalker, MonsterArchetype, RemoteSyncedStalker, stalker_hit_aabb_for},
     audio_bridge::{AcousticBeaconState, PlaySpatialSoundEvent},
+    elevator::ElevatorState,
     gameplay::GameplayToast,
     health::PlayerHealthState,
     inventory::{BeltItem, PlayerInventory},
@@ -405,6 +406,8 @@ fn update_flares_system(
     time: Res<Time>,
     mut commands: Commands,
     world_res: Res<WorldResource>,
+    elevator: Option<Res<ElevatorState>>,
+    mut prev_elev_y: Local<Option<f32>>,
     mut flares_q: Query<(Entity, &mut Transform, &mut ThrownFlare, &Children)>,
     stalkers_q: Query<
         (&Transform, Option<&BlindStalker>, Option<&RemoteSyncedStalker>),
@@ -417,6 +420,15 @@ fn update_flares_system(
     let dt = time.delta_secs().min(0.05);
     let r = Vec3::splat(0.10);
     let world = world_res.read();
+    let prev_y = elevator.as_ref().map(|e| {
+        let py = prev_elev_y.unwrap_or(e.platform_y_m);
+        *prev_elev_y = Some(e.platform_y_m);
+        py
+    });
+    let elev_moving = elevator
+        .as_ref()
+        .zip(prev_y)
+        .is_some_and(|(e, py)| (e.platform_y_m - py).abs() > 1e-5);
 
     for (ent, mut tf, mut flare, children) in &mut flares_q {
         flare.life_remaining_s -= dt;
@@ -433,12 +445,19 @@ fn update_flares_system(
             }
         }
 
+        if let (Some(elev), Some(py)) = (elevator.as_deref(), prev_y)
+            && (flare.settled || elev_moving)
+        {
+            elev.ride_with_elevator(&mut tf.translation, py, r);
+        }
+
         if flare.settled {
             continue;
         }
 
+        let prev_pos = tf.translation;
         flare.velocity_m.y -= 16.0 * dt;
-        let mut pos = tf.translation;
+        let mut pos = prev_pos;
         let mut bounced = false;
         let impact_speed = flare.velocity_m.length();
 
@@ -452,6 +471,18 @@ fn update_flares_system(
             } else {
                 pos = next;
             }
+        }
+        if let Some(elev) = elevator.as_deref()
+            && elev.collide_dynamic_with_elevator(
+                prev_pos,
+                &mut pos,
+                &mut flare.velocity_m,
+                r,
+                0.42,
+                0.78,
+            )
+        {
+            bounced = true;
         }
         tf.translation = pos;
 
