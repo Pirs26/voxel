@@ -276,8 +276,22 @@ fn player_move_system(
 
     let controls_active = !menu_open.0 && !shop_open.0 && !settings_open.0 && !health.is_dead();
     let downed = health.is_downed();
+    let being_carried = matches!(
+        health.phase,
+        crate::health::LocalHealthPhase::Downed {
+            dragged_by: Some(_),
+            ..
+        }
+    );
     let dragging = matches!(inv.carry_state, CarryHandState::DraggingPlayer { .. });
     let carrying_relic = matches!(inv.carry_state, CarryHandState::HeavyRelic { .. });
+
+    if being_carried {
+        pc.velocity_m = Vec3::ZERO;
+        pc.crouching = true;
+        tf.translation = pc.feet_pos_m + Vec3::Y * 1.15;
+        return;
+    }
 
     pc.crouching = downed
         || (controls_active && (keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::KeyC)));

@@ -14,6 +14,8 @@ use crate::{
 pub const SOLO_RELIC_SPEED_MULT: f32 = 0.40;
 /// Movement speed multiplier while two or more players lift a Heavy Quest Relic together (quiet).
 pub const DUO_RELIC_SPEED_MULT: f32 = 0.75;
+/// Movement speed multiplier while carrying a downed companion or fallen body.
+pub const BODY_CARRY_SPEED_MULT: f32 = 0.55;
 /// Interval in seconds between loud stone-scraping acoustic events during solo relic drag.
 pub const RELIC_SCRAPE_INTERVAL_S: f32 = 0.35;
 /// Active duration in seconds for a triggered throwable Noise Decoy.
@@ -105,6 +107,8 @@ pub fn world_kind_to_saved(kind: &WorldItemKind) -> SavedWorldItemKind {
         WorldItemKind::Flashlight { battery } => SavedWorldItemKind::Flashlight {
             battery: battery.clamp(0.0, 1.0),
         },
+        // Fallen bodies do not persist in the Base Shed across saves; fallback cleanly if queried.
+        WorldItemKind::FallenBody { .. } => SavedWorldItemKind::BonusLoot { value: 0 },
     }
 }
 
@@ -164,12 +168,26 @@ pub fn world_item_display_name(kind: &WorldItemKind) -> String {
             let pct = (battery.clamp(0.0, 1.0) * 100.0).round() as u8;
             format!("Flashlight ({pct}%)")
         }
+        WorldItemKind::FallenBody { player_name, .. } => format!("{player_name}'s Body"),
     }
 }
 
 /// Returns `true` if the item is a two-handed Heavy Quest Relic.
 pub fn is_heavy_relic(kind: &WorldItemKind) -> bool {
     matches!(kind, WorldItemKind::HeavyRelic { .. })
+}
+
+/// Returns `true` if the item is a fallen teammate body.
+pub fn is_fallen_body(kind: &WorldItemKind) -> bool {
+    matches!(kind, WorldItemKind::FallenBody { .. })
+}
+
+/// Returns `true` if the item requires a two-handed carry (`HeavyRelic` or `FallenBody`).
+pub fn is_two_handed_world_item(kind: &WorldItemKind) -> bool {
+    matches!(
+        kind,
+        WorldItemKind::HeavyRelic { .. } | WorldItemKind::FallenBody { .. }
+    )
 }
 
 /// Returns movement speed multiplier based on how many players are carrying a Heavy Relic.
@@ -242,6 +260,7 @@ pub fn try_pickup_world_item_into_inventory(
             })
             .map_err(|_| "Belt full"),
         WorldItemKind::HeavyRelic { .. } => Err("Heavy relics require two-handed carry"),
+        WorldItemKind::FallenBody { .. } => Err("Fallen bodies require two-handed carry"),
     }
 }
 
@@ -653,6 +672,61 @@ pub fn spawn_world_item_visual(
                 })
                 .id()
         }
+        WorldItemKind::FallenBody { .. } => {
+            let torso_mesh = meshes.add(Cuboid::new(0.46, 0.24, 0.78));
+            let torso_mat = materials.add(StandardMaterial {
+                base_color: Color::srgb(0.16, 0.18, 0.22),
+                metallic: 0.25,
+                perceptual_roughness: 0.75,
+                ..default()
+            });
+            let helmet_mesh = meshes.add(Cuboid::new(0.28, 0.26, 0.28));
+            let helmet_mat = materials.add(StandardMaterial {
+                base_color: Color::srgb(0.22, 0.25, 0.30),
+                metallic: 0.35,
+                perceptual_roughness: 0.55,
+                ..default()
+            });
+            let beacon_strip_mesh = meshes.add(Cuboid::new(0.22, 0.05, 0.14));
+            let beacon_strip_mat = materials.add(StandardMaterial {
+                base_color: Color::srgb(0.95, 0.62, 0.14),
+                emissive: LinearRgba::new(2.8, 1.4, 0.22, 1.0),
+                perceptual_roughness: 0.3,
+                ..default()
+            });
+
+            commands
+                .spawn((
+                    Mesh3d(torso_mesh),
+                    MeshMaterial3d(torso_mat),
+                    Transform::from_translation(state.pos_m),
+                    component,
+                ))
+                .with_children(|parent| {
+                    parent.spawn((
+                        Mesh3d(helmet_mesh),
+                        MeshMaterial3d(helmet_mat),
+                        Transform::from_xyz(0.0, 0.03, -0.48),
+                    ));
+                    parent.spawn((
+                        Mesh3d(beacon_strip_mesh),
+                        MeshMaterial3d(beacon_strip_mat),
+                        Transform::from_xyz(0.0, 0.13, -0.05),
+                    ));
+                    // Dedicated child PointLight with NO Mesh3d so teammates can spot fallen friends!
+                    parent.spawn((
+                        PointLight {
+                            color: Color::srgb(1.0, 0.65, 0.18),
+                            intensity: 11_000.0,
+                            range: 6.5,
+                            shadow_maps_enabled: false,
+                            ..default()
+                        },
+                        Transform::from_xyz(0.0, 0.30, 0.0),
+                    ));
+                })
+                .id()
+        }
     }
 }
 
@@ -700,6 +774,18 @@ mod tests {
 
         assert!(is_heavy_relic(&kinds[0]));
         assert!(!is_heavy_relic(&kinds[1]));
+        assert!(is_two_handed_world_item(&kinds[0]));
+        assert!(!is_two_handed_world_item(&kinds[1]));
+
+        let body = WorldItemKind::FallenBody {
+            player_id: 2,
+            player_name: "Scout".to_string(),
+        };
+        assert!(is_fallen_body(&body));
+        assert!(!is_heavy_relic(&body));
+        assert!(is_two_handed_world_item(&body));
+        assert_eq!(world_item_display_name(&body), "Scout's Body");
+        let _ = world_kind_to_saved(&body);
 
         assert_eq!(
             belt_item_to_world_kind(&BeltItem::Flashlight, 0.77),
@@ -767,7 +853,7 @@ mod tests {
                 .is_err()
         );
 
-        // Heavy relic always rejects standard inventory pickup
+        // Heavy relic and fallen body always reject standard inventory pickup
         assert_eq!(
             try_pickup_world_item_into_inventory(
                 &mut inv,
@@ -777,6 +863,16 @@ mod tests {
                 }
             ),
             Err("Heavy relics require two-handed carry")
+        );
+        assert_eq!(
+            try_pickup_world_item_into_inventory(
+                &mut inv,
+                &WorldItemKind::FallenBody {
+                    player_id: 1,
+                    player_name: "Valkyrie".to_string(),
+                }
+            ),
+            Err("Fallen bodies require two-handed carry")
         );
     }
 
@@ -899,6 +995,18 @@ mod tests {
                 carried_by: Vec::new(),
                 active_timer_s: None,
             },
+            WorldItemNetState {
+                id: 4,
+                kind: WorldItemKind::FallenBody {
+                    player_id: 2,
+                    player_name: "Scout".to_string(),
+                },
+                pos_m: Vec3::new(8.0, 2.0, 3.0),
+                vel_m: Vec3::ZERO,
+                in_shed: false,
+                carried_by: Vec::new(),
+                active_timer_s: None,
+            },
         ];
 
         {
@@ -910,11 +1018,11 @@ mod tests {
         world.flush();
 
         let mut item_q = world.query::<&WorldItemEntity>();
-        assert_eq!(item_q.iter(&world).count(), 3);
+        assert_eq!(item_q.iter(&world).count(), 4);
 
         let mut light_q = world.query::<(&PointLight, Option<&Mesh3d>)>();
         let lights: Vec<_> = light_q.iter(&world).collect();
-        assert_eq!(lights.len(), 2);
+        assert_eq!(lights.len(), 3);
         for (_, mesh) in lights {
             assert!(
                 mesh.is_none(),

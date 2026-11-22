@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::inventory::PlayerInventory;
 
 pub const SAVE_VERSION: u32 = 1;
-pub const STARTER_CREDITS: u32 = 100;
+pub const STARTER_CREDITS: i32 = 100;
+pub const UNRECOVERED_COMPANION_FINE: i32 = 50;
 pub const DEFAULT_SAVE_SLOT: &str = "default";
 
 /// Physical items persisted inside the Base Shed across dives and sessions.
@@ -49,7 +50,7 @@ pub struct SavedPlayerProfile {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CampaignSave {
     pub version: u32,
-    pub credits: u32,
+    pub credits: i32,
     pub unlocked_depth_tier: u8,
     pub selected_depth_tier: u8,
     pub dives_completed: u32,
@@ -199,7 +200,7 @@ impl CampaignSave {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SaveSlotSummary {
     pub slot_name: String,
-    pub credits: u32,
+    pub credits: i32,
     pub unlocked_depth_tier: u8,
     pub dives_completed: u32,
     pub player_count: usize,
@@ -484,6 +485,14 @@ mod tests {
         save.save_to_path(&path).expect("save should succeed");
         let reloaded = CampaignSave::load_from_path(&path).expect("load should succeed");
         assert_eq!(reloaded, save);
+
+        // Verify negative credits (company debt) roundtrip cleanly in JSON.
+        save.credits = -150;
+        save.save_to_path(&path).expect("save negative credits should succeed");
+        let reloaded_debt =
+            CampaignSave::load_from_path(&path).expect("load negative credits should succeed");
+        assert_eq!(reloaded_debt.credits, -150);
+        assert_eq!(reloaded_debt, save);
 
         // Cleanup temporary directory.
         if let Some(dir) = path.parent() {

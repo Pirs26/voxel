@@ -5,6 +5,8 @@
 //! - Blind Acoustic Stalker AI driven strictly by `voxel_acoustics::evaluate_ai_hearing`
 //! - Downed state, teammate dragging, 4s Aid Kit revive, Team Wipe & persistent Shed saves
 
+use std::collections::HashSet;
+
 use bevy::{
     ecs::system::SystemParam,
     input::mouse::MouseWheel,
@@ -42,15 +44,19 @@ use crate::{
     physics::{aabb_intersects_world, ray_aabb_intersect},
     player::PlayerController,
     relic::{
-        CHARGER_PAD_RADIUS_M, CHARGER_PAD_RATE_PER_S, DECOY_ACTIVE_DURATION_S,
-        DECOY_PULSE_INTERVAL_S, RELIC_SCRAPE_INTERVAL_S, RemoveWorldItemEvent,
-        SpawnWorldItemEvent, WorldItemEntity, WorldItemRegistry, belt_item_to_world_kind,
-        create_cave_relic_states, default_starter_shed_items, is_heavy_relic, is_pos_in_shed,
+        BODY_CARRY_SPEED_MULT, CHARGER_PAD_RADIUS_M, CHARGER_PAD_RATE_PER_S,
+        DECOY_ACTIVE_DURATION_S, DECOY_PULSE_INTERVAL_S, RELIC_SCRAPE_INTERVAL_S,
+        RemoveWorldItemEvent, SpawnWorldItemEvent, WorldItemEntity, WorldItemRegistry,
+        belt_item_to_world_kind, create_cave_relic_states, default_starter_shed_items,
+        is_fallen_body, is_heavy_relic, is_pos_in_shed, is_two_handed_world_item,
         relic_carry_speed_mult, relic_is_scraping, saved_to_world_kind, spawn_world_item_visual,
         to_net_state, try_pickup_world_item_into_inventory, world_item_display_name,
         world_kind_to_saved,
     },
-    save::{CampaignState, SaveSlotBrowser, SavedPlayerProfile, SavedWorldItem},
+    save::{
+        CampaignState, SaveSlotBrowser, SavedPlayerProfile, SavedWorldItem,
+        UNRECOVERED_COMPANION_FINE,
+    },
     settings::{AppScreen, SettingsMenuOpen},
     shed::{
         CrosshairTargetState, INTERACT_RAY_MAX_DIST_M, LookTargetKind, ShedStation,
@@ -92,13 +98,15 @@ impl GameplayToast {
     }
 }
 
-/// Timers for periodic voice-to-AI emission, monster pose broadcasts, and health sync.
+/// Timers for periodic voice-to-AI emission, monster pose broadcasts, carry sync, and health sync.
 #[derive(Resource)]
 struct GameplayTimers {
     voice_ai_timer_s: f32,
     monster_net_timer_s: f32,
     item_net_timer_s: f32,
+    carry_net_timer_s: f32,
     last_synced_health: LocalHealthPhase,
+    spawned_bodies: HashSet<u16>,
 }
 
 impl Default for GameplayTimers {
@@ -107,7 +115,9 @@ impl Default for GameplayTimers {
             voice_ai_timer_s: 0.0,
             monster_net_timer_s: 0.0,
             item_net_timer_s: 0.0,
+            carry_net_timer_s: 0.0,
             last_synced_health: LocalHealthPhase::Healthy,
+            spawned_bodies: HashSet::new(),
         }
     }
 }
@@ -236,6 +246,23 @@ pub fn count_living_players_outside_cage(
         }
     }
     outside
+}
+
+/// Computes the new signed shared credit balance and Company Recovery Fine upon Shed extraction.
+///
+/// Leaving a dead companion's fallen body outside the elevator cage incurs
+/// [`UNRECOVERED_COMPANION_FINE`] (`50 cr`) per unrecovered companion. Shared credits are signed
+/// (`i32`) and may drop into negative debt, locking Supply Terminal purchases until repaid.
+pub fn compute_extraction_balance(
+    current_credits: i32,
+    payout: u32,
+    unrecovered_bodies: u32,
+) -> (i32, i32) {
+    let fine = (unrecovered_bodies as i32).saturating_mul(UNRECOVERED_COMPANION_FINE);
+    let next_credits = current_credits
+        .saturating_add(payout as i32)
+        .saturating_sub(fine);
+    (next_credits, fine)
 }
 
 #[derive(SystemParam)]
@@ -404,7 +431,9 @@ fn handle_session_lifecycle_system(
                     let shed_snapshot: Vec<SavedWorldItem> = items_q
                         .iter()
                         .filter(|(_, item, tf)| {
-                            item.in_shed && is_pos_in_shed(tf.translation, &level_info.0)
+                            item.in_shed
+                                && !is_fallen_body(&item.kind)
+                                && is_pos_in_shed(tf.translation, &level_info.0)
                         })
                         .map(|(_, item, tf)| SavedWorldItem {
                             kind: world_kind_to_saved(&item.kind),
@@ -704,10 +733,13 @@ fn inventory_input_system(
         }
     }
 
-    // 3. Normal `[Q]`: release Heavy Relic / stop dragging / drop active belt item physically
+    // 3. Normal `[Q]`: release Heavy Relic / Fallen Body / stop carrying teammate / drop active belt item
     if keys.just_pressed(KeyCode::KeyQ) {
         match inv.carry_state {
             CarryHandState::HeavyRelic { item_id } => {
+                let dropping_body = items_q
+                    .iter()
+                    .any(|(item, _)| item.id == item_id && is_fallen_body(&item.kind));
                 release_carried_relic(
                     item_id,
                     local_id,
@@ -717,10 +749,15 @@ fn inventory_input_system(
                     coop,
                     &mut sound_writer,
                 );
-                toast.show("Dropped Heavy Relic!", 1.8);
+                if dropping_body {
+                    toast.show("Set down fallen companion", 1.8);
+                } else {
+                    toast.show("Dropped Heavy Relic!", 1.8);
+                }
             }
-            CarryHandState::DraggingPlayer { .. } => {
+            CarryHandState::DraggingPlayer { target_id } => {
                 inv.carry_state = CarryHandState::Free;
+                coop.send_player_carry_sync(local_id, target_id, Vec3::ZERO, false);
                 toast.show("Released teammate", 1.5);
             }
             CarryHandState::Free => {
@@ -961,8 +998,8 @@ fn station_and_item_interact_system(
         if item.active_timer_s.is_some() || item.carried_by.contains(&local_id) {
             continue;
         }
-        let half = if is_heavy_relic(&item.kind) {
-            Vec3::splat(0.42)
+        let half = if is_two_handed_world_item(&item.kind) {
+            Vec3::splat(0.45)
         } else {
             Vec3::splat(0.26)
         };
@@ -971,7 +1008,9 @@ fn station_and_item_interact_system(
         {
             let label = world_item_display_name(&item.kind);
             let carriers = item.carried_by.len();
-            let sublabel = if is_heavy_relic(&item.kind) {
+            let sublabel = if is_fallen_body(&item.kind) {
+                format!("Carry to elevator (avoids -{UNRECOVERED_COMPANION_FINE} cr fine)")
+            } else if is_heavy_relic(&item.kind) {
                 if carriers == 0 {
                     "Solo drag (loud) • 2P lift (quiet)".to_string()
                 } else {
@@ -1123,21 +1162,29 @@ fn station_and_item_interact_system(
     station_state.prompt = None;
     item_reg.nearest_item_prompt = None;
 
-    if let CarryHandState::HeavyRelic { .. } = inv.carry_state {
+    if let CarryHandState::HeavyRelic { item_id } = inv.carry_state {
+        let carrying_body = items_q
+            .iter()
+            .any(|(item, _)| item.id == item_id && is_fallen_body(&item.kind));
         crosshair_target.target = None;
         crosshair_target.key_badge = "E / Q".to_string();
-        crosshair_target.label = "Drop Heavy Relic".to_string();
-        crosshair_target.sublabel = if item_reg.active_carry_is_scraping {
-            "SCRAPING LOUDLY".to_string()
+        if carrying_body {
+            crosshair_target.label = "Set Down Fallen Companion".to_string();
+            crosshair_target.sublabel = "Bring inside elevator cage".to_string();
         } else {
-            "Duo-lift (quiet)".to_string()
-        };
+            crosshair_target.label = "Drop Heavy Relic".to_string();
+            crosshair_target.sublabel = if item_reg.active_carry_is_scraping {
+                "SCRAPING LOUDLY".to_string()
+            } else {
+                "Duo-lift (quiet)".to_string()
+            };
+        }
         crosshair_target.accent = TargetAccent::Interact;
     } else if let CarryHandState::DraggingPlayer { .. } = inv.carry_state {
         crosshair_target.target = None;
         crosshair_target.key_badge = "E / Q".to_string();
-        crosshair_target.label = "Release Teammate".to_string();
-        crosshair_target.sublabel.clear();
+        crosshair_target.label = "Release Companion".to_string();
+        crosshair_target.sublabel = "Carrying downed teammate".to_string();
         crosshair_target.accent = TargetAccent::Interact;
     } else if let Some(cand) = best {
         if let LookTargetKind::Station(st_kind) = cand.target {
@@ -1227,8 +1274,9 @@ fn station_and_item_interact_system(
             );
             return;
         }
-        CarryHandState::DraggingPlayer { .. } => {
+        CarryHandState::DraggingPlayer { target_id } => {
             inv.carry_state = CarryHandState::Free;
+            coop.send_player_carry_sync(local_id, target_id, Vec3::ZERO, false);
             return;
         }
         CarryHandState::Free => {}
@@ -1281,13 +1329,19 @@ fn station_and_item_interact_system(
             }
         },
         LookTargetKind::DownedPlayer { player_id, name } => {
+            let horiz_fwd = Vec3::new(cam_dir.x, 0.0, cam_dir.z).normalize_or_zero();
+            let anchor = player_pos - horiz_fwd * 0.85;
             inv.carry_state = CarryHandState::DraggingPlayer {
                 target_id: player_id,
             };
-            toast.show(format!("Dragging {name} — move behind cover/foam!"), 2.4);
+            coop.send_player_carry_sync(local_id, player_id, anchor, true);
+            toast.show(
+                format!("Carrying {name} — get to safety or the elevator!"),
+                2.6,
+            );
         }
         LookTargetKind::WorldItem { item_id, kind, .. } => {
-            if is_heavy_relic(&kind) {
+            if is_two_handed_world_item(&kind) {
                 for (mut item, tf) in &mut items_q {
                     if item.id == item_id {
                         if !item.carried_by.contains(&local_id) {
@@ -1296,12 +1350,17 @@ fn station_and_item_interact_system(
                         item.settled = false;
                         inv.carry_state = CarryHandState::HeavyRelic { item_id };
                         coop.send_world_item_update(to_net_state(&item, tf.translation));
-                        let msg = if item.carried_by.len() >= 2 {
-                            "Duo-Lifting Heavy Relic! (Quiet 75% speed)"
+                        let msg = if is_fallen_body(&kind) {
+                            format!(
+                                "Carrying {} — bring into the elevator to avoid -{UNRECOVERED_COMPANION_FINE} cr fine!",
+                                world_item_display_name(&kind)
+                            )
+                        } else if item.carried_by.len() >= 2 {
+                            "Duo-Lifting Heavy Relic! (Quiet 75% speed)".to_string()
                         } else {
-                            "Dragging Heavy Relic solo (LOUD stone scraping!)"
+                            "Dragging Heavy Relic solo (LOUD stone scraping!)".to_string()
                         };
-                        toast.show(msg, 2.5);
+                        toast.show(msg, 2.8);
                         break;
                     }
                 }
@@ -1374,8 +1433,9 @@ struct ElevatorWorldRes<'w> {
     coop: ResMut<'w, CoopState>,
     inv: ResMut<'w, PlayerInventory>,
     health: ResMut<'w, PlayerHealthState>,
-    remote_health: Res<'w, RemoteHealthMap>,
+    remote_health: ResMut<'w, RemoteHealthMap>,
     item_reg: ResMut<'w, WorldItemRegistry>,
+    timers: ResMut<'w, GameplayTimers>,
     toast: ResMut<'w, GameplayToast>,
     ambient: ResMut<'w, GlobalAmbientLight>,
 }
@@ -1416,8 +1476,9 @@ fn elevator_runtime_system(
     let coop = &mut res.coop;
     let inv = &mut res.inv;
     let health = &mut res.health;
-    let remote_health = &res.remote_health;
+    let remote_health = &mut res.remote_health;
     let item_reg = &mut res.item_reg;
+    let timers = &mut res.timers;
     let toast = &mut res.toast;
     let ambient = &mut res.ambient;
     let lever_events = &mut evs.lever_events;
@@ -1615,6 +1676,7 @@ fn elevator_runtime_system(
 
     // 6. Arrival in Cave: spawn Heavy Relics, Bonus Loot & Blind Acoustic Stalkers!
     if step_out.arrived_cave {
+        timers.spawned_bodies.clear();
         arrived_writer.write(ElevatorArrivedCaveEvent {
             depth_tier: elevator.depth_tier,
             cave_seed: elevator.cave_seed,
@@ -1672,14 +1734,31 @@ fn elevator_runtime_system(
         coop.send_elevator_sync(elevator);
     }
 
-    // 7. Return to Base Shed: cash in relics inside cage + carried bonus loot, heal, unlock tier, save!
+    // 7. Return to Base Shed: cash in relics inside cage + carried bonus loot, assess companion fines, heal, unlock tier, save!
     if step_out.returned_shed {
         let mut payout = inv.take_all_bonus_loot_value();
         let mut relics_extracted = 0u32;
+        let mut recovered_body_ids: HashSet<u16> = HashSet::new();
+        let mut dead_player_ids: HashSet<u16> = HashSet::new();
+
+        let local_id = coop.local_player_id();
+        if health.is_dead() {
+            dead_player_ids.insert(local_id);
+        }
+        for (&pid, phase) in &remote_health.0 {
+            if matches!(phase, LocalHealthPhase::Dead) {
+                dead_player_ids.insert(pid);
+            }
+        }
 
         for (ent, item, tf) in &items_q {
             if !item.in_shed {
-                if elevator.is_pos_inside_cage(tf.translation) {
+                if let WorldItemKind::FallenBody { player_id, .. } = item.kind {
+                    dead_player_ids.insert(player_id);
+                    if elevator.is_pos_inside_cage(tf.translation) {
+                        recovered_body_ids.insert(player_id);
+                    }
+                } else if elevator.is_pos_inside_cage(tf.translation) {
                     match item.kind {
                         WorldItemKind::HeavyRelic { value, .. } => {
                             payout = payout.saturating_add(value);
@@ -1699,9 +1778,24 @@ fn elevator_runtime_system(
             commands.entity(ent).despawn();
         }
 
+        let unrecovered_bodies = dead_player_ids
+            .iter()
+            .filter(|pid| !recovered_body_ids.contains(pid))
+            .count() as u32;
+        let (next_credits, fine) =
+            compute_extraction_balance(campaign.save.credits, payout, unrecovered_bodies);
+
+        if let CarryHandState::DraggingPlayer { target_id } = inv.carry_state {
+            coop.send_player_carry_sync(local_id, target_id, Vec3::ZERO, false);
+        }
         inv.carry_state = CarryHandState::Free;
         health.reset_for_shed();
-        campaign.save.credits = campaign.save.credits.saturating_add(payout);
+        for status in remote_health.0.values_mut() {
+            *status = LocalHealthPhase::Healthy;
+        }
+        timers.spawned_bodies.clear();
+
+        campaign.save.credits = next_credits;
         campaign.save.dives_completed = campaign.save.dives_completed.saturating_add(1);
         if relics_extracted > 0 && elevator.depth_tier >= campaign.save.unlocked_depth_tier {
             campaign.save.unlocked_depth_tier = (elevator.depth_tier + 1).min(3);
@@ -1711,7 +1805,11 @@ fn elevator_runtime_system(
         // Snapshot Shed items & player profile and auto-save!
         let shed_items_snapshot: Vec<SavedWorldItem> = items_q
             .iter()
-            .filter(|(_, item, tf)| item.in_shed && is_pos_in_shed(tf.translation, &level_info.0))
+            .filter(|(_, item, tf)| {
+                item.in_shed
+                    && !is_fallen_body(&item.kind)
+                    && is_pos_in_shed(tf.translation, &level_info.0)
+            })
             .map(|(_, item, tf)| SavedWorldItem {
                 kind: world_kind_to_saved(&item.kind),
                 pos_m: tf.translation.to_array(),
@@ -1732,12 +1830,30 @@ fn elevator_runtime_system(
         returned_writer.write(ElevatorReturnedShedEvent {
             depth_tier: elevator.depth_tier,
         });
-        toast.show(
-            format!(
-                "Extracted! +{payout} credits ({relics_extracted} relic(s)) — Campaign Auto-Saved!"
-            ),
-            5.0,
-        );
+        if fine > 0 {
+            toast.show(
+                format!(
+                    "Extracted! +{payout} cr  |  Company Fine: -{fine} cr ({unrecovered_bodies} body left behind) — Balance: {} cr",
+                    campaign.save.credits
+                ),
+                6.0,
+            );
+        } else if !recovered_body_ids.is_empty() {
+            toast.show(
+                format!(
+                    "Extracted! +{payout} cr ({relics_extracted} relic(s)) — All fallen companions recovered! Balance: {} cr",
+                    campaign.save.credits
+                ),
+                5.5,
+            );
+        } else {
+            toast.show(
+                format!(
+                    "Extracted! +{payout} credits ({relics_extracted} relic(s)) — Campaign Auto-Saved!"
+                ),
+                5.0,
+            );
+        }
     }
 
     // 8. Periodic host elevator sync while moving or winching
@@ -1839,9 +1955,10 @@ fn world_items_runtime_system(
             }
         }
 
-        // B. Carried Heavy Relic positioning + 1P loud stone scraping vs 2P quiet lift
-        if !item.carried_by.is_empty() && is_heavy_relic(&item.kind) {
+        // B. Carried Heavy Relic / Fallen Body positioning + 1P loud stone scraping vs quiet body/duo carry
+        if !item.carried_by.is_empty() && is_two_handed_world_item(&item.kind) {
             let carrier_count = item.carried_by.len();
+            let carrying_body = is_fallen_body(&item.kind);
             let mut sum_pos = Vec3::ZERO;
             let mut valid_carriers = 0usize;
             let mut local_moving = false;
@@ -1851,13 +1968,25 @@ fn world_items_runtime_system(
                     if let Some((pc, cam_tf)) = local_player {
                         let fwd = cam_tf.forward().as_vec3();
                         let horiz_fwd = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
-                        let hold_y = if carrier_count >= 2 { 0.85 } else { 0.35 };
-                        sum_pos += pc.feet_pos_m + horiz_fwd * 1.15 + Vec3::Y * hold_y;
+                        let (reach, hold_y) = if carrying_body {
+                            (0.85, 0.72)
+                        } else if carrier_count >= 2 {
+                            (1.15, 0.85)
+                        } else {
+                            (1.15, 0.35)
+                        };
+                        sum_pos += pc.feet_pos_m + horiz_fwd * reach + Vec3::Y * hold_y;
                         valid_carriers += 1;
                         local_moving = pc.velocity_m.xz().length() > 0.35;
                     }
                 } else if let Some(rp) = coop.remote_players.get(&cid) {
-                    let hold_y = if carrier_count >= 2 { 0.85 } else { 0.35 };
+                    let hold_y = if carrying_body {
+                        0.72
+                    } else if carrier_count >= 2 {
+                        0.85
+                    } else {
+                        0.35
+                    };
                     sum_pos += rp.current_feet_m + Vec3::Y * hold_y;
                     valid_carriers += 1;
                 }
@@ -1871,27 +2000,32 @@ fn world_items_runtime_system(
             }
 
             if item.carried_by.contains(&local_id) {
-                item_reg.active_carry_speed_mult = relic_carry_speed_mult(carrier_count);
-                let scraping = relic_is_scraping(carrier_count);
-                item_reg.active_carry_is_scraping = scraping;
+                if carrying_body {
+                    item_reg.active_carry_speed_mult = BODY_CARRY_SPEED_MULT;
+                    item_reg.active_carry_is_scraping = false;
+                } else {
+                    item_reg.active_carry_speed_mult = relic_carry_speed_mult(carrier_count);
+                    let scraping = relic_is_scraping(carrier_count);
+                    item_reg.active_carry_is_scraping = scraping;
 
-                if scraping && local_moving {
-                    item_reg.scrape_timer_s += dt;
-                    if item_reg.scrape_timer_s >= RELIC_SCRAPE_INTERVAL_S {
-                        item_reg.scrape_timer_s = 0.0;
-                        sound_writer.write(PlaySpatialSoundEvent {
-                            pos_m: tf.translation,
-                            clip: SynthClip::RelicScrape,
-                            volume: 0.78,
-                            pitch: 0.94,
-                            ai_event: Some(AcousticEvent {
+                    if scraping && local_moving {
+                        item_reg.scrape_timer_s += dt;
+                        if item_reg.scrape_timer_s >= RELIC_SCRAPE_INTERVAL_S {
+                            item_reg.scrape_timer_s = 0.0;
+                            sound_writer.write(PlaySpatialSoundEvent {
                                 pos_m: tf.translation,
-                                // Clearly audible, yet strictly quieter than a Noise Decoy lure
-                                energy: Bands3::new(2.1, 1.9, 1.4),
-                                sharpness: 0.45,
-                                kind: AcousticEventKind::RelicScrape,
-                            }),
-                        });
+                                clip: SynthClip::RelicScrape,
+                                volume: 0.78,
+                                pitch: 0.94,
+                                ai_event: Some(AcousticEvent {
+                                    pos_m: tf.translation,
+                                    // Clearly audible, yet strictly quieter than a Noise Decoy lure
+                                    energy: Bands3::new(2.1, 1.9, 1.4),
+                                    sharpness: 0.45,
+                                    kind: AcousticEventKind::RelicScrape,
+                                }),
+                            });
+                        }
                     }
                 }
             }
@@ -1918,7 +2052,7 @@ fn world_items_runtime_system(
             continue;
         }
 
-        let r = if is_heavy_relic(&item.kind) {
+        let r = if is_two_handed_world_item(&item.kind) {
             Vec3::splat(0.32)
         } else {
             Vec3::splat(0.14)
@@ -1943,7 +2077,7 @@ fn world_items_runtime_system(
         item.in_shed = is_pos_in_shed(pos, &level_info.0);
 
         if bounced && impact_speed > 2.0 {
-            let is_heavy = is_heavy_relic(&item.kind);
+            let is_heavy = is_two_handed_world_item(&item.kind);
             let clip = if is_heavy {
                 SynthClip::HeavyImpact
             } else {
@@ -2323,24 +2457,28 @@ fn blind_stalker_ai_system(
 struct HealthWipeRes<'w> {
     screen: Res<'w, AppScreen>,
     level_info: Res<'w, LevelInfoResource>,
-    coop: Res<'w, CoopState>,
+    coop: ResMut<'w, CoopState>,
     health: ResMut<'w, PlayerHealthState>,
     remote_health: ResMut<'w, RemoteHealthMap>,
     inv: ResMut<'w, PlayerInventory>,
+    item_reg: ResMut<'w, WorldItemRegistry>,
     elevator: ResMut<'w, ElevatorState>,
     campaign: ResMut<'w, CampaignState>,
     timers: ResMut<'w, GameplayTimers>,
     toast: ResMut<'w, GameplayToast>,
 }
 
-/// Processes monster strikes on the local player, bleedout countdown, health sync, and Team Wipe!
+/// Processes monster strikes on the local player, live P2P downed carrying & break-free,
+/// fallen body spawning on death, bleedout countdown, health sync, and Team Wipe!
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn health_and_wipe_system(
     time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
     mut res: HealthWipeRes,
     mut hit_events: MessageReader<MonsterHitLocalPlayerEvent>,
     mut wipe_writer: MessageWriter<TeamWipeEvent>,
+    mut spawn_item_writer: MessageWriter<SpawnWorldItemEvent>,
     mut sound_writer: MessageWriter<PlaySpatialSoundEvent>,
     mut player_q: Query<&mut PlayerController>,
     items_q: Query<(Entity, &WorldItemEntity, &Transform)>,
@@ -2348,10 +2486,11 @@ fn health_and_wipe_system(
 ) {
     let screen = &res.screen;
     let level_info = &res.level_info;
-    let coop = &res.coop;
+    let coop = &mut res.coop;
     let health = &mut res.health;
     let remote_health = &mut res.remote_health;
     let inv = &mut res.inv;
+    let item_reg = &mut res.item_reg;
     let elevator = &mut res.elevator;
     let campaign = &mut res.campaign;
     let timers = &mut res.timers;
@@ -2361,9 +2500,13 @@ fn health_and_wipe_system(
         return;
     }
     let dt = time.delta_secs().min(0.05);
+    let local_id = coop.local_player_id();
 
     for ev in hit_events.read() {
         if health.apply_monster_hit() {
+            if let CarryHandState::DraggingPlayer { target_id } = inv.carry_state {
+                coop.send_player_carry_sync(local_id, target_id, Vec3::ZERO, false);
+            }
             inv.carry_state = CarryHandState::Free;
             inv.close_battery_selector();
             toast.show(
@@ -2378,6 +2521,51 @@ fn health_and_wipe_system(
                 ai_event: None,
             });
         }
+    }
+
+    // Live P2P downed companion carrying (carrier side: follow anchor + 20 Hz PlayerCarrySync)
+    if let CarryHandState::DraggingPlayer { target_id } = inv.carry_state {
+        let still_downed = coop.remote_players.contains_key(&target_id)
+            && matches!(
+                remote_health.0.get(&target_id),
+                Some(LocalHealthPhase::Downed { .. })
+            );
+        if !still_downed || !health.is_healthy() {
+            inv.carry_state = CarryHandState::Free;
+            coop.send_player_carry_sync(local_id, target_id, Vec3::ZERO, false);
+        } else if let Ok(pc) = player_q.single() {
+            let fwd = Vec3::new(-pc.yaw.sin(), 0.0, -pc.yaw.cos()).normalize_or_zero();
+            let anchor = pc.feet_pos_m - fwd * 0.85;
+            if let Some(rp) = coop.remote_players.get_mut(&target_id) {
+                rp.target_feet_m = anchor;
+            }
+            timers.carry_net_timer_s += dt;
+            if timers.carry_net_timer_s >= 0.05 {
+                timers.carry_net_timer_s = 0.0;
+                coop.send_player_carry_sync(local_id, target_id, anchor, true);
+            }
+        }
+    }
+
+    // Carried downed player anti-grief break-free (`[Space]` or `[Q]`)
+    if let LocalHealthPhase::Downed {
+        dragged_by: Some(carrier_id),
+        ..
+    } = health.phase
+        && (keys.just_pressed(KeyCode::Space) || keys.just_pressed(KeyCode::KeyQ))
+    {
+        if let LocalHealthPhase::Downed {
+            ref mut dragged_by, ..
+        } = health.phase
+        {
+            *dragged_by = None;
+        }
+        let pos = player_q
+            .single()
+            .map(|pc| pc.feet_pos_m)
+            .unwrap_or(Vec3::ZERO);
+        coop.send_player_carry_sync(carrier_id, local_id, pos, false);
+        toast.show("Broke free from teammate's carry!", 2.0);
     }
 
     let bled_out = health.tick(dt);
@@ -2402,12 +2590,81 @@ fn health_and_wipe_system(
         coop.send_player_health(net_status);
     }
 
+    let is_team_wiped = check_team_wiped(&health.phase, &remote_health.0);
+
+    // Host-authoritative physical FallenBody spawning when a player dies mid-dive
+    if !is_team_wiped && coop.is_host_or_solo() && elevator.phase != ElevatorPhase::ShedIdle {
+        if health.is_dead() && !timers.spawned_bodies.contains(&local_id) {
+            let death_pos = player_q
+                .single()
+                .map(|pc| pc.feet_pos_m + Vec3::Y * 0.25)
+                .unwrap_or(elevator.cage_center_pos_m());
+            let body_id = item_reg.alloc_id();
+            let net_state = WorldItemNetState {
+                id: body_id,
+                kind: WorldItemKind::FallenBody {
+                    player_id: local_id,
+                    player_name: coop.local_name.clone(),
+                },
+                pos_m: death_pos,
+                vel_m: Vec3::ZERO,
+                in_shed: false,
+                carried_by: Vec::new(),
+                active_timer_s: None,
+            };
+            coop.send_world_item_spawn(net_state.clone());
+            spawn_item_writer.write(SpawnWorldItemEvent(net_state));
+            timers.spawned_bodies.insert(local_id);
+        }
+
+        let newly_dead_remotes: Vec<(u16, Vec3, String)> = remote_health
+            .0
+            .iter()
+            .filter_map(|(&pid, phase)| {
+                if matches!(phase, LocalHealthPhase::Dead) && !timers.spawned_bodies.contains(&pid)
+                {
+                    coop.remote_players
+                        .get(&pid)
+                        .map(|rp| (pid, rp.current_feet_m + Vec3::Y * 0.25, rp.info.name.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (pid, death_pos, name) in newly_dead_remotes {
+            let body_id = item_reg.alloc_id();
+            let net_state = WorldItemNetState {
+                id: body_id,
+                kind: WorldItemKind::FallenBody {
+                    player_id: pid,
+                    player_name: name.clone(),
+                },
+                pos_m: death_pos,
+                vel_m: Vec3::ZERO,
+                in_shed: false,
+                carried_by: Vec::new(),
+                active_timer_s: None,
+            };
+            coop.send_world_item_spawn(net_state.clone());
+            spawn_item_writer.write(SpawnWorldItemEvent(net_state));
+            timers.spawned_bodies.insert(pid);
+            toast.show(
+                format!(
+                    "{name} died! Carry their body to the elevator to avoid a -{UNRECOVERED_COMPANION_FINE} cr fine!"
+                ),
+                4.8,
+            );
+        }
+    }
+
     // Check Team Wipe (solo dead, or every party member dead)
-    if check_team_wiped(&health.phase, &remote_health.0) {
+    if is_team_wiped {
         wipe_writer.write(TeamWipeEvent);
         inv.apply_team_wipe_penalty();
         health.reset_for_shed();
         timers.last_synced_health = LocalHealthPhase::Healthy;
+        timers.spawned_bodies.clear();
         for status in remote_health.0.values_mut() {
             *status = LocalHealthPhase::Healthy;
         }
@@ -2451,7 +2708,9 @@ fn persist_campaign_snapshot(
 ) {
     campaign.save.shed_items = items_q
         .iter()
-        .filter(|(item, tf)| item.in_shed && is_pos_in_shed(tf.translation, info))
+        .filter(|(item, tf)| {
+            item.in_shed && !is_fallen_body(&item.kind) && is_pos_in_shed(tf.translation, info)
+        })
         .map(|(item, tf)| SavedWorldItem {
             kind: world_kind_to_saved(&item.kind),
             pos_m: tf.translation.to_array(),
@@ -2572,5 +2831,29 @@ mod tests {
             count_living_players_outside_cage(&elev, inside, true, &coop, &remote_health),
             0
         );
+    }
+
+    #[test]
+    fn extraction_balance_deducts_unrecovered_companion_fines_into_debt() {
+        // Recovering all companions incurs zero fine
+        assert_eq!(compute_extraction_balance(100, 120, 0), (220, 0));
+
+        // Leaving 1 body behind deducts 50 cr from payout
+        assert_eq!(
+            compute_extraction_balance(100, 80, 1),
+            (180 - UNRECOVERED_COMPANION_FINE, UNRECOVERED_COMPANION_FINE)
+        );
+
+        // Leaving 2 bodies behind with low credits pushes shared balance negative (Company Debt)
+        let (balance, fine) = compute_extraction_balance(20, 0, 2);
+        assert_eq!(fine, UNRECOVERED_COMPANION_FINE * 2);
+        assert_eq!(balance, 20 - UNRECOVERED_COMPANION_FINE * 2);
+        assert!(balance < 0);
+
+        // Subsequent successful relic extraction pays off negative debt
+        let (recovered_balance, fine2) = compute_extraction_balance(balance, 150, 0);
+        assert_eq!(fine2, 0);
+        assert_eq!(recovered_balance, balance + 150);
+        assert!(recovered_balance > 0);
     }
 }

@@ -220,11 +220,28 @@ impl CoopState {
         }
     }
 
-    pub fn send_credits_sync(&self, credits: u32, unlocked_depth_tier: u8) {
+    pub fn send_credits_sync(&self, credits: i32, unlocked_depth_tier: u8) {
         if let Some(ref s) = self.session {
             s.send_reliable(ReliableMessage::CreditsSync {
                 credits,
                 unlocked_depth_tier,
+            });
+        }
+    }
+
+    pub fn send_player_carry_sync(
+        &self,
+        carrier_id: PlayerId,
+        target_id: PlayerId,
+        target_feet_m: Vec3,
+        active: bool,
+    ) {
+        if let Some(ref s) = self.session {
+            s.send_reliable(ReliableMessage::PlayerCarrySync {
+                carrier_id,
+                target_id,
+                target_feet_m,
+                active,
             });
         }
     }
@@ -972,6 +989,56 @@ fn poll_network_events_system(
                     toast.show("You were revived by a teammate's Aid Kit!", 3.5);
                 } else {
                     remote_health.0.insert(target_id, LocalHealthPhase::Healthy);
+                }
+            }
+            NetEvent::PlayerCarrySync {
+                carrier_id,
+                target_id,
+                target_feet_m,
+                active,
+            } => {
+                let local_id = coop.local_player_id();
+                if target_id == local_id {
+                    if let LocalHealthPhase::Downed {
+                        ref mut dragged_by, ..
+                    } = health.phase
+                    {
+                        if active {
+                            if dragged_by.is_none() {
+                                toast.show(
+                                    "Being carried by teammate! Whisper to guide or press [Space]/[Q] to drop",
+                                    3.2,
+                                );
+                            }
+                            *dragged_by = Some(carrier_id);
+                            if let Ok(mut pc) = player_q.single_mut() {
+                                pc.feet_pos_m = target_feet_m;
+                                pc.velocity_m = Vec3::ZERO;
+                            }
+                        } else {
+                            *dragged_by = None;
+                        }
+                    }
+                } else {
+                    if carrier_id == local_id
+                        && !active
+                        && matches!(
+                            inv.carry_state,
+                            crate::inventory::CarryHandState::DraggingPlayer { target_id: tid }
+                            if tid == target_id
+                        )
+                    {
+                        inv.carry_state = crate::inventory::CarryHandState::Free;
+                        toast.show("Teammate dropped out of your carry", 2.0);
+                    }
+                    if let Some(LocalHealthPhase::Downed { dragged_by, .. }) =
+                        remote_health.0.get_mut(&target_id)
+                    {
+                        *dragged_by = if active { Some(carrier_id) } else { None };
+                    }
+                    if active && let Some(rp) = coop.remote_players.get_mut(&target_id) {
+                        rp.target_feet_m = target_feet_m;
+                    }
                 }
             }
             NetEvent::CreditsSync {

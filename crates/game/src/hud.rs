@@ -30,6 +30,7 @@ use crate::{
         paste_from_clipboard,
     },
     player::PlayerFlashlight,
+    relic::{WorldItemEntity, world_item_display_name},
     save::{CampaignState, SaveSlotBrowser},
     settings::{AppScreen, FOV_MAX_DEG, FOV_MIN_DEG, SettingsMenuOpen, UserSettings},
     shed::{CrosshairTargetState, ShopOverlayOpen, TargetAccent},
@@ -2898,7 +2899,7 @@ fn update_menu_and_shop_system(
         Query<&mut Text, With<MainMenuSaveNameText>>,
         Query<&mut Text, With<MainMenuSaveMetaText>>,
         Query<&mut Text, With<CoopPanelStatusText>>,
-        Query<&mut Text, With<ShopCreditsText>>,
+        Query<(&mut Text, &mut TextColor), With<ShopCreditsText>>,
         Query<&mut Text, With<ShopSaveTagText>>,
     )>,
     mut borders: ParamSet<(
@@ -2982,13 +2983,31 @@ fn update_menu_and_shop_system(
         );
     }
 
-    if let Ok(mut t) = texts.p5().single_mut() {
-        t.0 = format!("{} cr", campaign.save.credits);
+    if let Ok((mut t, mut col)) = texts.p5().single_mut() {
+        let cr = campaign.save.credits;
+        t.0 = if cr < 0 {
+            format!("{cr} cr (DEBT)")
+        } else {
+            format!("{cr} cr")
+        };
+        *col = TextColor(if cr <= 0 {
+            COL_ACCENT_RED
+        } else {
+            COL_ACCENT_AMBER
+        });
     }
     if let Ok(mut t) = texts.p6().single_mut() {
+        let debt_note = if campaign.save.credits <= 0 {
+            "  •  DEBT: SHOP LOCKED"
+        } else {
+            ""
+        };
         t.0 = format!(
-            "Save: {}  •  Dives: {}  •  Unlocked: Tier {}",
-            campaign.slot_name, campaign.save.dives_completed, campaign.save.unlocked_depth_tier
+            "Save: {}  •  Dives: {}  •  Unlocked: Tier {}{}",
+            campaign.slot_name,
+            campaign.save.dives_completed,
+            campaign.save.unlocked_depth_tier,
+            debt_note
         );
     }
 
@@ -3043,7 +3062,7 @@ fn update_ingame_bars_system(
     fl_q: Query<&PlayerFlashlight>,
     mut texts: ParamSet<(
         Query<&mut Text, With<HudTierBadgeText>>,
-        Query<&mut Text, With<HudCreditsText>>,
+        Query<(&mut Text, &mut TextColor), With<HudCreditsText>>,
         Query<&mut Text, With<HudPhaseText>>,
         Query<&mut Text, With<HudHealthBadgeText>>,
         Query<&mut Text, With<ToastText>>,
@@ -3068,8 +3087,14 @@ fn update_ingame_bars_system(
     if let Ok(mut t) = texts.p0().single_mut() {
         t.0 = format!("T{}", campaign.save.selected_depth_tier);
     }
-    if let Ok(mut t) = texts.p1().single_mut() {
-        t.0 = format!("{} cr", campaign.save.credits);
+    if let Ok((mut t, mut col)) = texts.p1().single_mut() {
+        let cr = campaign.save.credits;
+        t.0 = format!("{cr} cr");
+        *col = TextColor(if cr < 0 {
+            COL_ACCENT_RED
+        } else {
+            COL_ACCENT_AMBER
+        });
     }
 
     let (phase_label, phase_frac, phase_col) = match elevator.phase {
@@ -3105,10 +3130,17 @@ fn update_ingame_bars_system(
     // Health bar fill + tag
     let (hp_frac, hp_col, hp_tag) = match health.phase {
         LocalHealthPhase::Healthy => (1.0f32, COL_ACCENT_GREEN, "OK".to_string()),
-        LocalHealthPhase::Downed { bleedout_s, .. } => (
+        LocalHealthPhase::Downed {
+            bleedout_s,
+            dragged_by,
+        } => (
             (bleedout_s / BLEEDOUT_DURATION_S).clamp(0.0, 1.0),
             COL_ACCENT_RED,
-            format!("{:.0}s", bleedout_s.ceil()),
+            if dragged_by.is_some() {
+                format!("CARRIED {:.0}s", bleedout_s.ceil())
+            } else {
+                format!("{:.0}s", bleedout_s.ceil())
+            },
         ),
         LocalHealthPhase::Dead => (0.0f32, Color::srgb(0.4, 0.42, 0.46), "DOWN".to_string()),
     };
@@ -3287,6 +3319,7 @@ fn belt_item_graphics(item: Option<&BeltItem>) -> (Color, Color, String) {
 #[allow(clippy::type_complexity)]
 fn update_hotbar_and_pouch_system(
     inv: Res<PlayerInventory>,
+    items_q: Query<&WorldItemEntity>,
     mut visuals: ParamSet<(
         Query<(&HotbarSlotCard, &mut BorderColor, &mut BackgroundColor)>,
         Query<(&HotbarIconPrimary, &mut BackgroundColor)>,
@@ -3350,8 +3383,12 @@ fn update_hotbar_and_pouch_system(
     }
     if let Ok(mut name_t) = texts.p1().single_mut() {
         name_t.0 = match inv.carry_state {
-            CarryHandState::HeavyRelic { .. } => "Heavy Relic".to_string(),
-            CarryHandState::DraggingPlayer { .. } => "Dragging Teammate".to_string(),
+            CarryHandState::HeavyRelic { item_id } => items_q
+                .iter()
+                .find(|item| item.id == item_id)
+                .map(|item| world_item_display_name(&item.kind))
+                .unwrap_or_else(|| "Heavy Relic".to_string()),
+            CarryHandState::DraggingPlayer { .. } => "Carrying Companion".to_string(),
             CarryHandState::Free => match inv.active_item() {
                 None => String::new(),
                 Some(BeltItem::Flashlight) => {

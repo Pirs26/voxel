@@ -876,7 +876,7 @@ pub fn shop_item_info(item: ShopCatalogItem) -> &'static ShopItemInfo {
 /// Returns a user-facing status message on success or failure without partial state changes.
 pub fn purchase_shop_item(
     inv: &mut PlayerInventory,
-    credits: &mut u32,
+    credits: &mut i32,
     item: ShopCatalogItem,
 ) -> Result<&'static str, &'static str> {
     let info = shop_item_info(item);
@@ -900,7 +900,11 @@ pub fn purchase_shop_item(
         _ => {}
     }
 
-    if *credits < info.cost {
+    if *credits <= 0 {
+        return Err("Company debt! Extract relics before buying gear.");
+    }
+
+    if *credits < info.cost as i32 {
         return Err("Not enough credits.");
     }
 
@@ -952,7 +956,7 @@ pub fn purchase_shop_item(
         }
     };
 
-    *credits -= info.cost;
+    *credits -= info.cost as i32;
     Ok(ok_msg)
 }
 
@@ -1169,6 +1173,27 @@ mod tests {
         assert_eq!(credits, 5);
         assert!(purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::FlarePack).is_err());
         assert_eq!(credits, 5);
+    }
+
+    #[test]
+    fn negative_credits_reject_shop_purchases_without_mutation() {
+        let mut inv = PlayerInventory::starter();
+        let before = inv.clone();
+        let mut credits: i32 = -50;
+
+        assert_eq!(
+            purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::FlarePack),
+            Err("Company debt! Extract relics before buying gear.")
+        );
+        assert_eq!(credits, -50);
+        assert_eq!(inv, before);
+
+        assert_eq!(
+            purchase_shop_item(&mut inv, &mut credits, ShopCatalogItem::Headlamp),
+            Err("Company debt! Extract relics before buying gear.")
+        );
+        assert_eq!(credits, -50);
+        assert_eq!(inv, before);
     }
 
     #[test]
