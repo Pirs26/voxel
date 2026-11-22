@@ -24,10 +24,30 @@ pub enum SynthClip {
     FlareIgnite,
     /// Atmospheric cavern water drip.
     WaterDrip,
+    /// Low metallic elevator cable groan/creak during shaft travel.
+    ElevatorCreak,
+    /// Loud rhythmic mechanical winch grinding during extraction climax.
+    ElevatorWinch,
+    /// Heavy steel elevator gate slam.
+    DoorSlam,
+    /// Heavy stone-on-stone grating scrape (1-player relic drag).
+    RelicScrape,
+    /// Resonant heavy impact thud (dropped relic / heavy gear).
+    HeavyImpact,
+    /// Crisp mechanical click/clatter (battery swap or drop).
+    BatteryClick,
+    /// Low guttural clicking growl from the blind acoustic stalker.
+    MonsterGrowl,
+    /// Sharp echolocation shriek when the stalker locks onto a loud sound.
+    MonsterScreech,
+    /// Soft medical zipper + pressurized spray hiss during Aid Kit revive.
+    AidKitUse,
+    /// Loud metallic rattle/chirp emitted by a throwable Noise Decoy.
+    DecoyBuzz,
 }
 
 impl SynthClip {
-    pub const ALL: [SynthClip; 10] = [
+    pub const ALL: [SynthClip; 20] = [
         SynthClip::FootstepStone,
         SynthClip::FootstepDirt,
         SynthClip::FootstepWood,
@@ -38,6 +58,16 @@ impl SynthClip {
         SynthClip::BeaconPing,
         SynthClip::FlareIgnite,
         SynthClip::WaterDrip,
+        SynthClip::ElevatorCreak,
+        SynthClip::ElevatorWinch,
+        SynthClip::DoorSlam,
+        SynthClip::RelicScrape,
+        SynthClip::HeavyImpact,
+        SynthClip::BatteryClick,
+        SynthClip::MonsterGrowl,
+        SynthClip::MonsterScreech,
+        SynthClip::AidKitUse,
+        SynthClip::DecoyBuzz,
     ];
 
     pub const fn index(self) -> usize {
@@ -178,6 +208,156 @@ pub fn generate_clip(clip: SynthClip, sample_rate: f32) -> Vec<f32> {
                     let freq = 750.0 + t * 5200.0;
                     let env = (t * 180.0).min(1.0) * (-t * 32.0).exp();
                     (TAU * freq * t).sin() * env * 0.60
+                })
+                .collect()
+        }
+        SynthClip::ElevatorCreak => {
+            let len = (sample_rate * 0.95) as usize;
+            let mut lp = 0.0f32;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate;
+                    let env = (t * 5.0).min(1.0) * (-t * 2.1).exp();
+                    let wobble = (TAU * 5.5 * t).sin() * 14.0;
+                    let groan = (TAU * (82.0 + wobble) * t).sin() * 0.45
+                        + (TAU * (168.0 + wobble * 1.6) * t).sin() * 0.30
+                        + (TAU * (310.0 + wobble * 2.2) * t).sin() * 0.15;
+                    let n = next_noise();
+                    lp += (n - lp) * 0.08;
+                    (groan + lp * 0.35) * env * 0.68
+                })
+                .collect()
+        }
+        SynthClip::ElevatorWinch => {
+            let len = (sample_rate * 0.65) as usize;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate;
+                    let env = (t * 20.0).min(1.0) * (-t * 2.8).exp();
+                    // Ratcheting metallic gear pulses + heavy motor hum
+                    let ratchet = ((TAU * 14.0 * t).sin().max(0.0)).powf(3.0);
+                    let gear = (TAU * 540.0 * t).sin() * ratchet * 0.55
+                        + (TAU * 1120.0 * t).sin() * ratchet * 0.30;
+                    let motor = (TAU * 62.0 * t).sin() * 0.40 + (TAU * 124.0 * t).sin() * 0.22;
+                    let grit = next_noise() * (0.20 + 0.35 * ratchet);
+                    (gear + motor + grit) * env * 0.78
+                })
+                .collect()
+        }
+        SynthClip::DoorSlam => {
+            let len = (sample_rate * 0.48) as usize;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate;
+                    let thud = (TAU * (92.0 - t * 90.0).max(38.0) * t).sin() * (-t * 14.0).exp() * 0.70;
+                    let clang = (TAU * 420.0 * t).sin() * (-t * 18.0).exp() * 0.35
+                        + (TAU * 890.0 * t).sin() * (-t * 24.0).exp() * 0.25;
+                    let smash = next_noise() * (-t * 32.0).exp() * 0.55;
+                    (thud + clang + smash) * 0.80
+                })
+                .collect()
+        }
+        SynthClip::RelicScrape => {
+            let len = (sample_rate * 0.32) as usize;
+            let mut lp = 0.0f32;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate;
+                    let env = (t * 18.0).min(1.0) * (-t * 6.5).exp();
+                    let n = next_noise();
+                    lp += (n - lp) * 0.18;
+                    let grit = (n - lp) * 0.48 + lp * 0.55;
+                    let rumble = (TAU * 76.0 * t).sin() * 0.35 + (TAU * 148.0 * t).sin() * 0.22;
+                    (grit + rumble) * env * 0.72
+                })
+                .collect()
+        }
+        SynthClip::HeavyImpact => {
+            let len = (sample_rate * 0.42) as usize;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate;
+                    let sub = (TAU * (78.0 - t * 110.0).max(32.0) * t).sin() * (-t * 11.0).exp() * 0.80;
+                    let stone = next_noise() * (-t * 28.0).exp() * 0.55;
+                    let ring = (TAU * 235.0 * t).sin() * (-t * 19.0).exp() * 0.30;
+                    (sub + stone + ring) * 0.82
+                })
+                .collect()
+        }
+        SynthClip::BatteryClick => {
+            let len = (sample_rate * 0.11) as usize;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate;
+                    let snap1 = (TAU * 1850.0 * t).sin() * (-t * 95.0).exp() * 0.55;
+                    let snap2 = if t > 0.032 {
+                        let t2 = t - 0.032;
+                        (TAU * 2400.0 * t2).sin() * (-t2 * 110.0).exp() * 0.45
+                    } else {
+                        0.0
+                    };
+                    let tick = next_noise() * (-t * 140.0).exp() * 0.35;
+                    (snap1 + snap2 + tick) * 0.72
+                })
+                .collect()
+        }
+        SynthClip::MonsterGrowl => {
+            let len = (sample_rate * 0.68) as usize;
+            let mut lp = 0.0f32;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate;
+                    let env = (t * 8.0).min(1.0) * (-t * 3.0).exp();
+                    // Guttural low rasp + eerie insectoid clicks
+                    let click_pulse = ((TAU * 18.0 * t).sin().max(0.0)).powf(8.0);
+                    let growl = (TAU * (58.0 + (TAU * 6.0 * t).sin() * 8.0) * t).sin() * 0.55
+                        + (TAU * 116.0 * t).sin() * 0.30;
+                    let n = next_noise();
+                    lp += (n - lp) * 0.14;
+                    let click = (n - lp) * click_pulse * 0.65;
+                    (growl + lp * 0.35 + click) * env * 0.80
+                })
+                .collect()
+        }
+        SynthClip::MonsterScreech => {
+            let len = (sample_rate * 0.58) as usize;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate;
+                    let env = (t * 32.0).min(1.0) * (-t * 4.2).exp();
+                    let sweep = 1450.0 - t * 920.0 + (TAU * 38.0 * t).sin() * 140.0;
+                    let shriek = (TAU * sweep * t).sin() * 0.52
+                        + (TAU * sweep * 1.49 * t).sin() * 0.30;
+                    let hiss = next_noise() * (-t * 9.0).exp() * 0.42;
+                    (shriek + hiss) * env * 0.78
+                })
+                .collect()
+        }
+        SynthClip::AidKitUse => {
+            let len = (sample_rate * 0.35) as usize;
+            let mut lp = 0.0f32;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate;
+                    let env = (t * 16.0).min(1.0) * (-t * 7.5).exp();
+                    let n = next_noise();
+                    lp += (n - lp) * 0.32;
+                    let spray = (n - lp) * 0.45;
+                    let beep = (TAU * 980.0 * t).sin() * (-t * 22.0).exp() * 0.18;
+                    (spray + beep) * env * 0.50
+                })
+                .collect()
+        }
+        SynthClip::DecoyBuzz => {
+            let len = (sample_rate * 0.28) as usize;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate;
+                    let env = (t * 60.0).min(1.0) * (-t * 8.5).exp();
+                    let mod_sig = (TAU * 28.0 * t).sin().signum();
+                    let tone = (TAU * 1620.0 * t).sin() * 0.45 + (TAU * 2430.0 * t).sin() * 0.35;
+                    let clack = next_noise() * 0.35 * (0.5 + 0.5 * mod_sig);
+                    (tone * (0.6 + 0.4 * mod_sig) + clack) * env * 0.75
                 })
                 .collect()
         }
