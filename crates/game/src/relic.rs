@@ -209,15 +209,40 @@ pub fn relic_is_scraping(carrier_count: usize) -> bool {
 }
 
 /// Returns `true` if `pos_m` lies inside the persistent Base Shed interior bounds
-/// (with a `0.5 m` vertical tolerance on Y so floor/countertop items always register).
+/// (with small tolerances so items resting against walls, floors, or countertops always register).
 pub fn is_pos_in_shed(pos_m: Vec3, info: &GeneratedLevelInfo) -> bool {
+    const XZ_TOLERANCE_M: f32 = 0.25;
     const Y_TOLERANCE_M: f32 = 0.5;
-    pos_m.x >= info.shed_bounds_min_m.x
-        && pos_m.x <= info.shed_bounds_max_m.x
+    pos_m.x >= info.shed_bounds_min_m.x - XZ_TOLERANCE_M
+        && pos_m.x <= info.shed_bounds_max_m.x + XZ_TOLERANCE_M
         && pos_m.y >= info.shed_bounds_min_m.y - Y_TOLERANCE_M
         && pos_m.y <= info.shed_bounds_max_m.y + Y_TOLERANCE_M
-        && pos_m.z >= info.shed_bounds_min_m.z
-        && pos_m.z <= info.shed_bounds_max_m.z
+        && pos_m.z >= info.shed_bounds_min_m.z - XZ_TOLERANCE_M
+        && pos_m.z <= info.shed_bounds_max_m.z + XZ_TOLERANCE_M
+}
+
+/// Captures a persistent snapshot of all physical items currently inside the Base Shed
+/// (including dropped items on floors, workbenches, elevator deck, and parkour platforms),
+/// skipping fallen teammate bodies, armed/active Noise Decoys, and any IDs in `excluded_ids`.
+pub fn collect_shed_items_snapshot<'a>(
+    items: impl IntoIterator<Item = (&'a WorldItemEntity, &'a Transform)>,
+    info: &GeneratedLevelInfo,
+    excluded_ids: &std::collections::HashSet<u32>,
+) -> Vec<SavedWorldItem> {
+    items
+        .into_iter()
+        .filter(|(item, tf)| {
+            !excluded_ids.contains(&item.id)
+                && !is_fallen_body(&item.kind)
+                && item.active_timer_s.is_none()
+                && is_pos_in_shed(tf.translation, info)
+        })
+        .map(|(item, tf)| SavedWorldItem {
+            kind: world_kind_to_saved(&item.kind),
+            pos_m: tf.translation.to_array(),
+            rot_y: tf.rotation.to_euler(EulerRot::YXZ).0,
+        })
+        .collect()
 }
 
 /// Attempts to pick up a physical world item into `inv`'s belt or battery pouch.
@@ -904,6 +929,67 @@ mod tests {
         for item in &starters {
             assert!(is_pos_in_shed(Vec3::from_array(item.pos_m), &info));
         }
+    }
+
+    #[test]
+    fn collect_shed_items_snapshot_keeps_dropped_items_and_skips_active_decoys_and_cave_items() {
+        let cfg = VoxelConfig::half_player_scale(UVec3::splat(3));
+        let (_w, info) = generate_world_with_tier(77, 1, cfg);
+
+        let dropped_pos = info.spawn_pos_m + Vec3::new(0.8, 0.14, -0.5);
+        let dropped_item = WorldItemEntity {
+            id: 10,
+            kind: WorldItemKind::FlarePack { count: 2 },
+            vel_m: Vec3::ZERO,
+            // Even if `in_shed` wasn't flagged yet (e.g. carried back from cave), spatial bounds save it!
+            in_shed: false,
+            carried_by: Vec::new(),
+            active_timer_s: None,
+            decoy_pulse_timer_s: 0.0,
+            settled: true,
+        };
+        let dropped_tf =
+            Transform::from_translation(dropped_pos).with_rotation(Quat::from_rotation_y(0.75));
+
+        let active_decoy = WorldItemEntity {
+            id: 11,
+            kind: WorldItemKind::NoiseDecoy { count: 1 },
+            vel_m: Vec3::ZERO,
+            in_shed: true,
+            carried_by: Vec::new(),
+            active_timer_s: Some(8.0),
+            decoy_pulse_timer_s: 0.0,
+            settled: true,
+        };
+        let decoy_tf = Transform::from_translation(info.spawn_pos_m + Vec3::X);
+
+        let cave_item = WorldItemEntity {
+            id: 12,
+            kind: WorldItemKind::BatteryCell { charge: 0.5 },
+            vel_m: Vec3::ZERO,
+            in_shed: false,
+            carried_by: Vec::new(),
+            active_timer_s: None,
+            decoy_pulse_timer_s: 0.0,
+            settled: true,
+        };
+        let cave_tf = Transform::from_translation(info.elevator_bottom_pos_m + Vec3::Y * 0.2);
+
+        let excluded = std::collections::HashSet::new();
+        let snap = collect_shed_items_snapshot(
+            [
+                (&dropped_item, &dropped_tf),
+                (&active_decoy, &decoy_tf),
+                (&cave_item, &cave_tf),
+            ],
+            &info,
+            &excluded,
+        );
+
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].kind, SavedWorldItemKind::FlarePack { count: 2 });
+        assert_eq!(snap[0].pos_m, dropped_pos.to_array());
+        assert!((snap[0].rot_y - 0.75).abs() < 1e-4);
     }
 
     #[test]

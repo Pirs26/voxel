@@ -55,6 +55,8 @@ pub struct CampaignSave {
     pub unlocked_depth_tier: u8,
     pub selected_depth_tier: u8,
     pub dives_completed: u32,
+    #[serde(default)]
+    pub shed_initialized: bool,
     pub shed_items: Vec<SavedWorldItem>,
     pub players: HashMap<String, SavedPlayerProfile>,
 }
@@ -123,6 +125,7 @@ impl CampaignSave {
             unlocked_depth_tier: 1,
             selected_depth_tier: 1,
             dives_completed: 0,
+            shed_initialized: false,
             shed_items: Vec::new(),
             players: HashMap::new(),
         }
@@ -187,6 +190,9 @@ impl CampaignSave {
         save.selected_depth_tier = save
             .selected_depth_tier
             .clamp(1, save.unlocked_depth_tier);
+        if !save.shed_items.is_empty() || save.dives_completed > 0 {
+            save.shed_initialized = true;
+        }
         for profile in save.players.values_mut() {
             profile.inventory.normalize_slots();
         }
@@ -552,6 +558,7 @@ mod tests {
         save.unlocked_depth_tier = 3;
         save.selected_depth_tier = 2;
         save.dives_completed = 5;
+        save.shed_initialized = true;
         save.shed_items.push(SavedWorldItem {
             kind: SavedWorldItemKind::HeavyRelic {
                 value: 250,

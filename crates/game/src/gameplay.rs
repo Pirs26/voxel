@@ -47,15 +47,14 @@ use crate::{
         BODY_CARRY_SPEED_MULT, CHARGER_PAD_RADIUS_M, CHARGER_PAD_RATE_PER_S,
         DECOY_ACTIVE_DURATION_S, DECOY_PULSE_INTERVAL_S, RELIC_SCRAPE_INTERVAL_S,
         RemoveWorldItemEvent, SpawnWorldItemEvent, WorldItemEntity, WorldItemRegistry,
-        belt_item_to_world_kind, create_cave_relic_states, default_starter_shed_items,
-        is_fallen_body, is_heavy_relic, is_pos_in_shed, is_two_handed_world_item,
-        relic_carry_speed_mult, relic_is_scraping, saved_to_world_kind, spawn_world_item_visual,
-        to_net_state, try_pickup_world_item_into_inventory, world_item_display_name,
-        world_kind_to_saved,
+        belt_item_to_world_kind, collect_shed_items_snapshot, create_cave_relic_states,
+        default_starter_shed_items, is_fallen_body, is_heavy_relic, is_pos_in_shed,
+        is_two_handed_world_item, relic_carry_speed_mult, relic_is_scraping, saved_to_world_kind,
+        spawn_world_item_visual, to_net_state, try_pickup_world_item_into_inventory,
+        world_item_display_name,
     },
     save::{
-        CampaignState, SaveSlotBrowser, SavedPlayerProfile, SavedWorldItem,
-        UNRECOVERED_COMPANION_FINE,
+        CampaignState, SaveSlotBrowser, SavedPlayerProfile, UNRECOVERED_COMPANION_FINE,
     },
     settings::{AppScreen, SettingsMenuOpen},
     shed::{
@@ -191,12 +190,17 @@ fn setup_week3_world(
     // 3. Spawn Base Shed & Cave station props (Shop Terminal, Charger Bench, Lever, Winch)
     spawn_shed_landmarks(&mut commands, &mut meshes, &mut materials, &level_info.0);
 
-    // 4. Restore persisted Base Shed world items (or place starter workbench items for fresh saves)
-    let shed_items = if campaign.save.shed_items.is_empty() && campaign.save.dives_completed == 0 {
+    // 4. Restore persisted Base Shed world items (or place starter workbench items once for brand-new saves)
+    let shed_items = if !campaign.save.shed_initialized
+        && campaign.save.shed_items.is_empty()
+        && campaign.save.dives_completed == 0
+    {
         let starters = default_starter_shed_items(level_info.0.shed_workbench_pos_m);
         campaign.save.shed_items = starters.clone();
+        campaign.save.shed_initialized = true;
         starters
     } else {
+        campaign.save.shed_initialized = true;
         campaign.save.shed_items.clone()
     };
 
@@ -211,7 +215,13 @@ fn setup_week3_world(
             carried_by: Vec::new(),
             active_timer_s: None,
         };
-        spawn_world_item_visual(&mut commands, &mut meshes, &mut materials, &net_state);
+        let ent = spawn_world_item_visual(&mut commands, &mut meshes, &mut materials, &net_state);
+        if saved.rot_y.abs() > 1e-4 {
+            commands.entity(ent).insert(
+                Transform::from_translation(net_state.pos_m)
+                    .with_rotation(Quat::from_rotation_y(saved.rot_y)),
+            );
+        }
     }
 
     commands.insert_resource(campaign);
@@ -343,14 +353,18 @@ fn handle_session_lifecycle_system(
                 inv.carry_state = CarryHandState::Free;
                 inv.close_battery_selector();
 
-                let shed_items =
-                    if loaded.save.shed_items.is_empty() && loaded.save.dives_completed == 0 {
-                        let starters = default_starter_shed_items(level_info.0.shed_workbench_pos_m);
-                        loaded.save.shed_items = starters.clone();
-                        starters
-                    } else {
-                        loaded.save.shed_items.clone()
-                    };
+                let shed_items = if !loaded.save.shed_initialized
+                    && loaded.save.shed_items.is_empty()
+                    && loaded.save.dives_completed == 0
+                {
+                    let starters = default_starter_shed_items(level_info.0.shed_workbench_pos_m);
+                    loaded.save.shed_items = starters.clone();
+                    loaded.save.shed_initialized = true;
+                    starters
+                } else {
+                    loaded.save.shed_initialized = true;
+                    loaded.save.shed_items.clone()
+                };
 
                 *campaign = loaded;
                 health.reset_for_shed();
@@ -376,7 +390,18 @@ fn handle_session_lifecycle_system(
                         carried_by: Vec::new(),
                         active_timer_s: None,
                     };
-                    spawn_world_item_visual(&mut commands, &mut meshes, &mut materials, &net_state);
+                    let ent = spawn_world_item_visual(
+                        &mut commands,
+                        &mut meshes,
+                        &mut materials,
+                        &net_state,
+                    );
+                    if saved.rot_y.abs() > 1e-4 {
+                        commands.entity(ent).insert(
+                            Transform::from_translation(net_state.pos_m)
+                                .with_rotation(Quat::from_rotation_y(saved.rot_y)),
+                        );
+                    }
                     spawned_states.push(net_state);
                 }
 
@@ -428,20 +453,13 @@ fn handle_session_lifecycle_system(
             SessionLifecycleEvent::DisconnectToMenu => {
                 if coop.is_host_or_solo() {
                     // Persist host inventory, synced guest inventories, credits & Shed items
-                    let shed_snapshot: Vec<SavedWorldItem> = items_q
-                        .iter()
-                        .filter(|(_, item, tf)| {
-                            item.in_shed
-                                && !is_fallen_body(&item.kind)
-                                && is_pos_in_shed(tf.translation, &level_info.0)
-                        })
-                        .map(|(_, item, tf)| SavedWorldItem {
-                            kind: world_kind_to_saved(&item.kind),
-                            pos_m: tf.translation.to_array(),
-                            rot_y: 0.0,
-                        })
-                        .collect();
-                    campaign.save.shed_items = shed_snapshot;
+                    let excluded = HashSet::new();
+                    campaign.save.shed_initialized = true;
+                    campaign.save.shed_items = collect_shed_items_snapshot(
+                        items_q.iter().map(|(_, item, tf)| (item, tf)),
+                        &level_info.0,
+                        &excluded,
+                    );
                     campaign.save.upsert_player(SavedPlayerProfile {
                         player_name: coop.local_name.clone(),
                         visor_idx: coop.visor_idx,
@@ -1545,6 +1563,21 @@ fn elevator_runtime_system(
         } else {
             match elevator.phase {
                 ElevatorPhase::ShedIdle => {
+                    // Snapshot all Base Shed items (including dropped ones) & profile before leaving the Shed
+                    let excluded = HashSet::new();
+                    campaign.save.shed_initialized = true;
+                    campaign.save.shed_items = collect_shed_items_snapshot(
+                        items_q.iter().map(|(_, item, tf)| (item, tf)),
+                        &level_info.0,
+                        &excluded,
+                    );
+                    campaign.save.upsert_player(SavedPlayerProfile {
+                        player_name: coop.local_name.clone(),
+                        visor_idx: coop.visor_idx,
+                        inventory: inv.clone(),
+                    });
+                    let _ = campaign.save_now();
+
                     let tier = campaign.save.selected_depth_tier.clamp(1, 3);
                     let next_seed = coop
                         .level_seed
@@ -1641,7 +1674,7 @@ fn elevator_runtime_system(
     }
 
     if delta_y.abs() > 1e-5 {
-        for (_, item, mut tf) in &mut items_q {
+        for (_, mut item, mut tf) in &mut items_q {
             if item.carried_by.is_empty() {
                 let r = if is_two_handed_world_item(&item.kind) {
                     Vec3::splat(0.32)
@@ -1649,6 +1682,7 @@ fn elevator_runtime_system(
                     Vec3::splat(0.14)
                 };
                 elevator.ride_with_elevator(&mut tf.translation, prev_y, r);
+                item.in_shed = is_pos_in_shed(tf.translation, &level_info.0);
             }
         }
     }
@@ -1771,27 +1805,47 @@ fn elevator_runtime_system(
             }
         }
 
-        for (ent, item, tf) in &items_q {
+        let mut despawned_ids: HashSet<u32> = HashSet::new();
+        for (ent, mut item, tf) in &mut items_q {
             if !item.in_shed {
                 if let WorldItemKind::FallenBody { player_id, .. } = item.kind {
                     dead_player_ids.insert(player_id);
                     if elevator.is_pos_inside_cage(tf.translation) {
                         recovered_body_ids.insert(player_id);
                     }
+                    despawned_ids.insert(item.id);
+                    coop.send_world_item_remove(item.id);
+                    commands.entity(ent).despawn();
                 } else if elevator.is_pos_inside_cage(tf.translation) {
                     match item.kind {
                         WorldItemKind::HeavyRelic { value, .. } => {
                             payout = payout.saturating_add(value);
                             relics_extracted += 1;
+                            despawned_ids.insert(item.id);
+                            coop.send_world_item_remove(item.id);
+                            commands.entity(ent).despawn();
                         }
                         WorldItemKind::BonusLoot { value } => {
                             payout = payout.saturating_add(value);
+                            despawned_ids.insert(item.id);
+                            coop.send_world_item_remove(item.id);
+                            commands.entity(ent).despawn();
                         }
-                        _ => {}
+                        _ if item.active_timer_s.is_none() => {
+                            // Dropped gear brought back up inside the elevator cage stays in the Shed!
+                            item.in_shed = true;
+                        }
+                        _ => {
+                            despawned_ids.insert(item.id);
+                            coop.send_world_item_remove(item.id);
+                            commands.entity(ent).despawn();
+                        }
                     }
+                } else {
+                    despawned_ids.insert(item.id);
+                    coop.send_world_item_remove(item.id);
+                    commands.entity(ent).despawn();
                 }
-                coop.send_world_item_remove(item.id);
-                commands.entity(ent).despawn();
             }
         }
         for ent in &stalkers_q {
@@ -1823,20 +1877,12 @@ fn elevator_runtime_system(
         campaign.dirty = true;
 
         // Snapshot Shed items & player profile and auto-save!
-        let shed_items_snapshot: Vec<SavedWorldItem> = items_q
-            .iter()
-            .filter(|(_, item, tf)| {
-                item.in_shed
-                    && !is_fallen_body(&item.kind)
-                    && is_pos_in_shed(tf.translation, &level_info.0)
-            })
-            .map(|(_, item, tf)| SavedWorldItem {
-                kind: world_kind_to_saved(&item.kind),
-                pos_m: tf.translation.to_array(),
-                rot_y: 0.0,
-            })
-            .collect();
-        campaign.save.shed_items = shed_items_snapshot;
+        campaign.save.shed_initialized = true;
+        campaign.save.shed_items = collect_shed_items_snapshot(
+            items_q.iter().map(|(_, item, tf)| (item, tf)),
+            &level_info.0,
+            &despawned_ids,
+        );
         campaign.save.upsert_player(SavedPlayerProfile {
             player_name: coop.local_name.clone(),
             visor_idx: coop.visor_idx,
@@ -2713,13 +2759,21 @@ fn health_and_wipe_system(
         for ent in &stalkers_q {
             commands.entity(ent).despawn();
         }
-        for (ent, item, _) in &items_q {
-            if !item.in_shed {
+        let mut despawned_ids = HashSet::new();
+        for (ent, item, tf) in &items_q {
+            if !is_pos_in_shed(tf.translation, &level_info.0) || is_fallen_body(&item.kind) {
+                despawned_ids.insert(item.id);
                 commands.entity(ent).despawn();
             }
         }
 
-        // Save persistent Shed state & updated profile
+        // Save persistent Shed items (including dropped ones) & updated profile
+        campaign.save.shed_initialized = true;
+        campaign.save.shed_items = collect_shed_items_snapshot(
+            items_q.iter().map(|(_, item, tf)| (item, tf)),
+            &level_info.0,
+            &despawned_ids,
+        );
         campaign.save.upsert_player(SavedPlayerProfile {
             player_name: coop.local_name.clone(),
             visor_idx: coop.visor_idx,
@@ -2740,17 +2794,9 @@ fn persist_campaign_snapshot(
     items_q: &Query<(&WorldItemEntity, &Transform)>,
     info: &voxel_core::GeneratedLevelInfo,
 ) {
-    campaign.save.shed_items = items_q
-        .iter()
-        .filter(|(item, tf)| {
-            item.in_shed && !is_fallen_body(&item.kind) && is_pos_in_shed(tf.translation, info)
-        })
-        .map(|(item, tf)| SavedWorldItem {
-            kind: world_kind_to_saved(&item.kind),
-            pos_m: tf.translation.to_array(),
-            rot_y: 0.0,
-        })
-        .collect();
+    let excluded = HashSet::new();
+    campaign.save.shed_initialized = true;
+    campaign.save.shed_items = collect_shed_items_snapshot(items_q.iter(), info, &excluded);
     campaign.save.upsert_player(SavedPlayerProfile {
         player_name: coop.local_name.clone(),
         visor_idx: coop.visor_idx,
