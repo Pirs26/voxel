@@ -109,6 +109,9 @@ impl Default for AcousticTelemetry {
 #[derive(Resource)]
 pub struct AcousticBeaconState {
     pub pos_m: Vec3,
+    /// Dev acoustic test beacon is OFF by default so it never ticks continuously during
+    /// normal gameplay or up in the Base Shed; press `[K]` to toggle it ON/OFF for A/B tests.
+    pub enabled: bool,
     pub ping_timer: Timer,
     pub drip_timer: Timer,
     pub solve_timer: Timer,
@@ -208,6 +211,7 @@ fn setup_beacon_and_acoustics(
     let beacon_pos = level_info.0.acoustic_beacon_pos_m;
     commands.insert_resource(AcousticBeaconState {
         pos_m: beacon_pos,
+        enabled: false,
         ping_timer: Timer::from_seconds(1.5, TimerMode::Repeating),
         drip_timer: Timer::from_seconds(4.2, TimerMode::Repeating),
         solve_timer: Timer::from_seconds(1.0 / 20.0, TimerMode::Repeating),
@@ -215,8 +219,7 @@ fn setup_beacon_and_acoustics(
         next_oneshot_id: 100,
     });
 
-    // Visual marker for the Acoustic Test Beacon (PointLight on child entity so it is NOT
-    // frustum-culled by the small sphere's AABB when the sphere leaves view!)
+    // Visual marker for the optional Acoustic Test Beacon (hidden until toggled with `[K]`)
     commands
         .spawn((
             Mesh3d(meshes.add(Sphere::new(0.22))),
@@ -226,6 +229,7 @@ fn setup_beacon_and_acoustics(
                 ..default()
             })),
             Transform::from_translation(beacon_pos),
+            Visibility::Hidden,
             BeaconVisual,
         ))
         .with_children(|parent| {
@@ -325,10 +329,15 @@ fn sync_audio_user_settings_system(
 
 fn sync_beacon_visual(
     beacon: Res<AcousticBeaconState>,
-    mut vis_q: Query<&mut Transform, With<BeaconVisual>>,
+    mut vis_q: Query<(&mut Transform, &mut Visibility), With<BeaconVisual>>,
 ) {
-    if let Ok(mut tf) = vis_q.single_mut() {
+    if let Ok((mut tf, mut vis)) = vis_q.single_mut() {
         tf.translation = beacon.pos_m;
+        *vis = if beacon.enabled {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
     }
 }
 
@@ -434,8 +443,9 @@ fn submit_and_poll_acoustics(
         return;
     }
 
-    // 3. Trigger periodic Acoustic Beacon Ping using already-solved params (zero raycasts!)
-    if beacon.ping_timer.just_finished()
+    // 3. Trigger optional Acoustic Test Beacon Ping ONLY when explicitly toggled ON (`[K]`)
+    if beacon.enabled
+        && beacon.ping_timer.just_finished()
         && !settings.self_echo_test
         && let Some(params) = telemetry.beacon_params
     {
@@ -449,14 +459,16 @@ fn submit_and_poll_acoustics(
         });
     }
 
-    // 4. Trigger periodic Grand Cavern water drip using already-solved drip params (zero raycasts!)
-    if beacon.drip_timer.just_finished()
+    // 4. Trigger subtle underground cavern water drips ONLY when below the surface Base Shed
+    let is_underground = listener_pos.y < level_info.0.shed_floor_y_m - 4.0;
+    if is_underground
+        && beacon.drip_timer.just_finished()
         && let Some(params) = telemetry.drip_params
     {
         audio.engine.send(AudioCommand::PlayClip {
             source_id: DRIP_SOURCE_ID,
             clip: SynthClip::WaterDrip,
-            volume: 0.65,
+            volume: 0.50,
             pitch: 1.0,
             looping: false,
             initial_params: params,

@@ -195,6 +195,16 @@ impl PlayerInventory {
         }
     }
 
+    /// Scrolls the active belt slot by `delta` (wrapping cleanly across unlocked slots `0..belt_capacity`).
+    pub fn scroll_active_slot(&mut self, delta: i32) {
+        self.normalize_slots();
+        if self.belt_capacity <= 1 || delta == 0 {
+            return;
+        }
+        let cap = self.belt_capacity as i32;
+        self.active_slot = (self.active_slot as i32 + delta).rem_euclid(cap) as usize;
+    }
+
     /// Returns `true` when carrying a 2-handed heavy relic or dragging a downed teammate.
     pub fn is_hands_occupied(&self) -> bool {
         self.carry_state != CarryHandState::Free
@@ -1192,5 +1202,24 @@ mod tests {
         assert_eq!(restored.battery_pouch, inv.battery_pouch);
         assert_eq!(restored.carry_state, CarryHandState::Free);
         assert_eq!(restored.battery_selector, BatterySelectorState::default());
+    }
+
+    #[test]
+    fn scroll_active_slot_wraps_across_unlocked_belt_capacity() {
+        let mut inv = PlayerInventory::starter(); // belt_capacity = 2, active_slot = 0
+        inv.scroll_active_slot(1);
+        assert_eq!(inv.active_slot, 1);
+        inv.scroll_active_slot(1);
+        assert_eq!(inv.active_slot, 0);
+        inv.scroll_active_slot(-1);
+        assert_eq!(inv.active_slot, 1);
+
+        // Expand capacity to 4 and confirm wrap matches new capacity
+        inv.belt_capacity = 4;
+        inv.normalize_slots();
+        inv.scroll_active_slot(2);
+        assert_eq!(inv.active_slot, 3);
+        inv.scroll_active_slot(1);
+        assert_eq!(inv.active_slot, 0);
     }
 }

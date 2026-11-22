@@ -356,6 +356,7 @@ fn player_move_system(
         move_and_slide(&world, pc.feet_pos_m, pc.velocity_m, height, dt);
 
     // Solid steel elevator floor collision support bridging the full shaft opening (ZERO entrance gap!)
+    let mut standing_on_elevator = false;
     if let Some(ref elev) = elevator {
         let dx = (new_feet.x - elev.center_xz_m.x).abs();
         let dz = (new_feet.z - elev.center_xz_m.y).abs();
@@ -369,6 +370,7 @@ fn player_move_system(
             new_feet.y = elev.platform_y_m + 0.02;
             new_vel.y = 0.0;
             grounded = true;
+            standing_on_elevator = true;
         }
     }
 
@@ -385,7 +387,7 @@ fn player_move_system(
     };
     tf.translation = pc.feet_pos_m + Vec3::Y * eye_h;
 
-    // Footstep acoustic emission (scaled by Stealth Boots + pack encumbrance!)
+    // Footstep acoustic emission (surface-accurate + scaled by Stealth Boots & pack encumbrance!)
     let horiz_moved = (new_feet - prev_feet).xz().length();
     if grounded && horiz_moved > 0.001 && !downed {
         pc.footstep_accum_m += horiz_moved;
@@ -402,28 +404,37 @@ fn player_move_system(
             let below = world
                 .config()
                 .world_to_voxel(pc.feet_pos_m - Vec3::Y * 0.15);
-            let clip = match world.get(below) {
-                VoxelId::Timber => match pc.step_counter % 3 {
-                    0 => SynthClip::FootstepWood,
-                    1 => SynthClip::FootstepWood2,
-                    _ => SynthClip::FootstepWood3,
-                },
-                VoxelId::CaveDirt => SynthClip::FootstepDirt,
-                _ => SynthClip::FootstepStone,
+            let surface = world.get(below);
+            let (clip, surface_vol_mult) = if standing_on_elevator || surface == VoxelId::Steel {
+                (SynthClip::FootstepSteel, 1.0)
+            } else {
+                match surface {
+                    VoxelId::Timber => (
+                        match pc.step_counter % 3 {
+                            0 => SynthClip::FootstepWood,
+                            1 => SynthClip::FootstepWood2,
+                            _ => SynthClip::FootstepWood3,
+                        },
+                        0.92,
+                    ),
+                    VoxelId::CaveDirt => (SynthClip::FootstepDirt, 0.90),
+                    VoxelId::AcousticFoam => (SynthClip::FootstepDirt, 0.45),
+                    _ => (SynthClip::FootstepStone, 0.95),
+                }
             };
             let base_volume = if pc.crouching {
-                0.24
+                0.22
             } else if sprinting {
-                0.80
+                0.76
             } else {
-                0.50
+                0.46
             };
             let noise_mult = inv.footstep_noise_multiplier();
-            let volume = (base_volume * noise_mult).clamp(0.10, 0.95);
+            let volume = (base_volume * surface_vol_mult * noise_mult).clamp(0.08, 0.90);
             let h = pc.step_counter.wrapping_mul(2_654_435_761) >> 24;
-            let pitch = 0.92 + (h as f32 / 255.0) * 0.16;
+            let pitch = 0.94 + (h as f32 / 255.0) * 0.12;
             sound_writer.write(PlaySpatialSoundEvent {
-                pos_m: pc.feet_pos_m + Vec3::Y * 0.15,
+                pos_m: pc.feet_pos_m + Vec3::Y * 0.45,
                 clip,
                 volume,
                 pitch,

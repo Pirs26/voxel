@@ -22,8 +22,8 @@ use crate::{
     gameplay::{GameplayToast, SessionLifecycleEvent, ShopActionEvent},
     health::{BLEEDOUT_DURATION_S, LocalHealthPhase, PlayerHealthState},
     inventory::{
-        BeltItem, MAX_BELT_CAPACITY, MAX_POUCH_CAPACITY, PlayerInventory, SHOP_CATALOG,
-        ShopCatalogItem,
+        BeltItem, CarryHandState, MAX_BELT_CAPACITY, MAX_POUCH_CAPACITY, PlayerInventory,
+        SHOP_CATALOG, ShopCatalogItem,
     },
     net_bridge::{
         CoopMenuOpen, CoopState, VISOR_PALETTE, clear_remote_players, copy_to_clipboard,
@@ -187,6 +187,9 @@ struct ToastText;
 struct DiagText;
 
 // ---- Graphical Hotbar, Pouch & Battery Tray Markers ----
+
+#[derive(Component)]
+struct HotbarActiveNameText;
 
 #[derive(Component, Clone, Copy)]
 struct HotbarSlotCard(usize);
@@ -1886,6 +1889,17 @@ fn setup_hud(mut commands: Commands) {
                         });
                     });
 
+                // Centered active toolbar item name right above the hotbar
+                bottom.spawn((
+                    Text::new(""),
+                    TextFont {
+                        font_size: FontSize::Px(13.0),
+                        ..default()
+                    },
+                    TextColor(COL_TEXT_BRIGHT),
+                    HotbarActiveNameText,
+                ));
+
                 // Graphical Bottom Equipment Dock: 5 Icon Hotbar Slots + Pouch Gauges + Wearables
                 bottom
                     .spawn(Node {
@@ -3281,7 +3295,10 @@ fn update_hotbar_and_pouch_system(
         Query<(&PouchGaugeFill, &mut Node, &mut BackgroundColor)>,
         Query<(&WearableBadge, &mut BorderColor, &mut BackgroundColor)>,
     )>,
-    mut count_q: Query<(&HotbarCountText, &mut Text)>,
+    mut texts: ParamSet<(
+        Query<(&HotbarCountText, &mut Text)>,
+        Query<&mut Text, With<HotbarActiveNameText>>,
+    )>,
 ) {
     let loaded_bat = inv.loaded_battery_charge().clamp(0.0, 1.0);
 
@@ -3321,7 +3338,7 @@ fn update_hotbar_and_pouch_system(
         let (_, sec, _) = belt_item_graphics(item);
         *bg = BackgroundColor(if unlocked { sec } else { Color::NONE });
     }
-    for (ct, mut t) in &mut count_q {
+    for (ct, mut t) in &mut texts.p0() {
         let unlocked = ct.0 < inv.belt_capacity;
         let item = if unlocked {
             inv.belt.get(ct.0).and_then(|s| s.as_ref())
@@ -3330,6 +3347,25 @@ fn update_hotbar_and_pouch_system(
         };
         let (_, _, label) = belt_item_graphics(item);
         t.0 = if unlocked { label } else { "LOCK".to_string() };
+    }
+    if let Ok(mut name_t) = texts.p1().single_mut() {
+        name_t.0 = match inv.carry_state {
+            CarryHandState::HeavyRelic { .. } => "Heavy Relic".to_string(),
+            CarryHandState::DraggingPlayer { .. } => "Dragging Teammate".to_string(),
+            CarryHandState::Free => match inv.active_item() {
+                None => String::new(),
+                Some(BeltItem::Flashlight) => {
+                    format!("Flashlight ({:.0}%)", loaded_bat * 100.0)
+                }
+                Some(BeltItem::Flares { count }) => format!("Glow Flares ({count})"),
+                Some(BeltItem::AcousticFoam { charges }) => {
+                    format!("Acoustic Foam ({charges})")
+                }
+                Some(BeltItem::NoiseDecoys { count }) => format!("Noise Decoys ({count})"),
+                Some(BeltItem::AidKit) => "Aid Kit".to_string(),
+                Some(BeltItem::BonusLoot { value }) => format!("Bonus Crystal ({value} cr)"),
+            },
+        };
     }
     for (fill, mut node, mut bg) in &mut visuals.p3() {
         let is_fl = fill.0 < inv.belt_capacity
