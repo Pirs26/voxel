@@ -549,11 +549,19 @@ fn process_spatial_sound_events(
         let id = beacon.next_oneshot_id;
         beacon.next_oneshot_id = beacon.next_oneshot_id.wrapping_add(1).max(100);
 
+        let (ref_distance_m, max_distance_m) = match ev.clip {
+            SynthClip::MonsterGrowl
+            | SynthClip::MonsterScreech
+            | SynthClip::ElevatorWinch
+            | SynthClip::DecoyBuzz
+            | SynthClip::HeavyImpact => (4.5, 75.0),
+            _ => (1.8, 55.0),
+        };
         let query = AcousticSourceQuery {
             id,
             pos_m: ev.pos_m,
-            ref_distance_m: 1.8,
-            max_distance_m: 60.0,
+            ref_distance_m,
+            max_distance_m,
         };
         let params = solve_single_source(&world, listener_pos, query, telemetry.reverb, 16, id);
 

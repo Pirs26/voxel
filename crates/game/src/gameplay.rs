@@ -2036,9 +2036,11 @@ fn blind_stalker_ai_system(
     let dt = time.delta_secs().min(0.05);
     let elapsed = time.elapsed_secs();
 
-    // Guest-side smooth interpolation + stunned shudder animation
+    // Guest-side smooth interpolation + stunned shudder animation + synced vocal/step acoustics
     let alpha = (dt * 12.0).clamp(0.0, 1.0);
+    let mut guest_monster_sounds: Vec<(Vec3, SynthClip, f32, f32)> = Vec::new();
     for (rs, mut tf) in &mut remote_stalkers_q {
+        let prev = tf.translation;
         tf.translation = tf.translation.lerp(rs.target_pos_m, alpha);
         tf.rotation = if rs.state == StalkerState::Stunned {
             Quat::from_rotation_y(rs.target_yaw)
@@ -2047,6 +2049,40 @@ fn blind_stalker_ai_system(
         } else {
             Quat::from_rotation_y(rs.target_yaw)
         };
+        if !coop.is_host_or_solo() {
+            let phase_shift = rs.monster_id as f32 * 1.37;
+            let period = match rs.state {
+                StalkerState::Hunt => 2.2,
+                StalkerState::Investigate => 3.2,
+                _ => 4.4,
+            };
+            let prev_tick = ((elapsed - dt + phase_shift) / period).floor() as i32;
+            let curr_tick = ((elapsed + phase_shift) / period).floor() as i32;
+            if curr_tick > prev_tick && rs.state != StalkerState::Stunned {
+                let is_lurker = rs.monster_id >= 2;
+                let pitch = if is_lurker { 0.58 } else { 0.96 };
+                guest_monster_sounds.push((
+                    tf.translation + Vec3::Y * 1.6,
+                    SynthClip::MonsterGrowl,
+                    0.85,
+                    pitch,
+                ));
+            }
+            let moved = tf.translation.distance(prev);
+            if moved > 0.015 {
+                let step_prev = ((elapsed - dt + phase_shift) / 0.65).floor() as i32;
+                let step_curr = ((elapsed + phase_shift) / 0.65).floor() as i32;
+                if step_curr > step_prev {
+                    let is_lurker = rs.monster_id >= 2;
+                    let (clip, vol, pitch) = if is_lurker {
+                        (SynthClip::HeavyImpact, 0.50, 0.68)
+                    } else {
+                        (SynthClip::FootstepStone, 0.72, 0.88)
+                    };
+                    guest_monster_sounds.push((tf.translation + Vec3::Y * 0.25, clip, vol, pitch));
+                }
+            }
+        }
     }
 
     // Collect acoustic events emitted this frame
@@ -2059,6 +2095,16 @@ fn blind_stalker_ai_system(
     // Collect player stun/kill strikes (guests forward to Host; Host applies authoritatively)
     let incoming_strikes: Vec<StrikeStalkerEvent> = strike_events.read().copied().collect();
     if !coop.is_host_or_solo() {
+        let mut sound_writer = sound_io.p1();
+        for (pos_m, clip, volume, pitch) in guest_monster_sounds {
+            sound_writer.write(PlaySpatialSoundEvent {
+                pos_m,
+                clip,
+                volume,
+                pitch,
+                ai_event: None,
+            });
+        }
         for ev in incoming_strikes {
             coop.send_monster_damaged(ev.monster_id, ev.damage, ev.stun_s, ev.knockback_dir);
             if ev.damage > 0 {

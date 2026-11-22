@@ -77,7 +77,7 @@ pub fn stalker_hit_aabb(feet_pos_m: Vec3) -> (Vec3, Vec3) {
 const STRIKE_HORIZ_RANGE_M: f32 = 1.75;
 const STRIKE_VERT_RANGE_M: f32 = 1.5;
 const ATTACK_COOLDOWN_S: f32 = 5.5;
-const FOOTSTEP_STRIDE_M: f32 = 1.8;
+const FOOTSTEP_STRIDE_M: f32 = 1.35;
 const DEFAULT_PATH_MAX_NODES: usize = 600;
 
 /// Behavioral state of the blind acoustic stalker.
@@ -849,9 +849,9 @@ pub fn step_stalker_ai(
     if stalker.step_accum_m >= FOOTSTEP_STRIDE_M {
         stalker.step_accum_m -= FOOTSTEP_STRIDE_M;
         let base_vol: f32 = match stalker.state {
-            StalkerState::Hunt => 0.85,
-            StalkerState::Investigate => 0.58,
-            StalkerState::Patrol | StalkerState::AttackCooldown | StalkerState::Stunned => 0.38,
+            StalkerState::Hunt => 0.95,
+            StalkerState::Investigate => 0.78,
+            StalkerState::Patrol | StalkerState::AttackCooldown | StalkerState::Stunned => 0.62,
         };
         let vol = match stalker.archetype {
             MonsterArchetype::Stalker => base_vol,
@@ -868,10 +868,10 @@ pub fn step_stalker_ai(
         ) & 0xff) as f32)
             / 255.0;
         let (next_interval, vol, stalker_pitch) = match stalker.state {
-            StalkerState::Hunt => (3.0 + jitter * 1.4, 0.85, 1.12),
-            StalkerState::Investigate => (4.5 + jitter * 1.8, 0.65, 1.00),
+            StalkerState::Hunt => (1.8 + jitter * 0.9, 1.0, 1.12),
+            StalkerState::Investigate => (2.6 + jitter * 1.2, 0.90, 1.00),
             StalkerState::Patrol | StalkerState::AttackCooldown | StalkerState::Stunned => {
-                (6.5 + jitter * 2.6, 0.50, 0.88)
+                (3.6 + jitter * 1.6, 0.80, 0.90)
             }
         };
         let pitch = match stalker.archetype {
@@ -1570,7 +1570,7 @@ mod tests {
         let step_out = step_stalker_ai(&world, &mut lurker, &[], 0.05);
         assert_eq!(
             step_out.emit_vocal,
-            Some((SynthClip::MonsterGrowl, 0.65, 0.58))
+            Some((SynthClip::MonsterGrowl, 0.90, 0.58))
         );
     }
 }
