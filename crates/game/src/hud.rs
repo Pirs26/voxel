@@ -24,7 +24,7 @@ use crate::{
     },
     player::PlayerFlashlight,
     relic::WorldItemRegistry,
-    save::CampaignState,
+    save::{CampaignState, SaveSlotBrowser},
     settings::{AppScreen, FOV_MAX_DEG, FOV_MIN_DEG, SettingsMenuOpen, UserSettings},
     shed::{ShedStationState, ShopOverlayOpen},
 };
@@ -47,6 +47,9 @@ struct MainMenuNameText;
 
 #[derive(Component)]
 struct MainMenuStatusText;
+
+#[derive(Component)]
+struct MainMenuSaveText;
 
 #[derive(Component)]
 struct VisorSwatchButton(usize);
@@ -134,6 +137,10 @@ enum UiAction {
     CancelConnecting,
     FocusNameInput,
     SelectVisor(usize),
+    PrevSaveSlot,
+    NextSaveSlot,
+    NewSaveSlot,
+    RefreshSaveSlots,
     OpenSettings,
     CloseSettings,
     QuitGame,
@@ -366,10 +373,10 @@ fn setup_hud(mut commands: Commands) {
             backdrop
                 .spawn((
                     Node {
-                        width: Val::Px(540.0),
-                        padding: UiRect::all(Val::Px(24.0)),
+                        width: Val::Px(590.0),
+                        padding: UiRect::all(Val::Px(22.0)),
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(12.0),
+                        row_gap: Val::Px(10.0),
                         ..default()
                     },
                     BackgroundColor(Color::srgba(0.05, 0.07, 0.11, 0.95)),
@@ -500,18 +507,78 @@ fn setup_hud(mut commands: Commands) {
                         });
                     });
 
+                    // Campaign Save Slot Selector (Load Existing or Create New)
+                    card.spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(5.0),
+                        margin: UiRect::top(Val::Px(2.0)),
+                        ..default()
+                    })
+                    .with_children(|sec| {
+                        sec.spawn((
+                            Text::new(
+                                "CAMPAIGN SAVE SLOT (Load existing save or create a new expedition):",
+                            ),
+                            TextFont {
+                                font_size: FontSize::Px(12.0),
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.75, 0.82, 0.86)),
+                        ));
+                        sec.spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::SpaceBetween,
+                            column_gap: Val::Px(6.0),
+                            width: Val::Percent(100.0),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            spawn_std_button(row, "<", UiAction::PrevSaveSlot);
+                            row.spawn((
+                                Node {
+                                    flex_grow: 1.0,
+                                    padding: UiRect::axes(Val::Px(10.0), Val::Px(7.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.10, 0.14, 0.20, 0.96)),
+                            ))
+                            .with_children(|box_node| {
+                                box_node.spawn((
+                                    Text::new("Slot: default (New Campaign)"),
+                                    TextFont {
+                                        font_size: FontSize::Px(13.0),
+                                        ..default()
+                                    },
+                                    TextColor(Color::srgb(0.32, 0.94, 0.86)),
+                                    MainMenuSaveText,
+                                ));
+                            });
+                            spawn_std_button(row, ">", UiAction::NextSaveSlot);
+                        });
+                        sec.spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(6.0),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            spawn_std_button(row, "+ New Save Slot", UiAction::NewSaveSlot);
+                            spawn_std_button(row, "Refresh Saves", UiAction::RefreshSaveSlots);
+                        });
+                    });
+
                     // Primary Lobby Actions
                     card.spawn(Node {
                         flex_direction: FlexDirection::Row,
                         flex_wrap: FlexWrap::Wrap,
                         column_gap: Val::Px(8.0),
                         row_gap: Val::Px(6.0),
-                        margin: UiRect::top(Val::Px(6.0)),
+                        margin: UiRect::top(Val::Px(4.0)),
                         ..default()
                     })
                     .with_children(|row| {
-                        spawn_accent_button(row, "Play Solo", UiAction::PlaySolo);
-                        spawn_accent_button(row, "Host Co-op Lobby", UiAction::HostLobby);
+                        spawn_accent_button(row, "Play Solo (Load)", UiAction::PlaySolo);
+                        spawn_accent_button(row, "Host Co-op (Load)", UiAction::HostLobby);
                         spawn_std_button(
                             row,
                             "Paste & Join Code",
@@ -1186,6 +1253,7 @@ fn handle_ui_actions_system(
     mut user_settings: ResMut<UserSettings>,
     mut voice_settings: ResMut<VoiceSettings>,
     mut device_catalog: ResMut<AudioDeviceCatalog>,
+    mut save_browser: ResMut<SaveSlotBrowser>,
     inv: Res<PlayerInventory>,
     mut lifecycle_writer: MessageWriter<SessionLifecycleEvent>,
     mut shop_writer: MessageWriter<ShopActionEvent>,
@@ -1208,6 +1276,38 @@ fn handle_ui_actions_system(
                     coop.sync_local_profile(&inv);
                 }
             }
+            UiAction::PrevSaveSlot => {
+                save_browser.step(-1);
+                coop.status_text = format!(
+                    "Selected campaign save slot '{}'",
+                    save_browser.selected_slot_name()
+                );
+            }
+            UiAction::NextSaveSlot => {
+                save_browser.step(1);
+                coop.status_text = format!(
+                    "Selected campaign save slot '{}'",
+                    save_browser.selected_slot_name()
+                );
+            }
+            UiAction::RefreshSaveSlots => {
+                save_browser.refresh();
+                coop.status_text = format!(
+                    "Found {} save slot(s) in saves/ — selected '{}'",
+                    save_browser.slots.len(),
+                    save_browser.selected_slot_name()
+                );
+            }
+            UiAction::NewSaveSlot => match save_browser.create_new_slot() {
+                Ok(name) => {
+                    coop.status_text = format!(
+                        "Created & selected new campaign save slot '{name}'!"
+                    );
+                }
+                Err(e) => {
+                    coop.status_text = format!("Failed to create save slot: {e}");
+                }
+            },
             UiAction::PlaySolo => {
                 user_settings.sanitize();
                 coop.local_name = user_settings.player_name.clone();
@@ -1489,6 +1589,7 @@ struct MenuHudRead<'w> {
     user_settings: Res<'w, UserSettings>,
     name_focused: Res<'w, NameInputFocused>,
     campaign: Res<'w, CampaignState>,
+    save_browser: Res<'w, SaveSlotBrowser>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -1499,6 +1600,7 @@ fn update_menu_hud_texts_system(
         Query<&mut Text, With<MainMenuStatusText>>,
         Query<&mut Text, With<CoopPanelStatusText>>,
         Query<&mut Text, With<ShopHeaderText>>,
+        Query<&mut Text, With<MainMenuSaveText>>,
     )>,
     mut name_box_q: Query<&mut BackgroundColor, (With<MainMenuNameBox>, Without<VisorSwatchButton>)>,
     mut swatch_q: Query<(&VisorSwatchButton, &mut BackgroundColor), Without<MainMenuNameBox>>,
@@ -1509,6 +1611,7 @@ fn update_menu_hud_texts_system(
     let user_settings = &st.user_settings;
     let name_focused = &st.name_focused;
     let campaign = &st.campaign;
+    let save_browser = &st.save_browser;
 
     if let Ok(mut t) = menu_texts.p0().single_mut() {
         let cursor_ch = if name_focused.0 { "_" } else { "" };
@@ -1560,11 +1663,12 @@ fn update_menu_hud_texts_system(
             peers.join(", ")
         };
         t.0 = format!(
-            "Session: {}\n\
+            "Session: {}  |  Save: {}\n\
              Join Code: {}\n\
              Miner: {} (Visor: {})  |  Teammates: {}\n\
              Mic: {} {:.0} dB (Gate {:.0} dB) — {}  |  Self-Echo: {}",
             coop.status_text,
+            campaign.slot_name,
             code_preview,
             coop.local_name,
             coop.visor_label(),
@@ -1579,12 +1683,39 @@ fn update_menu_hud_texts_system(
 
     if let Ok(mut t) = menu_texts.p3().single_mut() {
         t.0 = format!(
-            "Credits: {} cr  |  Selected Depth: Tier {} (Unlocked: Tier {})  |  Dives Completed: {}",
+            "Save: {}  |  Credits: {} cr  |  Depth: Tier {} (Unlocked: Tier {})  |  Dives: {}",
+            campaign.slot_name,
             campaign.save.credits,
             campaign.save.selected_depth_tier,
             campaign.save.unlocked_depth_tier,
             campaign.save.dives_completed,
         );
+    }
+
+    if let Ok(mut t) = menu_texts.p4().single_mut() {
+        let total = save_browser.slots.len().max(1);
+        let idx = (save_browser.selected_idx + 1).min(total);
+        t.0 = if let Some(slot) = save_browser.selected() {
+            if slot.exists_on_disk {
+                format!(
+                    "{} [{}/{}] — {} cr | Tier {} | {} dive(s) | {} miner(s)",
+                    slot.slot_name,
+                    idx,
+                    total,
+                    slot.credits,
+                    slot.unlocked_depth_tier,
+                    slot.dives_completed,
+                    slot.player_count,
+                )
+            } else {
+                format!(
+                    "{} [{}/{}] — New Campaign ({} cr, not yet saved)",
+                    slot.slot_name, idx, total, slot.credits
+                )
+            }
+        } else {
+            "default — New Campaign".to_string()
+        };
     }
 }
 

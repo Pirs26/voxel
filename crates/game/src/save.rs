@@ -195,6 +195,136 @@ impl CampaignSave {
     }
 }
 
+/// Summary metadata for a saved campaign slot displayed on the Main Menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SaveSlotSummary {
+    pub slot_name: String,
+    pub credits: u32,
+    pub unlocked_depth_tier: u8,
+    pub dives_completed: u32,
+    pub player_count: usize,
+    pub exists_on_disk: bool,
+}
+
+/// Active selected campaign slot on the Main Menu (loaded on Play Solo or Host Co-op Lobby).
+#[derive(Resource, Clone, Debug)]
+pub struct SaveSlotBrowser {
+    pub slots: Vec<SaveSlotSummary>,
+    pub selected_idx: usize,
+}
+
+impl Default for SaveSlotBrowser {
+    fn default() -> Self {
+        let mut b = Self {
+            slots: Vec::new(),
+            selected_idx: 0,
+        };
+        b.refresh();
+        b
+    }
+}
+
+impl SaveSlotBrowser {
+    pub fn refresh(&mut self) {
+        let prev_name = self.selected_slot_name().to_string();
+        self.slots = list_save_slots_in_dir(Path::new("saves"));
+        if self.slots.is_empty() {
+            self.slots.push(SaveSlotSummary {
+                slot_name: DEFAULT_SAVE_SLOT.to_string(),
+                credits: STARTER_CREDITS,
+                unlocked_depth_tier: 1,
+                dives_completed: 0,
+                player_count: 0,
+                exists_on_disk: false,
+            });
+        }
+        self.selected_idx = self
+            .slots
+            .iter()
+            .position(|s| s.slot_name == prev_name)
+            .unwrap_or(0);
+    }
+
+    pub fn selected(&self) -> Option<&SaveSlotSummary> {
+        self.slots.get(self.selected_idx).or_else(|| self.slots.first())
+    }
+
+    pub fn selected_slot_name(&self) -> &str {
+        self.selected()
+            .map(|s| s.slot_name.as_str())
+            .unwrap_or(DEFAULT_SAVE_SLOT)
+    }
+
+    pub fn step(&mut self, delta: i32) {
+        if self.slots.is_empty() {
+            return;
+        }
+        let len = self.slots.len() as i32;
+        self.selected_idx = (self.selected_idx as i32 + delta).rem_euclid(len) as usize;
+    }
+
+    /// Creates a brand-new numbered campaign slot (`expedition_2`, `expedition_3`, ...) on disk
+    /// and selects it without touching any existing save files.
+    pub fn create_new_slot(&mut self) -> Result<String, String> {
+        self.refresh();
+        let mut num = 1u32;
+        let name = loop {
+            let cand = if num == 1 && !self.slots.iter().any(|s| s.slot_name == DEFAULT_SAVE_SLOT && s.exists_on_disk) {
+                DEFAULT_SAVE_SLOT.to_string()
+            } else {
+                format!("expedition_{num}")
+            };
+            if !self.slots.iter().any(|s| s.slot_name == cand && s.exists_on_disk) {
+                break cand;
+            }
+            num += 1;
+        };
+        let fresh = CampaignSave::default_new();
+        fresh.save_slot(&name)?;
+        self.refresh();
+        if let Some(idx) = self.slots.iter().position(|s| s.slot_name == name) {
+            self.selected_idx = idx;
+        }
+        Ok(name)
+    }
+}
+
+/// Scans `dir` for campaign save `.json` files (excluding `settings.json`) and returns sorted summaries.
+pub fn list_save_slots_in_dir(dir: &Path) -> Vec<SaveSlotSummary> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem.eq_ignore_ascii_case("settings") {
+            continue;
+        }
+        if let Ok(save) = CampaignSave::load_from_path(&path) {
+            out.push(SaveSlotSummary {
+                slot_name: stem.to_string(),
+                credits: save.credits,
+                unlocked_depth_tier: save.unlocked_depth_tier,
+                dives_completed: save.dives_completed,
+                player_count: save.players.len(),
+                exists_on_disk: true,
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        let a_def = a.slot_name == DEFAULT_SAVE_SLOT;
+        let b_def = b.slot_name == DEFAULT_SAVE_SLOT;
+        b_def.cmp(&a_def).then_with(|| a.slot_name.cmp(&b.slot_name))
+    });
+    out
+}
+
 /// Active Bevy resource wrapping the host's loaded campaign save and dirty flag.
 #[derive(Resource, Clone, Debug)]
 pub struct CampaignState {
@@ -365,5 +495,35 @@ mod tests {
     fn load_from_missing_path_returns_err() {
         let missing = unique_temp_save_path("missing");
         assert!(CampaignSave::load_from_path(&missing).is_err());
+    }
+
+    #[test]
+    fn list_save_slots_discovers_campaigns_and_ignores_settings_json() {
+        let path = unique_temp_save_path("list_slots");
+        let dir = path.parent().expect("temp dir");
+        fs::create_dir_all(dir).expect("create dir");
+
+        let mut s1 = CampaignSave::default_new();
+        s1.credits = 250;
+        s1.dives_completed = 2;
+        s1.save_to_path(&dir.join("default.json")).expect("save default");
+
+        let mut s2 = CampaignSave::default_new();
+        s2.credits = 900;
+        s2.unlocked_depth_tier = 3;
+        s2.save_to_path(&dir.join("friday_coop.json")).expect("save coop");
+
+        // settings.json must be ignored
+        fs::write(dir.join("settings.json"), r#"{"fov_deg":80.0}"#).expect("write settings");
+
+        let found = list_save_slots_in_dir(dir);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].slot_name, "default");
+        assert_eq!(found[0].credits, 250);
+        assert_eq!(found[1].slot_name, "friday_coop");
+        assert_eq!(found[1].credits, 900);
+        assert_eq!(found[1].unlocked_depth_tier, 3);
+
+        let _ = fs::remove_dir_all(dir);
     }
 }

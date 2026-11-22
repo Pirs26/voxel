@@ -10,15 +10,18 @@ use voxel_core::{GeneratedLevelInfo, VoxelWorld};
 use voxel_net::ElevatorPhase;
 
 /// Duration of the seamless shaft descent from Base Shed to Cave landing (seconds).
-pub const ELEVATOR_DESCENT_DURATION_S: f32 = 10.0;
+pub const ELEVATOR_DESCENT_DURATION_S: f32 = 7.0;
 /// Duration of the loud extraction winch holdout before doors slam shut (seconds).
-pub const ELEVATOR_WINCH_DURATION_S: f32 = 30.0;
+pub const ELEVATOR_WINCH_DURATION_S: f32 = 12.0;
 /// Duration of the shaft ascent back up to the Base Shed (seconds).
-pub const ELEVATOR_ASCENT_DURATION_S: f32 = 10.0;
+pub const ELEVATOR_ASCENT_DURATION_S: f32 = 7.0;
 /// Half-width / half-depth of the walkable elevator cage interior in meters.
-pub const ELEVATOR_CAGE_HALF_EXTENT_M: f32 = 2.65;
+/// Matches the 7-voxel (6.30 m) shaft hole half-width (3.15 m) so there is ZERO entrance gap.
+pub const ELEVATOR_CAGE_HALF_EXTENT_M: f32 = 3.12;
 /// Physical thickness of the steel elevator platform floor plate in meters.
-pub const ELEVATOR_FLOOR_THICKNESS_M: f32 = 0.24;
+pub const ELEVATOR_FLOOR_THICKNESS_M: f32 = 0.20;
+/// Local offset of the interior Elevator Lever console mounted inside the cage beside the +X door.
+pub const ELEVATOR_LEVER_LOCAL_OFFSET_M: Vec3 = Vec3::new(2.30, 0.0, 2.55);
 
 /// Local Y offset of the `+X` sliding security door when closed.
 pub const ELEVATOR_DOOR_CLOSED_Y_M: f32 = 1.50;
@@ -26,7 +29,7 @@ pub const ELEVATOR_DOOR_CLOSED_Y_M: f32 = 1.50;
 pub const ELEVATOR_DOOR_OPEN_Y_M: f32 = 4.35;
 
 const CREAK_INTERVAL_S: f32 = 2.4;
-const WINCH_PULSE_INTERVAL_S: f32 = 1.35;
+const WINCH_PULSE_INTERVAL_S: f32 = 2.0;
 const SHED_AMBIENT_BRIGHTNESS: f32 = 52.0;
 const CAVE_AMBIENT_BRIGHTNESS: f32 = 14.0;
 
@@ -110,6 +113,16 @@ impl ElevatorState {
     #[inline]
     pub fn cage_center_pos_m(&self) -> Vec3 {
         Vec3::new(self.center_xz_m.x, self.platform_y_m + 1.4, self.center_xz_m.y)
+    }
+
+    /// World-space base position of the interior Elevator Lever console mounted inside the cage.
+    #[inline]
+    pub fn lever_world_pos_m(&self) -> Vec3 {
+        Vec3::new(
+            self.center_xz_m.x + ELEVATOR_LEVER_LOCAL_OFFSET_M.x,
+            self.platform_y_m,
+            self.center_xz_m.y + ELEVATOR_LEVER_LOCAL_OFFSET_M.z,
+        )
     }
 
     /// Returns `true` if `pos_m` lies within the elevator cage footprint and vertical envelope.
@@ -317,17 +330,8 @@ pub fn step_elevator_state(
                 state.phase = ElevatorPhase::CaveIdle;
                 state.creak_timer_s = 0.0;
                 out.arrived_cave = true;
-                out.emit_sound = Some((
-                    SynthClip::DoorSlam,
-                    0.85,
-                    1.0,
-                    Some(AcousticEvent {
-                        pos_m: state.cage_center_pos_m(),
-                        energy: Bands3::new(1.8, 2.2, 1.6),
-                        sharpness: 0.80,
-                        kind: AcousticEventKind::ElevatorMachinery,
-                    }),
-                ));
+                // Arrival door opening is local audio only (no AI alert — prevents spawn-camping!)
+                out.emit_sound = Some((SynthClip::DoorSlam, 0.85, 1.0, None));
             } else {
                 state.cable_shudder_active = false;
                 let progress = (1.0 - state.phase_timer_s / ELEVATOR_DESCENT_DURATION_S)
@@ -451,19 +455,28 @@ pub fn spawn_elevator_cage(
         emissive: LinearRgba::new(9.0, 6.8, 3.2, 1.0),
         ..default()
     });
+    let lever_handle_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.72, 0.14),
+        emissive: LinearRgba::new(5.5, 3.0, 0.35, 1.0),
+        perceptual_roughness: 0.25,
+        ..default()
+    });
 
-    // Shared geometry handles reused across symmetric struts, beams, and safety rails.
-    let floor_mesh = meshes.add(Cuboid::new(5.4, ELEVATOR_FLOOR_THICKNESS_M, 5.4));
-    let corner_strut_mesh = meshes.add(Cuboid::new(0.18, 3.2, 0.18));
-    let mid_post_mesh = meshes.add(Cuboid::new(0.10, 3.2, 0.10));
-    let top_beam_x_mesh = meshes.add(Cuboid::new(5.4, 0.16, 0.18));
-    let top_beam_z_mesh = meshes.add(Cuboid::new(0.18, 0.16, 5.4));
-    let cross_beam_x_mesh = meshes.add(Cuboid::new(5.2, 0.10, 0.14));
-    let cross_beam_z_mesh = meshes.add(Cuboid::new(0.14, 0.10, 5.2));
-    let rail_x_mesh = meshes.add(Cuboid::new(5.2, 0.08, 0.08));
-    let rail_z_mesh = meshes.add(Cuboid::new(0.08, 0.08, 5.2));
-    let door_mesh = meshes.add(Cuboid::new(0.12, 2.95, 5.0));
+    // Non-overlapping dimensions sized to bridge the full 6.30 m shaft hole with ZERO Z-fighting!
+    let floor_mesh = meshes.add(Cuboid::new(6.32, ELEVATOR_FLOOR_THICKNESS_M, 6.32));
+    let corner_strut_mesh = meshes.add(Cuboid::new(0.18, 3.10, 0.18));
+    let mid_post_mesh = meshes.add(Cuboid::new(0.10, 3.08, 0.10));
+    let top_beam_x_mesh = meshes.add(Cuboid::new(5.90, 0.16, 0.18));
+    let top_beam_z_mesh = meshes.add(Cuboid::new(0.18, 0.16, 6.26));
+    let cross_beam_x_mesh = meshes.add(Cuboid::new(5.88, 0.08, 0.14));
+    let cross_beam_z_mesh = meshes.add(Cuboid::new(0.14, 0.08, 5.88));
+    let rail_x_mesh = meshes.add(Cuboid::new(5.90, 0.08, 0.06));
+    let rail_z_mesh = meshes.add(Cuboid::new(0.06, 0.08, 5.90));
+    let door_mesh = meshes.add(Cuboid::new(0.10, 2.95, 5.88));
     let bulb_mesh = meshes.add(Sphere::new(0.14));
+    let lever_post_mesh = meshes.add(Cuboid::new(0.36, 1.05, 0.36));
+    let lever_arm_mesh = meshes.add(Cylinder::new(0.03, 0.52));
+    let lever_handle_mesh = meshes.add(Cuboid::new(0.30, 0.085, 0.085));
 
     let door_y = if state.doors_closed {
         ELEVATOR_DOOR_CLOSED_Y_M
@@ -478,104 +491,120 @@ pub fn spawn_elevator_cage(
             ElevatorCageRoot,
         ))
         .with_children(|parent| {
-            // 1. Heavy industrial steel floor plate (top surface flush with y = 0.0).
+            // 1. Heavy industrial steel floor plate lifted +2cm above voxel floor (ZERO Z-fighting at cave landing!).
             parent.spawn((
                 Mesh3d(floor_mesh),
                 MeshMaterial3d(steel_dark_mat.clone()),
-                Transform::from_xyz(0.0, -ELEVATOR_FLOOR_THICKNESS_M * 0.5, 0.0),
+                Transform::from_xyz(0.0, -ELEVATOR_FLOOR_THICKNESS_M * 0.5 + 0.02, 0.0),
             ));
 
-            // 2. Four corner steel vertical struts.
-            for sx in [-2.60_f32, 2.60_f32] {
-                for sz in [-2.60_f32, 2.60_f32] {
+            // 2. Four corner steel vertical struts (stopping cleanly below top beams at y = 3.12).
+            for sx in [-3.04_f32, 3.04_f32] {
+                for sz in [-3.04_f32, 3.04_f32] {
                     parent.spawn((
                         Mesh3d(corner_strut_mesh.clone()),
                         MeshMaterial3d(steel_frame_mat.clone()),
-                        Transform::from_xyz(sx, 1.6, sz),
+                        Transform::from_xyz(sx, 1.57, sz),
                     ));
                 }
             }
 
-            // 3. Top structural steel frame + overhead cable cross-beams.
-            for sz in [-2.60_f32, 2.60_f32] {
+            // 3. Top structural steel frame + vertically stacked cross-beams (ZERO coplanar overlap!).
+            for sz in [-3.04_f32, 3.04_f32] {
                 parent.spawn((
                     Mesh3d(top_beam_x_mesh.clone()),
                     MeshMaterial3d(steel_frame_mat.clone()),
-                    Transform::from_xyz(0.0, 3.2, sz),
+                    Transform::from_xyz(0.0, 3.20, sz),
                 ));
             }
-            for sx in [-2.60_f32, 2.60_f32] {
+            for sx in [-3.04_f32, 3.04_f32] {
                 parent.spawn((
                     Mesh3d(top_beam_z_mesh.clone()),
                     MeshMaterial3d(steel_frame_mat.clone()),
-                    Transform::from_xyz(sx, 3.2, 0.0),
+                    Transform::from_xyz(sx, 3.20, 0.0),
                 ));
             }
             parent.spawn((
                 Mesh3d(cross_beam_x_mesh),
                 MeshMaterial3d(steel_dark_mat.clone()),
-                Transform::from_xyz(0.0, 3.2, 0.0),
+                Transform::from_xyz(0.0, 3.23, 0.0),
             ));
             parent.spawn((
                 Mesh3d(cross_beam_z_mesh),
                 MeshMaterial3d(steel_dark_mat.clone()),
-                Transform::from_xyz(0.0, 3.2, 0.0),
+                Transform::from_xyz(0.0, 3.13, 0.0),
             ));
 
-            // 4. Safety bars & vertical mid-posts on the -X, -Z, and +Z faces (+X is boarding side).
-            for (px, pz) in [(-2.60_f32, 0.0_f32), (0.0, -2.60), (0.0, 2.60)] {
+            // 4. Mid-posts (slightly inset at +-2.96) & safety bars (outside at +-3.05) — ZERO Z-fighting!
+            for (px, pz) in [(-2.96_f32, 0.0_f32), (0.0, -2.96), (0.0, 2.96)] {
                 parent.spawn((
                     Mesh3d(mid_post_mesh.clone()),
                     MeshMaterial3d(steel_dark_mat.clone()),
-                    Transform::from_xyz(px, 1.6, pz),
+                    Transform::from_xyz(px, 1.56, pz),
                 ));
             }
             for bar_y in [0.55_f32, 1.15_f32, 1.75_f32] {
-                // -X side safety bar
                 parent.spawn((
                     Mesh3d(rail_z_mesh.clone()),
                     MeshMaterial3d(steel_frame_mat.clone()),
-                    Transform::from_xyz(-2.60, bar_y, 0.0),
+                    Transform::from_xyz(-3.05, bar_y, 0.0),
                 ));
-                // -Z side safety bar
                 parent.spawn((
                     Mesh3d(rail_x_mesh.clone()),
                     MeshMaterial3d(steel_frame_mat.clone()),
-                    Transform::from_xyz(0.0, bar_y, -2.60),
+                    Transform::from_xyz(0.0, bar_y, -3.05),
                 ));
-                // +Z side safety bar
                 parent.spawn((
                     Mesh3d(rail_x_mesh.clone()),
                     MeshMaterial3d(steel_frame_mat.clone()),
-                    Transform::from_xyz(0.0, bar_y, 2.60),
+                    Transform::from_xyz(0.0, bar_y, 3.05),
                 ));
             }
 
-            // 5. Sliding steel security gate on the +X boarding face.
+            // 5. Sliding steel security gate on the +X boarding face (offset outside struts at +3.14).
             parent.spawn((
                 Mesh3d(door_mesh),
                 MeshMaterial3d(door_mat),
-                Transform::from_xyz(2.60, door_y, 0.0),
+                Transform::from_xyz(3.135, door_y, 0.0),
                 ElevatorDoorVisual,
             ));
 
-            // 6. Overhead industrial bulb visual mesh (NO PointLight attached here!).
+            // 6. Interior Elevator Lever Console (rides inside the cage; requires all players aboard!).
+            let lv = ELEVATOR_LEVER_LOCAL_OFFSET_M;
+            parent.spawn((
+                Mesh3d(lever_post_mesh),
+                MeshMaterial3d(steel_dark_mat),
+                Transform::from_xyz(lv.x, 0.545, lv.z),
+            ));
+            parent.spawn((
+                Mesh3d(lever_arm_mesh),
+                MeshMaterial3d(steel_frame_mat),
+                Transform::from_xyz(lv.x, 1.22, lv.z - 0.08)
+                    .with_rotation(Quat::from_rotation_x(-0.35)),
+            ));
+            parent.spawn((
+                Mesh3d(lever_handle_mesh),
+                MeshMaterial3d(lever_handle_mat),
+                Transform::from_xyz(lv.x, 1.46, lv.z - 0.18),
+            ));
+
+            // 7. Overhead industrial bulb visual mesh (NO PointLight attached here!).
             parent.spawn((
                 Mesh3d(bulb_mesh),
                 MeshMaterial3d(bulb_mat),
-                Transform::from_xyz(0.0, 3.02, 0.0),
+                Transform::from_xyz(0.0, 2.98, 0.0),
             ));
 
-            // 7. Dedicated child PointLight entity (NO Mesh3d — avoids tiny-AABB frustum culling!).
+            // 8. Dedicated child PointLight entity (NO Mesh3d — avoids tiny-AABB frustum culling!).
             parent.spawn((
                 PointLight {
                     color: Color::srgb(1.0, 0.82, 0.52),
-                    intensity: 42_000.0,
-                    range: 16.0,
+                    intensity: 44_000.0,
+                    range: 17.0,
                     shadow_maps_enabled: false,
                     ..default()
                 },
-                Transform::from_xyz(0.0, 2.85, 0.0),
+                Transform::from_xyz(0.0, 2.82, 0.0),
                 ElevatorBulbLight,
             ));
         })
@@ -713,8 +742,8 @@ mod tests {
             }
         }
         assert!(
-            winch_events >= 20,
-            "expected ~22 loud winch pulses over 30s, got {winch_events}"
+            winch_events >= 5,
+            "expected ~6 loud winch pulses over 12s, got {winch_events}"
         );
         assert!(started_ascent, "expected WinchActive to transition to Ascending");
         assert_eq!(state.phase, ElevatorPhase::Ascending);

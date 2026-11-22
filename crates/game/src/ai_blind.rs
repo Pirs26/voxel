@@ -10,14 +10,18 @@ use voxel_acoustics::{AcousticEvent, AcousticEventKind, Bands3, evaluate_ai_hear
 use voxel_audio_dsp::SynthClip;
 use voxel_core::{VoxelConfig, VoxelWorld, raycast_solid};
 
-const PATROL_SPEED_M_S: f32 = 2.0;
-const INVESTIGATE_SPEED_M_S: f32 = 3.2;
-const HUNT_SPEED_M_S: f32 = 5.4;
-const COOLDOWN_SPEED_M_S: f32 = 1.6;
+const PATROL_SPEED_M_S: f32 = 1.6;
+const INVESTIGATE_SPEED_M_S: f32 = 2.4;
+const HUNT_SPEED_M_S: f32 = 3.9;
+const COOLDOWN_SPEED_M_S: f32 = 1.4;
 
-const STRIKE_HORIZ_RANGE_M: f32 = 1.85;
-const STRIKE_VERT_RANGE_M: f32 = 1.6;
-const ATTACK_COOLDOWN_S: f32 = 5.0;
+/// Grace period (seconds) right after spawning in a new cave so the stalker
+/// never rushes the elevator before players step out and orient themselves.
+pub const STALKER_SPAWN_GRACE_S: f32 = 10.0;
+
+const STRIKE_HORIZ_RANGE_M: f32 = 1.75;
+const STRIKE_VERT_RANGE_M: f32 = 1.5;
+const ATTACK_COOLDOWN_S: f32 = 5.5;
 const FOOTSTEP_STRIDE_M: f32 = 1.8;
 const DEFAULT_PATH_MAX_NODES: usize = 600;
 
@@ -52,6 +56,7 @@ pub struct BlindStalker {
     pub vocal_timer_s: f32,
     pub step_accum_m: f32,
     pub repath_timer_s: f32,
+    pub spawn_grace_s: f32,
     pub band_sensitivity: Bands3,
     pub hearing_threshold: f32,
     pub hunt_threshold: f32,
@@ -63,9 +68,9 @@ impl BlindStalker {
     pub fn new(monster_id: u16, feet_pos_m: Vec3, depth_tier: u8) -> Self {
         let tier = depth_tier.max(1);
         let (hearing_threshold, hunt_threshold) = match tier {
-            1 => (0.32, 0.85),
-            2 => (0.26, 0.72),
-            _ => (0.22, 0.62),
+            1 => (0.38, 1.05),
+            2 => (0.30, 0.86),
+            _ => (0.25, 0.72),
         };
         // High Mid/High frequency sensitivity: voices, dropped items, rock breaches, sprinting.
         let band_sensitivity = Bands3::new(0.45, 1.25, 1.65);
@@ -80,9 +85,10 @@ impl BlindStalker {
             waypoints: Vec::new(),
             alert_level: 0.0,
             patrol_origin_m: feet_pos_m,
-            vocal_timer_s: 4.5 + ((monster_id as f32 * 1.37) % 3.5),
+            vocal_timer_s: 5.5 + ((monster_id as f32 * 1.37) % 3.5),
             step_accum_m: 0.0,
             repath_timer_s: 0.0,
+            spawn_grace_s: STALKER_SPAWN_GRACE_S,
             band_sensitivity,
             hearing_threshold,
             hunt_threshold,
@@ -336,6 +342,9 @@ pub fn process_acoustic_event_for_stalker(
     stalker: &mut BlindStalker,
     event: AcousticEvent,
 ) -> Option<StalkerReaction> {
+    if stalker.spawn_grace_s > 0.0 {
+        return None;
+    }
     let ear_pos_m = stalker.feet_pos_m + Vec3::Y * 1.4;
     let perceived = evaluate_ai_hearing(
         world,
@@ -493,6 +502,7 @@ pub fn step_stalker_ai(
     stalker.alert_level = (stalker.alert_level - alert_decay * dt).max(0.0);
     stalker.repath_timer_s = (stalker.repath_timer_s - dt).max(0.0);
     stalker.state_timer_s = (stalker.state_timer_s - dt).max(0.0);
+    stalker.spawn_grace_s = (stalker.spawn_grace_s - dt).max(0.0);
 
     match stalker.state {
         StalkerState::Hunt if stalker.state_timer_s <= 0.0 => {
@@ -909,6 +919,20 @@ mod tests {
             kind: AcousticEventKind::VoiceSpeech,
         };
 
+        // During spawn grace period, even loud sounds are ignored (prevents elevator spawn-camping!)
+        assert!(stalker.spawn_grace_s > 0.0);
+        let loud_arrival = AcousticEvent {
+            pos_m: stalker_feet + Vec3::X * 2.0,
+            energy: Bands3::new(3.0, 3.0, 3.0),
+            sharpness: 1.0,
+            kind: AcousticEventKind::ElevatorMachinery,
+        };
+        assert_eq!(
+            process_acoustic_event_for_stalker(&world, &mut stalker, loud_arrival),
+            None
+        );
+        stalker.spawn_grace_s = 0.0;
+
         // Behind a solid stone wall, the blind stalker genuinely cannot hear the whisper
         let reaction_sealed = process_acoustic_event_for_stalker(&world, &mut stalker, whisper);
         assert_eq!(reaction_sealed, None);
@@ -934,6 +958,7 @@ mod tests {
 
         // 1. Noise decoy in open corridor immediately triggers AlertHunt
         let mut stalker_decoy = BlindStalker::new(1, stalker_feet, 1);
+        stalker_decoy.spawn_grace_s = 0.0;
         let decoy_event = AcousticEvent {
             pos_m: cfg.voxel_to_world_center(IVec3::new(10, 5, 10)),
             energy: Bands3::new(1.5, 2.6, 3.2),
@@ -947,6 +972,7 @@ mod tests {
 
         // 2. Loud rock wall breach in earshot triggers AlertHunt via salience >= hunt_threshold
         let mut stalker_breach = BlindStalker::new(2, stalker_feet, 2);
+        stalker_breach.spawn_grace_s = 0.0;
         let breach_event = AcousticEvent {
             pos_m: cfg.voxel_to_world_center(IVec3::new(12, 6, 10)),
             energy: Bands3::new(2.8, 3.4, 3.8),

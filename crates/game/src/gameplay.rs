@@ -27,8 +27,8 @@ use crate::{
     },
     elevator::{
         ELEVATOR_CAGE_HALF_EXTENT_M, ELEVATOR_DOOR_CLOSED_Y_M, ELEVATOR_DOOR_OPEN_Y_M,
-        ElevatorArrivedCaveEvent, ElevatorBulbLight, ElevatorCageRoot, ElevatorDoorVisual,
-        ElevatorReturnedShedEvent, ElevatorState, TriggerElevatorLeverEvent,
+        ELEVATOR_WINCH_DURATION_S, ElevatorArrivedCaveEvent, ElevatorBulbLight, ElevatorCageRoot,
+        ElevatorDoorVisual, ElevatorReturnedShedEvent, ElevatorState, TriggerElevatorLeverEvent,
         compute_ambient_brightness_for_depth, spawn_elevator_cage, step_elevator_state,
     },
     health::{
@@ -48,7 +48,7 @@ use crate::{
         saved_to_world_kind, spawn_world_item_visual, to_net_state,
         try_pickup_world_item_into_inventory, world_item_display_name, world_kind_to_saved,
     },
-    save::{CampaignState, SavedPlayerProfile, SavedWorldItem},
+    save::{CampaignState, SaveSlotBrowser, SavedPlayerProfile, SavedWorldItem},
     settings::{AppScreen, SettingsMenuOpen},
     shed::{
         ShedStation, ShedStationState, ShopOverlayOpen, detect_nearest_station,
@@ -128,6 +128,7 @@ impl Plugin for GameplayPlugin {
             .init_resource::<WorldItemRegistry>()
             .init_resource::<ShedStationState>()
             .init_resource::<ShopOverlayOpen>()
+            .init_resource::<SaveSlotBrowser>()
             .init_resource::<GameplayToast>()
             .init_resource::<GameplayTimers>()
             .add_systems(Startup, setup_week3_world)
@@ -210,6 +211,28 @@ fn toast_tick_system(time: Res<Time>, mut toast: ResMut<GameplayToast>) {
     }
 }
 
+/// Counts how many living players (Healthy or Downed, excluding Dead) are currently
+/// outside the elevator cage. Both descending and starting the extraction winch require `0`.
+pub fn count_living_players_outside_cage(
+    elevator: &ElevatorState,
+    local_feet_m: Vec3,
+    local_alive: bool,
+    coop: &CoopState,
+    remote_health: &RemoteHealthMap,
+) -> usize {
+    let mut outside = 0usize;
+    if local_alive && !elevator.is_pos_inside_cage(local_feet_m) {
+        outside += 1;
+    }
+    for (&pid, rp) in &coop.remote_players {
+        let is_dead = matches!(remote_health.0.get(&pid), Some(LocalHealthPhase::Dead));
+        if !is_dead && !elevator.is_pos_inside_cage(rp.current_feet_m) {
+            outside += 1;
+        }
+    }
+    outside
+}
+
 #[derive(SystemParam)]
 struct LifecycleMenus<'w> {
     screen: ResMut<'w, AppScreen>,
@@ -222,6 +245,7 @@ struct LifecycleMenus<'w> {
 struct LifecycleState<'w> {
     coop: ResMut<'w, CoopState>,
     campaign: ResMut<'w, CampaignState>,
+    save_browser: ResMut<'w, SaveSlotBrowser>,
     inv: ResMut<'w, PlayerInventory>,
     health: ResMut<'w, PlayerHealthState>,
     remote_health: ResMut<'w, RemoteHealthMap>,
@@ -251,6 +275,7 @@ fn handle_session_lifecycle_system(
     let settings_open = &mut *menus.settings_open;
     let coop = &mut *st.coop;
     let campaign = &mut *st.campaign;
+    let save_browser = &mut *st.save_browser;
     let inv = &mut *st.inv;
     let health = &mut *st.health;
     let remote_health = &mut *st.remote_health;
@@ -273,8 +298,9 @@ fn handle_session_lifecycle_system(
                     commands.entity(ent).despawn();
                 }
 
-                // Load persistent host campaign & restore local player profile by Player Name
-                let mut loaded = CampaignState::load_default();
+                // Load selected persistent host campaign slot & restore local player profile by Player Name
+                let slot_name = save_browser.selected_slot_name().to_string();
+                let mut loaded = CampaignState::load_slot(&slot_name);
                 let mut profile = loaded
                     .save
                     .get_or_create_player(&coop.local_name, coop.visor_idx);
@@ -337,22 +363,33 @@ fn handle_session_lifecycle_system(
                         shop_open.0 = false;
                         settings_open.0 = false;
                         *screen = AppScreen::InGame;
+                        toast.show(
+                            format!(
+                                "Loaded save '{}' ({} cr, Tier {}) — Board elevator & pull interior lever!",
+                                campaign.slot_name,
+                                campaign.save.credits,
+                                campaign.save.selected_depth_tier
+                            ),
+                            4.0,
+                        );
                     }
                 } else {
                     coop.session = None;
                     coop.join_code = None;
                     coop.pending_disconnect_s = None;
-                    coop.status_text = "Solo Expedition (Offline)".into();
+                    coop.status_text = format!("Solo Expedition (Save: {})", campaign.slot_name);
                     menu_open.0 = false;
                     shop_open.0 = false;
                     settings_open.0 = false;
                     *screen = AppScreen::InGame;
                     toast.show(
                         format!(
-                            "Welcome back, {}! Pull the elevator lever to descend.",
-                            coop.local_name
+                            "Loaded save '{}' ({} cr, Tier {}) — Board elevator & pull interior lever!",
+                            campaign.slot_name,
+                            campaign.save.credits,
+                            campaign.save.selected_depth_tier
                         ),
-                        3.5,
+                        4.0,
                     );
                 }
             }
@@ -377,6 +414,7 @@ fn handle_session_lifecycle_system(
                         inventory: inv.clone(),
                     });
                     let _ = campaign.save_now();
+                    save_browser.refresh();
 
                     clear_remote_players(&mut commands, coop, &mut remove_voice);
                     remote_health.0.clear();
@@ -837,24 +875,36 @@ fn station_and_item_interact_system(
         return;
     }
 
-    // 1. Detect nearest Shed/Cave station
+    // 1. Detect nearest Shed station or interior Elevator Lever
+    let missing_outside = count_living_players_outside_cage(
+        elevator,
+        player_pos,
+        health.is_alive(),
+        coop,
+        remote_health,
+    );
     let nearest_station = detect_nearest_station(
         player_pos,
         &level_info.0,
+        elevator.lever_world_pos_m(),
         elevator.phase,
         campaign.save.selected_depth_tier,
+        missing_outside,
     );
-    if let Some((st, prompt)) = nearest_station {
+    if let Some((st, prompt, dist_m)) = nearest_station {
         station_state.nearest = Some(st);
+        station_state.nearest_dist_m = dist_m;
         station_state.prompt = Some(prompt);
     } else {
         station_state.nearest = None;
+        station_state.nearest_dist_m = f32::MAX;
         station_state.prompt = None;
     }
 
     // 2. Detect nearest interactable world item (excluding already-active thrown decoys)
     let local_id = coop.local_player_id();
-    let mut best_item: Option<(f32, u32, WorldItemKind, usize)> = None;
+    let cam_fwd = cam_tf.forward().as_vec3();
+    let mut best_item: Option<(f32, u32, WorldItemKind, usize, f32)> = None;
     for (item, tf) in &items_q {
         if item.active_timer_s.is_some() {
             continue;
@@ -863,9 +913,24 @@ fn station_and_item_interact_system(
             continue;
         }
         let d = tf.translation.distance(cam_tf.translation);
-        if d <= ITEM_INTERACT_RANGE_M && best_item.as_ref().is_none_or(|(bd, _, _, _)| d < *bd) {
-            best_item = Some((d, item.id, item.kind.clone(), item.carried_by.len()));
+        if d <= ITEM_INTERACT_RANGE_M && best_item.as_ref().is_none_or(|(bd, _, _, _, _)| d < *bd)
+        {
+            let to_item = (tf.translation - cam_tf.translation).normalize_or_zero();
+            let aim_dot = to_item.dot(cam_fwd);
+            best_item = Some((d, item.id, item.kind.clone(), item.carried_by.len(), aim_dot));
         }
+    }
+
+    // If a physical dropped item is next to/behind the Shop Terminal or Charger Bench and
+    // either closer to the player or directly aimed at, prefer picking up the item over the bench!
+    let prefer_item_over_bench = best_item.as_ref().is_some_and(|(item_d, _, _, _, aim_dot)| {
+        matches!(
+            station_state.nearest,
+            Some(ShedStation::ShopTerminal | ShedStation::ChargerBench)
+        ) && (*item_d < station_state.nearest_dist_m + 0.35 || *aim_dot > 0.88)
+    });
+    if prefer_item_over_bench {
+        station_state.prompt = None;
     }
 
     // 3. Detect nearest downed remote teammate within rescue range
@@ -891,7 +956,7 @@ fn station_and_item_interact_system(
         Some(format!(
             "[E] Drag {name} to safety  |  Hold [H] Revive with Aid Kit (4s)"
         ))
-    } else if let Some((_, _, ref kind, carriers)) = best_item {
+    } else if let Some((_, _, ref kind, carriers, _)) = best_item {
         let label = world_item_display_name(kind);
         if is_heavy_relic(kind) {
             if carriers == 0 {
@@ -981,10 +1046,21 @@ fn station_and_item_interact_system(
         CarryHandState::Free => {}
     }
 
-    // Priority 2: Shed / Cave interactive stations
-    if let Some(st) = station_state.nearest {
+    // Priority 2: Shed / Cave interactive stations (skipped for Shop/Charger if aiming at a dropped item)
+    if let Some(st) = station_state.nearest
+        && !prefer_item_over_bench
+    {
         match st {
             ShedStation::ElevatorLeverShed | ShedStation::ElevatorWinchCave => {
+                if missing_outside > 0 {
+                    toast.show(
+                        format!(
+                            "All living players must be inside the elevator! ({missing_outside} still outside)"
+                        ),
+                        2.8,
+                    );
+                    return;
+                }
                 if coop.is_host_or_solo() {
                     lever_writer.write(TriggerElevatorLeverEvent);
                 } else {
@@ -1030,7 +1106,7 @@ fn station_and_item_interact_system(
     }
 
     // Priority 4: Grab Heavy Relic or pick up world item
-    if let Some((_, item_id, kind, _)) = best_item {
+    if let Some((_, item_id, kind, _, _)) = best_item {
         if is_heavy_relic(&kind) {
             for (mut item, tf) in &mut items_q {
                 if item.id == item_id {
@@ -1116,6 +1192,7 @@ struct ElevatorWorldRes<'w> {
     coop: ResMut<'w, CoopState>,
     inv: ResMut<'w, PlayerInventory>,
     health: ResMut<'w, PlayerHealthState>,
+    remote_health: Res<'w, RemoteHealthMap>,
     item_reg: ResMut<'w, WorldItemRegistry>,
     toast: ResMut<'w, GameplayToast>,
     ambient: ResMut<'w, GlobalAmbientLight>,
@@ -1157,6 +1234,7 @@ fn elevator_runtime_system(
     let coop = &mut res.coop;
     let inv = &mut res.inv;
     let health = &mut res.health;
+    let remote_health = &res.remote_health;
     let item_reg = &mut res.item_reg;
     let toast = &mut res.toast;
     let ambient = &mut res.ambient;
@@ -1179,56 +1257,69 @@ fn elevator_runtime_system(
     }
 
     if lever_triggered && coop.is_host_or_solo() {
-        match elevator.phase {
-            ElevatorPhase::ShedIdle => {
-                let tier = campaign.save.selected_depth_tier.clamp(1, 3);
-                let next_seed = coop
-                    .level_seed
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407 ^ (campaign.save.dives_completed as u64));
-                coop.level_seed = next_seed;
-                coop.local_edits.clear();
+        let missing_outside = player_q
+            .single()
+            .map(|pc| {
+                count_living_players_outside_cage(
+                    elevator,
+                    pc.feet_pos_m,
+                    health.is_alive(),
+                    coop,
+                    remote_health,
+                )
+            })
+            .unwrap_or(0);
 
-                // Pull local player safely into cage if they pulled the lever from just outside
-                if let Ok(mut pc) = player_q.single_mut() {
-                    let dist_to_shaft = Vec2::new(
-                        pc.feet_pos_m.x - elevator.center_xz_m.x,
-                        pc.feet_pos_m.z - elevator.center_xz_m.y,
-                    )
-                    .length();
-                    if dist_to_shaft < 6.0 && !elevator.is_pos_inside_cage(pc.feet_pos_m) {
-                        pc.feet_pos_m = Vec3::new(
-                            elevator.center_xz_m.x + 0.8,
-                            elevator.platform_y_m + 0.05,
-                            elevator.center_xz_m.y,
+        if missing_outside > 0 {
+            toast.show(
+                format!(
+                    "All living players must board the elevator before pulling the lever! ({missing_outside} outside)"
+                ),
+                3.0,
+            );
+        } else {
+            match elevator.phase {
+                ElevatorPhase::ShedIdle => {
+                    let tier = campaign.save.selected_depth_tier.clamp(1, 3);
+                    let next_seed = coop
+                        .level_seed
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(
+                            1_442_695_040_888_963_407 ^ (campaign.save.dives_completed as u64),
                         );
-                    }
-                }
+                    coop.level_seed = next_seed;
+                    coop.local_edits.clear();
 
-                elevator.start_descent(&world_res.0, next_seed, tier);
-                coop.send_start_descent(next_seed, tier);
-                coop.send_elevator_sync(elevator);
-                toast.show(
-                    format!("Descending to Depth Tier {tier}... (Generating cave seamlessly)"),
-                    3.5,
-                );
-                sound_writer.write(PlaySpatialSoundEvent {
-                    pos_m: elevator.cage_center_pos_m(),
-                    clip: SynthClip::DoorSlam,
-                    volume: 0.9,
-                    pitch: 0.95,
-                    ai_event: None,
-                });
+                    elevator.start_descent(&world_res.0, next_seed, tier);
+                    coop.send_start_descent(next_seed, tier);
+                    coop.send_elevator_sync(elevator);
+                    toast.show(
+                        format!(
+                            "Descending to Depth Tier {tier}... (Generating cave seamlessly)"
+                        ),
+                        3.5,
+                    );
+                    sound_writer.write(PlaySpatialSoundEvent {
+                        pos_m: elevator.cage_center_pos_m(),
+                        clip: SynthClip::DoorSlam,
+                        volume: 0.9,
+                        pitch: 0.95,
+                        ai_event: None,
+                    });
+                }
+                ElevatorPhase::CaveIdle => {
+                    elevator.start_winch();
+                    coop.send_elevator_sync(elevator);
+                    toast.show(
+                        format!(
+                            "EXTRACTION WINCH ACTIVATED! Loud machinery drawing predators — {}s!",
+                            ELEVATOR_WINCH_DURATION_S.round() as u32
+                        ),
+                        3.8,
+                    );
+                }
+                _ => {}
             }
-            ElevatorPhase::CaveIdle => {
-                elevator.start_winch();
-                coop.send_elevator_sync(elevator);
-                toast.show(
-                    "EXTRACTION WINCH ACTIVATED! Loud machinery drawing predators — 30s!",
-                    4.0,
-                );
-            }
-            _ => {}
         }
     }
 
@@ -1260,17 +1351,18 @@ fn elevator_runtime_system(
     let delta_y = elevator.platform_y_m - prev_y;
 
     // 4. Ride moving elevator cage smoothly (player + items inside cage!)
-    let mut player_y = elevator.platform_y_m;
+    let deck_y = elevator.platform_y_m + 0.02;
+    let mut player_y = deck_y;
     if let Ok(mut pc) = player_q.single_mut() {
         let dx = pc.feet_pos_m.x - elevator.center_xz_m.x;
         let dz = pc.feet_pos_m.z - elevator.center_xz_m.y;
-        let in_xz = dx.abs() <= ELEVATOR_CAGE_HALF_EXTENT_M + 0.1
-            && dz.abs() <= ELEVATOR_CAGE_HALF_EXTENT_M + 0.1;
+        let in_xz = dx.abs() <= ELEVATOR_CAGE_HALF_EXTENT_M + 0.15
+            && dz.abs() <= ELEVATOR_CAGE_HALF_EXTENT_M + 0.15;
 
         if in_xz && (pc.feet_pos_m.y - prev_y).abs() <= 1.25 {
-            pc.feet_pos_m.y = (pc.feet_pos_m.y + delta_y).max(elevator.platform_y_m);
-            if pc.velocity_m.y < 0.0 && pc.feet_pos_m.y <= elevator.platform_y_m + 0.05 {
-                pc.feet_pos_m.y = elevator.platform_y_m;
+            pc.feet_pos_m.y = (pc.feet_pos_m.y + delta_y).max(deck_y);
+            if pc.velocity_m.y <= 0.0 && pc.feet_pos_m.y <= deck_y + 0.05 {
+                pc.feet_pos_m.y = deck_y;
                 pc.velocity_m.y = 0.0;
                 pc.grounded = true;
             }
@@ -2018,4 +2110,72 @@ pub fn upsert_remote_stalker(
         target_yaw: yaw,
         state: st,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net_bridge::RemotePlayerData;
+    use voxel_core::{VoxelConfig, generate_world_with_tier};
+    use voxel_net::PlayerInfo;
+
+    #[test]
+    fn elevator_all_aboard_counts_living_players_outside_and_ignores_dead() {
+        let cfg = VoxelConfig::half_player_scale(UVec3::splat(3));
+        let (_, info) = generate_world_with_tier(777, 1, cfg);
+        let elev = ElevatorState::from_level_info(&info, 777);
+        let inside = Vec3::new(elev.center_xz_m.x, elev.platform_y_m + 0.05, elev.center_xz_m.y);
+        let outside = Vec3::new(
+            elev.center_xz_m.x + 8.0,
+            elev.platform_y_m + 0.05,
+            elev.center_xz_m.y,
+        );
+
+        let mut coop = CoopState::default();
+        let mut remote_health = RemoteHealthMap::default();
+
+        // Solo inside -> 0 missing; solo outside -> 1 missing
+        assert_eq!(
+            count_living_players_outside_cage(&elev, inside, true, &coop, &remote_health),
+            0
+        );
+        assert_eq!(
+            count_living_players_outside_cage(&elev, outside, true, &coop, &remote_health),
+            1
+        );
+
+        // Add living remote teammate outside -> 1 missing
+        coop.remote_players.insert(
+            2,
+            RemotePlayerData {
+                info: PlayerInfo {
+                    id: 2,
+                    name: "P2".into(),
+                    visor_rgb: [1.0, 1.0, 1.0],
+                },
+                entity: Entity::PLACEHOLDER,
+                head_entity: Entity::PLACEHOLDER,
+                flashlight_entity: Entity::PLACEHOLDER,
+                visor_material: Handle::default(),
+                target_feet_m: outside,
+                current_feet_m: outside,
+                target_yaw: 0.0,
+                target_pitch: 0.0,
+                crouching: false,
+                flashlight_on: true,
+            },
+        );
+        remote_health.0.insert(2, LocalHealthPhase::Healthy);
+        assert_eq!(
+            count_living_players_outside_cage(&elev, inside, true, &coop, &remote_health),
+            1
+        );
+
+        // Once remote teammate dies, they no longer block extraction
+        remote_health.0.insert(2, LocalHealthPhase::Dead);
+        assert_eq!(
+            count_living_players_outside_cage(&elev, inside, true, &coop, &remote_health),
+            0
+        );
+    }
 }

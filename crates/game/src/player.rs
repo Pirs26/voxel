@@ -355,18 +355,18 @@ fn player_move_system(
     let (mut new_feet, mut new_vel, mut grounded) =
         move_and_slide(&world, pc.feet_pos_m, pc.velocity_m, height, dt);
 
-    // Solid steel elevator floor collision support over the open mineshaft!
+    // Solid steel elevator floor collision support bridging the full shaft opening (ZERO entrance gap!)
     if let Some(ref elev) = elevator {
         let dx = (new_feet.x - elev.center_xz_m.x).abs();
         let dz = (new_feet.z - elev.center_xz_m.y).abs();
-        let over_plate = dx <= ELEVATOR_CAGE_HALF_EXTENT_M + 0.1
-            && dz <= ELEVATOR_CAGE_HALF_EXTENT_M + 0.1;
+        let over_plate = dx <= ELEVATOR_CAGE_HALF_EXTENT_M + 0.20
+            && dz <= ELEVATOR_CAGE_HALF_EXTENT_M + 0.20;
         if over_plate
             && prev_feet.y >= elev.platform_y_m - 0.35
-            && new_feet.y <= elev.platform_y_m + 0.02
+            && new_feet.y <= elev.platform_y_m + 0.05
             && new_vel.y <= 0.0
         {
-            new_feet.y = elev.platform_y_m;
+            new_feet.y = elev.platform_y_m + 0.02;
             new_vel.y = 0.0;
             grounded = true;
         }
