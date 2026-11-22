@@ -962,15 +962,16 @@ fn parkour_timer_system(
 
     if parkour.running {
         parkour.elapsed_s = (parkour.elapsed_s + dt).min(3599.99);
-        // Track generous East & North stage progress so players must climb the course
-        // rather than skipping straight from the entrance to the Summit Bell.
-        if pc.feet_pos_m.x >= level_info.0.parkour_bell_pos_m.x + 2.5
-            && pc.feet_pos_m.y >= level_info.0.shed_floor_y_m + 2.3
+        // Track generous East & North stage progress across the expanded 20-platform course
+        // so players must climb through the East switchbacks and North high rafters rather than
+        // skipping straight from the entrance to the Summit Bell.
+        if pc.feet_pos_m.x >= level_info.0.parkour_bell_pos_m.x + 7.5
+            && pc.feet_pos_m.y >= level_info.0.shed_floor_y_m + 4.0
         {
             parkour.reached_east_stage = true;
         }
-        if pc.feet_pos_m.z <= level_info.0.parkour_bell_pos_m.z - 3.5
-            && pc.feet_pos_m.y >= level_info.0.shed_floor_y_m + 3.9
+        if pc.feet_pos_m.z <= level_info.0.parkour_bell_pos_m.z - 5.0
+            && pc.feet_pos_m.y >= level_info.0.shed_floor_y_m + 7.5
         {
             parkour.reached_north_stage = true;
         }
