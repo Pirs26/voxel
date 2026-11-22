@@ -360,10 +360,10 @@ impl MixerState {
             dry_l += el;
             dry_r += er;
 
-            // 3. Shared cavern FDN late reverb send
+            // 3. Shared cavern FDN late reverb send (pre-diffused by early taps & muffled behind walls)
             let send = v.reverb_send;
-            rev_in_l += (raw * gl * 0.7 + el * 0.3) * send;
-            rev_in_r += (raw * gr * 0.7 + er * 0.3) * send;
+            rev_in_l += (muffled * gl * 0.62 + el * 0.38) * send;
+            rev_in_r += (muffled * gr * 0.62 + er * 0.38) * send;
         }
 
         // Mix up to MAX_VOICE_CHANNELS concurrent live VoIP streams through the exact same acoustic chain
@@ -406,18 +406,27 @@ impl MixerState {
             dry_l += el;
             dry_r += er;
 
-            // 4. Shared cavern FDN late reverb send
+            // 4. Shared cavern FDN late reverb send (pre-diffused by early taps & muffled behind walls)
             let send = vc.reverb_send;
-            rev_in_l += (raw * gl * 0.7 + el * 0.3) * send;
-            rev_in_r += (raw * gr * 0.7 + er * 0.3) * send;
+            rev_in_l += (muffled * gl * 0.62 + el * 0.38) * send;
+            rev_in_r += (muffled * gr * 0.62 + er * 0.38) * send;
         }
 
         let (wet_l, wet_r) = self.fdn.process_stereo_sample(rev_in_l, rev_in_r);
-        // Soft limiter to guarantee zero harsh digital clipping
-        let out_l = ((dry_l + wet_l) * self.master_volume).tanh();
-        let out_r = ((dry_r + wet_r) * self.master_volume).tanh();
+        // Zero-transcendental rational Padé soft limiter to guarantee zero harsh digital clipping
+        let out_l = fast_soft_clip((dry_l + wet_l) * self.master_volume);
+        let out_r = fast_soft_clip((dry_r + wet_r) * self.master_volume);
         (out_l, out_r)
     }
+}
+
+/// Rational Padé [3/2] soft-clipping approximation to `tanh(x)` with exact saturation at `±3.0 -> ±1.0`
+/// and zero transcendental (`exp`) calls inside the 48 kHz real-time audio callback.
+#[inline]
+fn fast_soft_clip(x: f32) -> f32 {
+    let xc = x.clamp(-3.0, 3.0);
+    let x2 = xc * xc;
+    xc * (27.0 + x2) / (27.0 + 9.0 * x2)
 }
 
 fn create_voice_ring_pairs(

@@ -8,8 +8,10 @@ use crate::wav::load_wav_mono;
 pub enum SynthClip {
     /// Recorded CC0 stone footstep (`assets/sfx/footstep_stone.wav`).
     FootstepStone,
-    /// Recorded CC0 dirt/gravel footstep (`assets/sfx/footstep_dirt.wav`).
+    /// Grounded single-step earthen/cave-dirt footstep (replaces double-hit WAV).
     FootstepDirt,
+    /// Heavy metallic boot-on-steel-grating footstep (elevator deck & shaft rim).
+    FootstepSteel,
     /// Recorded CC0 wooden shed footsteps (`assets/sfx/footstep_wood1..3.wav`).
     FootstepWood,
     FootstepWood2,
@@ -47,9 +49,10 @@ pub enum SynthClip {
 }
 
 impl SynthClip {
-    pub const ALL: [SynthClip; 20] = [
+    pub const ALL: [SynthClip; 21] = [
         SynthClip::FootstepStone,
         SynthClip::FootstepDirt,
+        SynthClip::FootstepSteel,
         SynthClip::FootstepWood,
         SynthClip::FootstepWood2,
         SynthClip::FootstepWood3,
@@ -77,7 +80,8 @@ impl SynthClip {
     pub const fn wav_filename(self) -> Option<&'static str> {
         match self {
             SynthClip::FootstepStone => Some("footstep_stone.wav"),
-            SynthClip::FootstepDirt => Some("footstep_dirt.wav"),
+            // Note: `footstep_dirt.wav` contains a double-step high-pitched crackle, so
+            // `FootstepDirt` uses our clean single-step earthen procedural foley below.
             SynthClip::FootstepWood => Some("footstep_wood1.wav"),
             SynthClip::FootstepWood2 => Some("footstep_wood2.wav"),
             SynthClip::FootstepWood3 => Some("footstep_wood3.wav"),
@@ -88,6 +92,7 @@ impl SynthClip {
 
 /// Loads a clip from `assets/sfx/<file>` (checking current dir, executable dir for packaged
 /// releases, and Cargo workspace dir in dev) with graceful procedural synthesis fallback.
+/// Loaded WAV footsteps are RMS-balanced and gently de-clicked at the tail so surfaces match cleanly.
 pub fn load_or_generate_clip(clip: SynthClip, sample_rate: f32) -> Vec<f32> {
     if let Some(file) = clip.wav_filename() {
         let mut candidates = vec![
@@ -103,14 +108,39 @@ pub fn load_or_generate_clip(clip: SynthClip, sample_rate: f32) -> Vec<f32> {
         }
         for path in candidates {
             if path.exists()
-                && let Ok(samples) = load_wav_mono(&path, sample_rate)
+                && let Ok(mut samples) = load_wav_mono(&path, sample_rate)
                 && !samples.is_empty()
             {
+                normalize_and_declick(&mut samples, sample_rate, 0.11);
                 return samples;
             }
         }
     }
     generate_clip(clip, sample_rate)
+}
+
+fn normalize_and_declick(samples: &mut [f32], sample_rate: f32, target_rms: f32) {
+    if samples.is_empty() {
+        return;
+    }
+    let fade_in = ((sample_rate * 0.002) as usize).min(samples.len() / 4);
+    for (i, s) in samples.iter_mut().take(fade_in).enumerate() {
+        *s *= (i + 1) as f32 / (fade_in + 1) as f32;
+    }
+    let fade_out = ((sample_rate * 0.015) as usize).min(samples.len() / 2);
+    let len = samples.len();
+    for i in 0..fade_out {
+        let g = (fade_out - i) as f32 / (fade_out + 1) as f32;
+        samples[len - 1 - i] *= g;
+    }
+    let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+    if rms > 1e-4 {
+        let peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        let gain = (target_rms / rms).clamp(0.45, 1.8).min(0.88 / peak.max(1e-4));
+        for s in samples.iter_mut() {
+            *s *= gain;
+        }
+    }
 }
 
 /// Generates a mono sample buffer for procedural clips (and WAV fallbacks).
@@ -122,15 +152,55 @@ pub fn generate_clip(clip: SynthClip, sample_rate: f32) -> Vec<f32> {
     };
 
     match clip {
-        SynthClip::FootstepStone | SynthClip::FootstepDirt => {
+        SynthClip::FootstepStone => {
             let len = (sample_rate * 0.14) as usize;
+            let mut lp = 0.0f32;
             (0..len)
                 .map(|i| {
                     let t = i as f32 / sample_rate;
-                    let env = (-t * 36.0).exp();
-                    let thump = (TAU * (95.0 - t * 220.0).max(45.0) * t).sin() * 0.65;
-                    let grit = next_noise() * (-t * 55.0).exp() * 0.45;
-                    (thump + grit) * env * 0.75
+                    let env = (t * 240.0).min(1.0) * (-t * 36.0).exp();
+                    let thump = (TAU * (105.0 - t * 240.0).max(48.0) * t).sin() * 0.55;
+                    let n = next_noise();
+                    lp += (n - lp) * 0.35;
+                    let grit = (n - lp * 0.5) * (-t * 58.0).exp() * 0.42;
+                    (thump + grit) * env * 0.70
+                })
+                .collect()
+        }
+        SynthClip::FootstepDirt => {
+            // Single grounded earthen boot step: warm packed-dirt heel thump + soft low-passed scuff
+            let len = (sample_rate * 0.15) as usize;
+            let mut lp = 0.0f32;
+            let mut lp2 = 0.0f32;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate;
+                    let env = (t * 160.0).min(1.0) * (-t * 30.0).exp();
+                    let heel = (TAU * (82.0 - t * 180.0).max(40.0) * t).sin() * 0.55;
+                    let n = next_noise();
+                    lp += (n - lp) * 0.18;
+                    lp2 += (lp - lp2) * 0.28;
+                    let scuff = (lp - lp2 * 0.4) * (-t * 38.0).exp() * 0.65;
+                    (heel + scuff) * env * 0.68
+                })
+                .collect()
+        }
+        SynthClip::FootstepSteel => {
+            // Crisp metallic boot step on steel elevator grating: solid heel + short damped steel ring
+            let len = (sample_rate * 0.17) as usize;
+            let mut lp = 0.0f32;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate;
+                    let env = (t * 320.0).min(1.0) * (-t * 28.0).exp();
+                    let thud = (TAU * (125.0 - t * 180.0).max(58.0) * t).sin() * 0.52;
+                    let plate = (TAU * 460.0 * t).sin() * (-t * 34.0).exp() * 0.24
+                        + (TAU * 890.0 * t).sin() * (-t * 48.0).exp() * 0.16
+                        + (TAU * 1540.0 * t).sin() * (-t * 65.0).exp() * 0.10;
+                    let n = next_noise();
+                    lp += (n - lp) * 0.45;
+                    let clank = lp * (-t * 75.0).exp() * 0.30;
+                    (thud + plate + clank) * env * 0.72
                 })
                 .collect()
         }
@@ -285,19 +355,23 @@ pub fn generate_clip(clip: SynthClip, sample_rate: f32) -> Vec<f32> {
                 .collect()
         }
         SynthClip::BatteryClick => {
-            let len = (sample_rate * 0.11) as usize;
+            // Crisp tactile mechanical latch click (warm metallic snap, never piercing)
+            let len = (sample_rate * 0.095) as usize;
+            let mut lp = 0.0f32;
             (0..len)
                 .map(|i| {
                     let t = i as f32 / sample_rate;
-                    let snap1 = (TAU * 1850.0 * t).sin() * (-t * 95.0).exp() * 0.55;
-                    let snap2 = if t > 0.032 {
-                        let t2 = t - 0.032;
-                        (TAU * 2400.0 * t2).sin() * (-t2 * 110.0).exp() * 0.45
+                    let snap1 = (TAU * 920.0 * t).sin() * (-t * 115.0).exp() * 0.45;
+                    let snap2 = if t > 0.026 {
+                        let t2 = t - 0.026;
+                        (TAU * 1380.0 * t2).sin() * (-t2 * 130.0).exp() * 0.38
                     } else {
                         0.0
                     };
-                    let tick = next_noise() * (-t * 140.0).exp() * 0.35;
-                    (snap1 + snap2 + tick) * 0.72
+                    let n = next_noise();
+                    lp += (n - lp) * 0.42;
+                    let tick = lp * (-t * 145.0).exp() * 0.48;
+                    (snap1 + snap2 + tick) * 0.65
                 })
                 .collect()
         }

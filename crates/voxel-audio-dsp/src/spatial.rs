@@ -13,15 +13,21 @@ pub fn stereo_pan_gains(dir: Vec3, listener_right: Vec3) -> (f32, f32) {
 /// Per-source ring-buffer delay line supporting up to `MAX_EARLY_TAPS` directional echoes.
 pub struct EarlyReflectionLine {
     sample_rate: f32,
+    hp_alpha: f32,
+    hp_state: f32,
     buf: Vec<f32>,
     write_idx: usize,
 }
 
 impl EarlyReflectionLine {
     pub fn new(sample_rate: f32) -> Self {
-        let max_len = ((sample_rate * 0.25) as usize).max(1024);
+        let sr = sample_rate.max(1.0);
+        let max_len = ((sr * 0.25) as usize).max(1024);
+        let hp_alpha = 1.0 - (-std::f32::consts::TAU * 95.0 / sr).exp();
         Self {
-            sample_rate,
+            sample_rate: sr,
+            hp_alpha,
+            hp_state: 0.0,
             buf: vec![0.0; max_len],
             write_idx: 0,
         }
@@ -43,7 +49,10 @@ impl EarlyReflectionLine {
                 continue;
             }
             let delay_samps = ((tap.delay_sec * self.sample_rate) as usize).clamp(1, max_delay);
-            let gain = tap.gain.mean().clamp(0.0, 1.2);
+            // Weight early reflection gain toward Mid/High frequencies so tunnel slap-back echoes
+            // sound crisp and directional without adding low-frequency mud.
+            let gain = (tap.gain.0[0] * 0.20 + tap.gain.0[1] * 0.50 + tap.gain.0[2] * 0.30)
+                .clamp(0.0, 1.15);
             let (gl, gr) = stereo_pan_gains(tap.direction, listener_right);
             out[count] = (gain * gl, gain * gr, delay_samps);
             count += 1;
@@ -61,7 +70,9 @@ impl EarlyReflectionLine {
     ) -> (f32, f32) {
         let len = self.buf.len();
         let w = self.write_idx;
-        self.buf[w] = dry_mono;
+        // Gently trim sub-95 Hz rumble entering the early reflection line to keep voices/steps clean
+        self.hp_state += (dry_mono - self.hp_state) * self.hp_alpha;
+        self.buf[w] = dry_mono - self.hp_state * 0.45;
 
         let mut out_l = 0.0f32;
         let mut out_r = 0.0f32;
@@ -92,6 +103,7 @@ impl EarlyReflectionLine {
     }
 
     pub fn reset(&mut self) {
+        self.hp_state = 0.0;
         self.buf.fill(0.0);
     }
 }

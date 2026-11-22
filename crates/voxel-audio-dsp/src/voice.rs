@@ -48,9 +48,9 @@ pub struct MicTelemetry {
 /// onto an AI acoustic detection energy curve.
 ///
 /// - Below `gate_threshold_db`: `0.0` (silent to monsters)
-/// - Soft whispers (`-42..-28 dB`): gentle `0.05..0.25`
-/// - Normal speech (`-28..-18 dB`): `0.25..1.0`
-/// - Shouting / laughing (`>-18 dB`): steep `1.0..4.0`
+/// - Soft whispers (`-42..-28 dB`, and up to `-27 dB`): gentle `0.05..0.33` (`< 0.35`, stealth-safe)
+/// - Normal conversation (`-24..-18 dB`): sits around `0.55..1.0`
+/// - Shouting / laughing (`>-18 dB`): spikes steeply above `1.4` up to `4.0`
 pub fn compute_voice_ai_energy(rms_db: f32, gate_threshold_db: f32) -> f32 {
     if !rms_db.is_finite() || !gate_threshold_db.is_finite() {
         return 0.0;
@@ -70,10 +70,10 @@ pub fn compute_voice_ai_energy(rms_db: f32, gate_threshold_db: f32) -> f32 {
         0.05 + 0.20 * t
     } else if db <= -18.0 {
         let t = (db - (-28.0)) / 10.0;
-        0.25 + 0.75 * t.powf(1.4)
+        0.25 + 0.75 * t
     } else {
         let t = ((db - (-18.0)) / 18.0).clamp(0.0, 1.0);
-        1.0 + 3.0 * t.powf(1.25)
+        1.0 + 3.0 * t.powf(1.05)
     }
 }
 
@@ -730,27 +730,45 @@ mod tests {
         assert_eq!(compute_voice_ai_energy(-90.0, gate), 0.0);
         assert_eq!(compute_voice_ai_energy(-45.1, gate), 0.0);
 
-        // Soft whispers (-42..-28 dB): gentle whisper-safe band (0.05..0.25)
+        // Soft whispers (-42..-28 dB, and up to -27 dB): gentle whisper-safe band (< 0.35)
         let whisper_low = compute_voice_ai_energy(-42.0, gate);
         let whisper_mid = compute_voice_ai_energy(-35.0, gate);
         let whisper_high = compute_voice_ai_energy(-28.0, gate);
+        let whisper_edge = compute_voice_ai_energy(-27.0, gate);
         assert!((whisper_low - 0.05).abs() < 1e-4, "whisper_low={whisper_low}");
         assert!(
             whisper_mid > 0.05 && whisper_mid < 0.25,
             "whisper_mid={whisper_mid}"
         );
         assert!((whisper_high - 0.25).abs() < 1e-4, "whisper_high={whisper_high}");
+        assert!(
+            whisper_edge < 0.35,
+            "quiet whispering at -27 dB must stay stealth-safe (< 0.35), got {whisper_edge}"
+        );
 
-        // Normal speech (-28..-18 dB): smooth rise to 1.0
+        // Normal conversation (-24..-18 dB): sits cleanly in 0.5..=1.0
+        let talk_quiet = compute_voice_ai_energy(-24.0, gate);
         let normal = compute_voice_ai_energy(-22.0, gate);
         let loud_edge = compute_voice_ai_energy(-18.0, gate);
-        assert!(normal > whisper_high && normal < 1.0, "normal={normal}");
+        assert!(
+            (0.5..=1.0).contains(&talk_quiet),
+            "normal conversation at -24 dB should sit in 0.5..=1.0, got {talk_quiet}"
+        );
+        assert!(
+            (0.5..=1.0).contains(&normal) && normal > talk_quiet,
+            "normal={normal}"
+        );
         assert!((loud_edge - 1.0).abs() < 1e-4, "loud_edge={loud_edge}");
 
-        // Shouting / laughing (>-18 dB): rises steeply from 1.0 to 4.0
+        // Shouting / laughing (>-18 dB): cleanly spikes > 1.4 up to 4.0
+        let callout = compute_voice_ai_energy(-15.0, gate);
         let shout = compute_voice_ai_energy(-10.0, gate);
         let scream = compute_voice_ai_energy(0.0, gate);
-        assert!(shout > 1.5 && shout < 3.0, "shout={shout}");
+        assert!(
+            callout > 1.4,
+            "shouting/laughing at -15 dB must spike > 1.4, got {callout}"
+        );
+        assert!(shout > 1.8 && shout < 3.0, "shout={shout}");
         assert!((scream - 4.0).abs() < 1e-4, "scream={scream}");
 
         // Monotonically non-decreasing across full dBFS range

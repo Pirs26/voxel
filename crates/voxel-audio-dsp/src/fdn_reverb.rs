@@ -11,9 +11,11 @@ const BASE_DELAY_MS: [f32; CHANNELS] = [19.3, 23.7, 29.1, 35.9, 41.3, 47.7, 55.1
 pub struct FdnReverb {
     sample_rate: f32,
     damp_alpha: f32,
+    hp_alpha: f32,
     buffers: [Vec<f32>; CHANNELS],
     write_idx: [usize; CHANNELS],
     lp_state: [f32; CHANNELS],
+    hp_state: [f32; CHANNELS],
     smoothed_rt60: Bands3,
     smoothed_scale: f32,
     delay_samples: [usize; CHANNELS],
@@ -26,13 +28,16 @@ impl FdnReverb {
         let sr = sample_rate.max(1.0);
         let max_samples = ((sr * 0.25) as usize).max(2048);
         let buffers = std::array::from_fn(|_| vec![0.0f32; max_samples]);
-        let damp_alpha = 1.0 - (-TAU * 2400.0 / sr).exp();
+        let damp_alpha = 1.0 - (-TAU * 2600.0 / sr).exp();
+        let hp_alpha = 1.0 - (-TAU * 105.0 / sr).exp();
         let mut reverb = Self {
             sample_rate: sr,
             damp_alpha,
+            hp_alpha,
             buffers,
             write_idx: [0; CHANNELS],
             lp_state: [0.0; CHANNELS],
+            hp_state: [0.0; CHANNELS],
             smoothed_rt60: Bands3::new(0.8, 0.6, 0.4),
             smoothed_scale: 1.0,
             delay_samples: [16; CHANNELS],
@@ -46,7 +51,11 @@ impl FdnReverb {
     #[inline]
     fn recompute_cached_params(&mut self) {
         let rt_low = self.smoothed_rt60.0[0].clamp(0.12, 6.0);
+        let rt_mid = self.smoothed_rt60.0[1].clamp(0.12, 5.0);
         let rt_high = self.smoothed_rt60.0[2].clamp(0.10, 4.0);
+        // Weight core FDN decay toward the Mid band so vocal formants and footsteps stay
+        // clear and atmospheric without excessive low-frequency mud accumulation.
+        let rt_body = (rt_mid * 0.68 + rt_low * 0.32).clamp(0.12, 5.5);
 
         for (ch, &base_delay_ms) in BASE_DELAY_MS.iter().enumerate() {
             let buf_len = self.buffers[ch].len();
@@ -54,11 +63,11 @@ impl FdnReverb {
             self.delay_samples[ch] = ((delay_sec * self.sample_rate) as usize).clamp(16, buf_len - 2);
 
             // Compute exact per-delay feedback gain for target RT60: g = 10^(-3 * delay / RT60)
-            let g_low = 10.0f32.powf(-3.0 * delay_sec / rt_low).clamp(0.0, 0.965);
-            let g_high = 10.0f32.powf(-3.0 * delay_sec / rt_high).clamp(0.0, g_low);
-            self.fb_gains[ch] = g_low;
-            self.hf_ratios[ch] = if g_low > 1e-4 {
-                (g_high / g_low).clamp(0.05, 1.0)
+            let g_body = 10.0f32.powf(-3.0 * delay_sec / rt_body).clamp(0.0, 0.962);
+            let g_high = 10.0f32.powf(-3.0 * delay_sec / rt_high).clamp(0.0, g_body);
+            self.fb_gains[ch] = g_body;
+            self.hf_ratios[ch] = if g_body > 1e-4 {
+                (g_high / g_body).clamp(0.05, 1.0)
             } else {
                 0.5
             };
@@ -71,11 +80,11 @@ impl FdnReverb {
     #[inline]
     pub fn prepare_block(&mut self, target: ReverbEstimate, block_frames: usize) {
         // Advance exponential smoothing identically to `block_frames` per-sample steps
-        // (0.0005/sample for RT60, 0.0002/sample for room scale) so moving between shed
-        // & cavern never clicks while avoiding per-sample transcendental math.
+        // (0.00075/sample for RT60, 0.00035/sample for room scale) so moving through a
+        // breached doorway or between tunnel & cavern responds quickly without clicking.
         let n = block_frames.max(1) as f64;
-        let rt60_alpha = (1.0 - (1.0 - 0.0005_f64).powf(n)).clamp(0.0, 1.0) as f32;
-        let scale_alpha = (1.0 - (1.0 - 0.0002_f64).powf(n)).clamp(0.0, 1.0) as f32;
+        let rt60_alpha = (1.0 - (1.0 - 0.00075_f64).powf(n)).clamp(0.0, 1.0) as f32;
+        let scale_alpha = (1.0 - (1.0 - 0.00035_f64).powf(n)).clamp(0.0, 1.0) as f32;
 
         self.smoothed_rt60 = self.smoothed_rt60.lerp(target.rt60_sec, rt60_alpha);
         let target_scale = (target.mean_free_path_m / 10.0).clamp(0.45, 2.4);
@@ -104,15 +113,20 @@ impl FdnReverb {
         let mut out_l = 0.0f32;
         let mut out_r = 0.0f32;
         let damp_alpha = self.damp_alpha;
+        let hp_alpha = self.hp_alpha;
 
         for ch in 0..CHANNELS {
-            // Apply frequency-dependent wall damping inside the feedback loop
+            // 1. High-frequency wall/air absorption inside the feedback loop
             let s = mixed[ch];
             self.lp_state[ch] += (s - self.lp_state[ch]) * damp_alpha;
-            let damped = self.lp_state[ch] + (s - self.lp_state[ch]) * self.hf_ratios[ch];
+            let hf_damped = self.lp_state[ch] + (s - self.lp_state[ch]) * self.hf_ratios[ch];
+
+            // 2. Sub-105 Hz low-cut shelf prevents muddy bass buildup on voices & footsteps
+            self.hp_state[ch] += (hf_damped - self.hp_state[ch]) * hp_alpha;
+            let clean = hf_damped - self.hp_state[ch] * 0.28;
 
             let inj = if ch % 2 == 0 { in_l } else { in_r } * 0.35;
-            let next = (damped * self.fb_gains[ch] + inj).clamp(-8.0, 8.0);
+            let next = (clean * self.fb_gains[ch] + inj).clamp(-8.0, 8.0);
 
             let w = self.write_idx[ch];
             let buf = &mut self.buffers[ch];
@@ -221,5 +235,52 @@ mod tests {
                 blocked.smoothed_rt60.0[band]
             );
         }
+    }
+
+    #[test]
+    fn fdn_sub_bass_damping_prevents_dc_and_low_mud_buildup() {
+        let cavern = ReverbEstimate {
+            rt60_sec: Bands3::new(3.0, 2.4, 1.4),
+            mean_free_path_m: 12.0,
+            wet_mix: 0.6,
+            enclosure: 1.0,
+        };
+
+        let mut fdn_sub = FdnReverb::new(48_000.0);
+        let mut fdn_mid = FdnReverb::new(48_000.0);
+        fdn_sub.prepare_block(cavern, 48_000);
+        fdn_mid.prepare_block(cavern, 48_000);
+
+        // Excite both tanks with equal-amplitude 50 ms bursts:
+        // - `fdn_sub`: 40 Hz sub-bass rumble + DC offset (mud)
+        // - `fdn_mid`: 600 Hz vocal/footstep midrange tone
+        for i in 0..2_400 {
+            let t = i as f32 / 48_000.0;
+            let sub = 0.15 + (TAU * 40.0 * t).sin() * 0.5;
+            let mid = (TAU * 600.0 * t).sin() * 0.5;
+            let _ = fdn_sub.process_stereo_sample(sub, sub);
+            let _ = fdn_mid.process_stereo_sample(mid, mid);
+        }
+
+        // Advance 350 ms into the late reverb tail, then measure energy over the next 250 ms
+        for _ in 0..16_800 {
+            let _ = fdn_sub.process_stereo_sample(0.0, 0.0);
+            let _ = fdn_mid.process_stereo_sample(0.0, 0.0);
+        }
+
+        let mut late_sub_energy = 0.0f32;
+        let mut late_mid_energy = 0.0f32;
+        for _ in 0..12_000 {
+            let (sl, sr) = fdn_sub.process_stereo_sample(0.0, 0.0);
+            let (ml, mr) = fdn_mid.process_stereo_sample(0.0, 0.0);
+            assert!(sl.is_finite() && sr.is_finite() && ml.is_finite() && mr.is_finite());
+            late_sub_energy += sl * sl + sr * sr;
+            late_mid_energy += ml * ml + mr * mr;
+        }
+
+        assert!(
+            late_mid_energy > late_sub_energy * 2.0,
+            "FDN should preserve vocal/footstep midrange ({late_mid_energy}) while damping sub-bass mud ({late_sub_energy})"
+        );
     }
 }
