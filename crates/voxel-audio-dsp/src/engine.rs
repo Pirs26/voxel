@@ -53,6 +53,29 @@ pub enum AudioCommand {
     ClearVoiceChannel {
         slot: usize,
     },
+    /// Update master output volume and remote proximity voice chat volume.
+    SetVolumes {
+        master: f32,
+        voice: f32,
+    },
+}
+
+/// Enumerates available system audio output device names cleanly without panicking.
+pub fn list_output_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    let Ok(devices) = host.output_devices() else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for dev in devices {
+        if let Ok(desc) = dev.description() {
+            let name = desc.name().to_string();
+            if !name.is_empty() && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
 }
 
 struct Voice {
@@ -169,6 +192,8 @@ struct MixerState {
     listener_pos_m: Vec3,
     listener_right: Vec3,
     reverb: ReverbEstimate,
+    master_volume: f32,
+    voice_volume: f32,
 }
 
 impl MixerState {
@@ -281,6 +306,14 @@ impl MixerState {
                     while vc.rx.pop().is_ok() {}
                 }
             }
+            AudioCommand::SetVolumes { master, voice } => {
+                if master.is_finite() {
+                    self.master_volume = master.clamp(0.0, 2.0);
+                }
+                if voice.is_finite() {
+                    self.voice_volume = voice.clamp(0.0, 2.5);
+                }
+            }
         }
     }
 
@@ -357,7 +390,7 @@ impl MixerState {
                     }
                     vc.last_sample
                 }
-            };
+            } * self.voice_volume;
 
             // 2. Direct path: 3-band voxel density muffling filter + cached stereo equal-power panning
             let muffled = vc.filter.process(raw, vc.direct_gain);
@@ -381,8 +414,8 @@ impl MixerState {
 
         let (wet_l, wet_r) = self.fdn.process_stereo_sample(rev_in_l, rev_in_r);
         // Soft limiter to guarantee zero harsh digital clipping
-        let out_l = (dry_l + wet_l).tanh();
-        let out_r = (dry_r + wet_r).tanh();
+        let out_l = ((dry_l + wet_l) * self.master_volume).tanh();
+        let out_r = ((dry_r + wet_r) * self.master_volume).tanh();
         (out_l, out_r)
     }
 }
@@ -413,13 +446,26 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
-    /// Starts the real-time `cpal` output stream. Falls back cleanly to a silent no-op
-    /// handle if running on a headless machine without an audio device.
+    /// Starts the real-time `cpal` output stream on the system default output device.
     pub fn start() -> Self {
+        Self::start_with_device(None)
+    }
+
+    /// Starts the real-time `cpal` output stream on a named output device (falling back to
+    /// the system default if `device_name` is `None` or not found). Falls back cleanly to a
+    /// silent no-op handle on headless machines without an audio device.
+    pub fn start_with_device(device_name: Option<&str>) -> Self {
         let (tx, mut rx) = RingBuffer::<AudioCommand>::new(512);
 
         let host = cpal::default_host();
-        let Some(device) = host.default_output_device() else {
+        let selected = device_name.and_then(|wanted| {
+            host.output_devices().ok()?.find(|d| {
+                d.description()
+                    .map(|desc| desc.name() == wanted)
+                    .unwrap_or(false)
+            })
+        });
+        let Some(device) = selected.or_else(|| host.default_output_device()) else {
             let (voice_txs, _rxs) = create_voice_ring_pairs(VOICE_RING_CAPACITY);
             return Self {
                 _stream: None,
@@ -468,6 +514,8 @@ impl AudioEngine {
             listener_pos_m: Vec3::ZERO,
             listener_right: Vec3::X,
             reverb: ReverbEstimate::default(),
+            master_volume: 1.0,
+            voice_volume: 1.0,
         };
 
         let stream = device
@@ -604,6 +652,8 @@ mod tests {
                 wet_mix: 0.55,
                 enclosure: 0.9,
             },
+            master_volume: 1.0,
+            voice_volume: 1.0,
         };
 
         let mut early_taps = [EarlyTap::default(); MAX_EARLY_TAPS];
@@ -699,5 +749,19 @@ mod tests {
             turned_l > turned_r,
             "expected left-panned voice after listener turn: L={turned_l}, R={turned_r}"
         );
+
+        // Master mute via SetVolumes must produce exact silence
+        mixer.apply_command(AudioCommand::SetVolumes {
+            master: 0.0,
+            voice: 1.0,
+        });
+        for _ in 0..64 {
+            let (l, r) = mixer.render_frame();
+            assert_eq!(l, 0.0);
+            assert_eq!(r, 0.0);
+        }
+
+        // Device enumeration must never panic
+        let _ = list_output_devices();
     }
 }

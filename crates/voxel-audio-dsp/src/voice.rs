@@ -141,8 +141,27 @@ impl HighPass80Hz {
     }
 }
 
+/// Enumerates available system microphone input device names cleanly without panicking.
+pub fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    let Ok(devices) = host.input_devices() else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for dev in devices {
+        if let Ok(desc) = dev.description() {
+            let name = desc.name().to_string();
+            if !name.is_empty() && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
 struct MicSharedState {
     threshold_db_bits: AtomicU32,
+    input_gain_bits: AtomicU32,
     muted: AtomicBool,
     rms_db_bits: AtomicU32,
     gate_open: AtomicBool,
@@ -154,6 +173,7 @@ impl MicSharedState {
         let clamped = initial_threshold_db.clamp(-90.0, 0.0);
         Self {
             threshold_db_bits: AtomicU32::new(clamped.to_bits()),
+            input_gain_bits: AtomicU32::new(1.0f32.to_bits()),
             muted: AtomicBool::new(false),
             rms_db_bits: AtomicU32::new((-90.0f32).to_bits()),
             gate_open: AtomicBool::new(false),
@@ -192,9 +212,10 @@ impl CaptureProcessor {
     }
 
     #[inline]
-    fn process_mono(&mut self, mono: f32, threshold_linear_sq: f32, muted: bool) {
-        let mono = if mono.is_finite() {
-            mono.clamp(-4.0, 4.0)
+    fn process_mono(&mut self, mono: f32, input_gain: f32, threshold_linear_sq: f32, muted: bool) {
+        let scaled = mono * input_gain;
+        let mono = if scaled.is_finite() {
+            scaled.clamp(-4.0, 4.0)
         } else {
             0.0
         };
@@ -228,6 +249,7 @@ impl CaptureProcessor {
 
     fn process_interleaved_f32(&mut self, data: &[f32]) {
         let threshold_db = f32::from_bits(self.shared.threshold_db_bits.load(Ordering::Relaxed));
+        let input_gain = f32::from_bits(self.shared.input_gain_bits.load(Ordering::Relaxed));
         let threshold_linear_sq = threshold_db_to_linear_sq(threshold_db);
         let muted = self.shared.muted.load(Ordering::Relaxed);
         let ch = self.channels;
@@ -238,13 +260,14 @@ impl CaptureProcessor {
             for &s in frame {
                 sum += s;
             }
-            self.process_mono(sum * inv_ch, threshold_linear_sq, muted);
+            self.process_mono(sum * inv_ch, input_gain, threshold_linear_sq, muted);
         }
         self.publish_telemetry(muted);
     }
 
     fn process_interleaved_i16(&mut self, data: &[i16]) {
         let threshold_db = f32::from_bits(self.shared.threshold_db_bits.load(Ordering::Relaxed));
+        let input_gain = f32::from_bits(self.shared.input_gain_bits.load(Ordering::Relaxed));
         let threshold_linear_sq = threshold_db_to_linear_sq(threshold_db);
         let muted = self.shared.muted.load(Ordering::Relaxed);
         let ch = self.channels;
@@ -255,13 +278,14 @@ impl CaptureProcessor {
             for &s in frame {
                 sum += s as f32;
             }
-            self.process_mono(sum * inv_ch, threshold_linear_sq, muted);
+            self.process_mono(sum * inv_ch, input_gain, threshold_linear_sq, muted);
         }
         self.publish_telemetry(muted);
     }
 
     fn process_interleaved_u16(&mut self, data: &[u16]) {
         let threshold_db = f32::from_bits(self.shared.threshold_db_bits.load(Ordering::Relaxed));
+        let input_gain = f32::from_bits(self.shared.input_gain_bits.load(Ordering::Relaxed));
         let threshold_linear_sq = threshold_db_to_linear_sq(threshold_db);
         let muted = self.shared.muted.load(Ordering::Relaxed);
         let ch = self.channels;
@@ -272,13 +296,14 @@ impl CaptureProcessor {
             for &s in frame {
                 sum += (s as f32 / 32768.0) - 1.0;
             }
-            self.process_mono(sum * inv_ch, threshold_linear_sq, muted);
+            self.process_mono(sum * inv_ch, input_gain, threshold_linear_sq, muted);
         }
         self.publish_telemetry(muted);
     }
 
     fn process_interleaved_i32(&mut self, data: &[i32]) {
         let threshold_db = f32::from_bits(self.shared.threshold_db_bits.load(Ordering::Relaxed));
+        let input_gain = f32::from_bits(self.shared.input_gain_bits.load(Ordering::Relaxed));
         let threshold_linear_sq = threshold_db_to_linear_sq(threshold_db);
         let muted = self.shared.muted.load(Ordering::Relaxed);
         let ch = self.channels;
@@ -289,13 +314,19 @@ impl CaptureProcessor {
             for &s in frame {
                 sum += s as f64 / 2_147_483_648.0;
             }
-            self.process_mono((sum * inv_ch) as f32, threshold_linear_sq, muted);
+            self.process_mono(
+                (sum * inv_ch) as f32,
+                input_gain,
+                threshold_linear_sq,
+                muted,
+            );
         }
         self.publish_telemetry(muted);
     }
 
     fn process_interleaved_f64(&mut self, data: &[f64]) {
         let threshold_db = f32::from_bits(self.shared.threshold_db_bits.load(Ordering::Relaxed));
+        let input_gain = f32::from_bits(self.shared.input_gain_bits.load(Ordering::Relaxed));
         let threshold_linear_sq = threshold_db_to_linear_sq(threshold_db);
         let muted = self.shared.muted.load(Ordering::Relaxed);
         let ch = self.channels;
@@ -306,7 +337,12 @@ impl CaptureProcessor {
             for &s in frame {
                 sum += s;
             }
-            self.process_mono((sum * inv_ch) as f32, threshold_linear_sq, muted);
+            self.process_mono(
+                (sum * inv_ch) as f32,
+                input_gain,
+                threshold_linear_sq,
+                muted,
+            );
         }
         self.publish_telemetry(muted);
     }
@@ -355,11 +391,17 @@ pub struct MicCapture {
 impl MicCapture {
     /// Starts capturing from the system default microphone with the given noise gate threshold (dBFS).
     pub fn start(initial_threshold_db: f32) -> Self {
+        Self::start_with_device(initial_threshold_db, None)
+    }
+
+    /// Starts capturing from a named microphone device (falling back to the system default if
+    /// `device_name` is `None` or not found).
+    pub fn start_with_device(initial_threshold_db: f32, device_name: Option<&str>) -> Self {
         let (tx, rx) = RingBuffer::<f32>::new(MIC_RING_CAPACITY);
         let shared = Arc::new(MicSharedState::new(initial_threshold_db));
         let codec = OpusCodec::new().ok();
 
-        let stream = start_input_stream(tx, Arc::clone(&shared));
+        let stream = start_input_stream(tx, Arc::clone(&shared), device_name);
         if stream.is_some() {
             shared.available.store(true, Ordering::Relaxed);
         }
@@ -374,6 +416,21 @@ impl MicCapture {
             hang_frames: 0,
             seq: 0,
         }
+    }
+
+    pub fn set_input_gain(&self, gain: f32) {
+        let clamped = if gain.is_finite() {
+            gain.clamp(0.1, 4.0)
+        } else {
+            1.0
+        };
+        self.shared
+            .input_gain_bits
+            .store(clamped.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn input_gain(&self) -> f32 {
+        f32::from_bits(self.shared.input_gain_bits.load(Ordering::Relaxed))
     }
 
     pub fn set_gate_threshold_db(&self, db: f32) {
@@ -486,9 +543,17 @@ impl MicCapture {
 fn start_input_stream(
     tx: Producer<f32>,
     shared: Arc<MicSharedState>,
+    device_name: Option<&str>,
 ) -> Option<cpal::Stream> {
     let host = cpal::default_host();
-    let device = host.default_input_device()?;
+    let selected = device_name.and_then(|wanted| {
+        host.input_devices().ok()?.find(|d| {
+            d.description()
+                .map(|desc| desc.name() == wanted)
+                .unwrap_or(false)
+        })
+    });
+    let device = selected.or_else(|| host.default_input_device())?;
     let default_cfg = device.default_input_config().ok()?;
 
     let in_rate = default_cfg.sample_rate() as f32;
@@ -752,5 +817,18 @@ mod tests {
         shared.muted.store(true, Ordering::Relaxed);
         proc.process_interleaved_f32(&loud[..256]);
         assert!(!shared.gate_open.load(Ordering::Relaxed));
+
+        // Input gain boosts signal level cleanly
+        shared.muted.store(false, Ordering::Relaxed);
+        shared.input_gain_bits.store(3.0f32.to_bits(), Ordering::Relaxed);
+        let soft: Vec<f32> = (0..2048)
+            .map(|i| (TAU * 440.0 * i as f32 / VOICE_SAMPLE_RATE as f32).sin() * 0.03)
+            .collect();
+        proc.process_interleaved_f32(&soft);
+        let boosted_db = f32::from_bits(shared.rms_db_bits.load(Ordering::Relaxed));
+        assert!(boosted_db > -28.0, "expected boosted signal > -28 dB, got {boosted_db}");
+
+        // Device enumeration must never panic
+        let _ = list_input_devices();
     }
 }

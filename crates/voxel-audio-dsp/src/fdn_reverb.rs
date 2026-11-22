@@ -48,9 +48,9 @@ impl FdnReverb {
         let rt_low = self.smoothed_rt60.0[0].clamp(0.12, 6.0);
         let rt_high = self.smoothed_rt60.0[2].clamp(0.10, 4.0);
 
-        for ch in 0..CHANNELS {
+        for (ch, &base_delay_ms) in BASE_DELAY_MS.iter().enumerate() {
             let buf_len = self.buffers[ch].len();
-            let delay_sec = (BASE_DELAY_MS[ch] * 0.001 * self.smoothed_scale).clamp(0.008, 0.22);
+            let delay_sec = (base_delay_ms * 0.001 * self.smoothed_scale).clamp(0.008, 0.22);
             self.delay_samples[ch] = ((delay_sec * self.sample_rate) as usize).clamp(16, buf_len - 2);
 
             // Compute exact per-delay feedback gain for target RT60: g = 10^(-3 * delay / RT60)
@@ -89,13 +89,13 @@ impl FdnReverb {
     pub fn process_stereo_sample(&mut self, in_l: f32, in_r: f32) -> (f32, f32) {
         let mut delayed = [0.0f32; CHANNELS];
 
-        for ch in 0..CHANNELS {
+        for (ch, slot) in delayed.iter_mut().enumerate() {
             let buf = &self.buffers[ch];
             let buf_len = buf.len();
             let w = self.write_idx[ch];
             let d = self.delay_samples[ch];
             let read_idx = if w >= d { w - d } else { w + buf_len - d };
-            delayed[ch] = buf[read_idx];
+            *slot = buf[read_idx];
         }
 
         // Fast orthonormal 8x8 Walsh-Hadamard mixing matrix (energy-preserving!)
