@@ -8,13 +8,40 @@ use std::{
 
 use bevy::{
     prelude::*,
-    window::{MonitorSelection, PrimaryWindow, WindowMode},
+    window::{MonitorSelection, PrimaryWindow, VideoModeSelection, WindowMode},
 };
 use serde::{Deserialize, Serialize};
 
 pub const FOV_MIN_DEG: f32 = 60.0;
 pub const FOV_MAX_DEG: f32 = 110.0;
 pub const DEFAULT_FOV_DEG: f32 = 75.0;
+
+/// Window presentation mode selectable in Settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DisplayMode {
+    #[default]
+    Windowed,
+    Borderless,
+    Fullscreen,
+}
+
+impl DisplayMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Windowed => Self::Borderless,
+            Self::Borderless => Self::Fullscreen,
+            Self::Fullscreen => Self::Windowed,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Windowed => "Windowed",
+            Self::Borderless => "Borderless Fullscreen",
+            Self::Fullscreen => "Exclusive Fullscreen",
+        }
+    }
+}
 
 /// Top-level application screen controlling Main Menu vs live Shed/Cave gameplay.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -38,7 +65,12 @@ pub struct UserSettings {
     pub player_name: String,
     pub visor_idx: usize,
     pub fov_deg: f32,
+    /// Legacy boolean kept for backward compatibility with older `settings.json` files.
+    #[serde(default)]
     pub fullscreen: bool,
+    /// Active display presentation mode (Windowed / Borderless / Exclusive Fullscreen).
+    #[serde(default)]
+    pub display_mode: Option<DisplayMode>,
     pub master_volume: f32,
     pub voice_volume: f32,
     pub mic_gain: f32,
@@ -57,6 +89,7 @@ impl Default for UserSettings {
             visor_idx: 0,
             fov_deg: DEFAULT_FOV_DEG,
             fullscreen: false,
+            display_mode: Some(DisplayMode::Windowed),
             master_volume: 1.0,
             voice_volume: 1.0,
             mic_gain: 1.0,
@@ -69,11 +102,34 @@ impl Default for UserSettings {
 }
 
 impl UserSettings {
+    /// Portable settings location inside the game folder (separate from `saves/`).
     pub fn default_path() -> PathBuf {
+        PathBuf::from("config").join("settings.json")
+    }
+
+    /// Legacy settings location from `v0.1.0`–`v0.1.3` (auto-migrated on first launch).
+    pub fn legacy_path() -> PathBuf {
         PathBuf::from("saves").join("settings.json")
     }
 
+    pub fn effective_display_mode(&self) -> DisplayMode {
+        self.display_mode.unwrap_or(if self.fullscreen {
+            DisplayMode::Borderless
+        } else {
+            DisplayMode::Windowed
+        })
+    }
+
+    pub fn cycle_display_mode(&mut self) {
+        let next = self.effective_display_mode().next();
+        self.display_mode = Some(next);
+        self.fullscreen = next != DisplayMode::Windowed;
+    }
+
     pub fn sanitize(&mut self) {
+        let mode = self.effective_display_mode();
+        self.display_mode = Some(mode);
+        self.fullscreen = mode != DisplayMode::Windowed;
         let trimmed = self.player_name.trim();
         if trimmed.is_empty() {
             self.player_name = "Miner".to_string();
@@ -108,7 +164,22 @@ impl UserSettings {
     }
 
     pub fn load_default() -> Self {
-        Self::load_from_path(&Self::default_path()).unwrap_or_default()
+        Self::load_with_migration(&Self::default_path(), &Self::legacy_path())
+    }
+
+    /// Loads settings from `primary`, transparently migrating from `legacy` if `primary` does
+    /// not yet exist.
+    pub fn load_with_migration(primary: &Path, legacy: &Path) -> Self {
+        if let Ok(settings) = Self::load_from_path(primary) {
+            return settings;
+        }
+        if let Ok(migrated) = Self::load_from_path(legacy) {
+            if migrated.save_to_path(primary).is_ok() {
+                let _ = fs::remove_file(legacy);
+            }
+            return migrated;
+        }
+        Self::default()
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self, String> {
@@ -167,10 +238,12 @@ fn apply_video_settings_system(
     }
 
     if let Ok(mut window) = win_q.single_mut() {
-        let desired = if settings.fullscreen {
-            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
-        } else {
-            WindowMode::Windowed
+        let desired = match settings.effective_display_mode() {
+            DisplayMode::Windowed => WindowMode::Windowed,
+            DisplayMode::Borderless => WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+            DisplayMode::Fullscreen => {
+                WindowMode::Fullscreen(MonitorSelection::Current, VideoModeSelection::Current)
+            }
         };
         if window.mode != desired {
             window.mode = desired;
@@ -191,6 +264,7 @@ mod tests {
             visor_idx: 3,
             fov_deg: 200.0,
             fullscreen: true,
+            display_mode: Some(DisplayMode::Fullscreen),
             master_volume: -1.0,
             voice_volume: 9.0,
             mic_gain: 0.01,
@@ -221,5 +295,30 @@ mod tests {
         if let Some(dir) = path.parent() {
             let _ = fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn migrates_legacy_settings_out_of_saves_into_config() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let root = std::env::temp_dir().join(format!("echoes_below_settings_mig_{nanos}"));
+        let legacy = root.join("saves").join("settings.json");
+        let primary = root.join("config").join("settings.json");
+
+        let old = UserSettings {
+            fov_deg: 95.0,
+            display_mode: Some(DisplayMode::Fullscreen),
+            ..Default::default()
+        };
+        old.save_to_path(&legacy).expect("write legacy settings");
+
+        let loaded = UserSettings::load_with_migration(&primary, &legacy);
+        assert_eq!(loaded.fov_deg, 95.0);
+        assert_eq!(loaded.effective_display_mode(), DisplayMode::Fullscreen);
+        assert!(primary.is_file(), "migrated config/settings.json must exist");
+        assert!(!legacy.exists(), "legacy saves/settings.json should be cleaned up");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

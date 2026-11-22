@@ -1,4 +1,6 @@
 /target
+/saves
+/config
 Cargo.lock
 .DS_Store
 *.swp
