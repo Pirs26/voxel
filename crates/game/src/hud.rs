@@ -108,16 +108,29 @@ struct ShopSaveTagText;
 #[derive(Component, Clone, Copy)]
 struct ShopTierTab(u8);
 
-// ---- Settings Markers ----
+// ---- Settings & Dynamic Toggle Button Markers ----
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToggleKind {
+    Mute,
+    SelfEcho,
+    Fullscreen,
+}
+
+#[derive(Component, Clone, Copy)]
+struct ToggleButtonPill {
+    kind: ToggleKind,
+    hovered: bool,
+}
+
+#[derive(Component, Clone, Copy)]
+struct ToggleButtonLabel(ToggleKind);
 
 #[derive(Component)]
 struct OutputDeviceLabel;
 
 #[derive(Component)]
 struct InputDeviceLabel;
-
-#[derive(Component)]
-struct FullscreenButtonLabel;
 
 #[derive(Component)]
 struct SettingsMicBadgeText;
@@ -367,10 +380,69 @@ fn spawn_pill_button(
                         ..default()
                     },
                     TextColor(COL_TEXT_BRIGHT),
+                    Pickable::IGNORE,
                 ))
                 .id();
         });
     text_ent
+}
+
+/// Interactive toggle pill whose background, border, and label dynamically reflect live ON/OFF state.
+fn spawn_toggle_btn(
+    parent: &mut ChildSpawnerCommands,
+    initial_label: &str,
+    action: UiAction,
+    kind: ToggleKind,
+) {
+    parent
+        .spawn((
+            Node {
+                padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
+                border: UiRect::all(Val::Px(1.5)),
+                border_radius: BorderRadius::all(Val::Px(6.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.11, 0.16, 0.22, 0.96)),
+            BorderColor::all(COL_BORDER_DIM),
+            action,
+            ToggleButtonPill {
+                kind,
+                hovered: false,
+            },
+        ))
+        .observe(
+            move |_click: On<PointerClick>, mut writer: MessageWriter<TriggerUiAction>| {
+                writer.write(TriggerUiAction(action));
+            },
+        )
+        .observe(
+            |over: On<PointerOver>, mut pill_q: Query<&mut ToggleButtonPill>| {
+                if let Ok(mut pill) = pill_q.get_mut(over.entity) {
+                    pill.hovered = true;
+                }
+            },
+        )
+        .observe(
+            |out: On<PointerOut>, mut pill_q: Query<&mut ToggleButtonPill>| {
+                if let Ok(mut pill) = pill_q.get_mut(out.entity) {
+                    pill.hovered = false;
+                }
+            },
+        )
+        .with_children(|btn| {
+            btn.spawn((
+                Text::new(initial_label),
+                TextFont {
+                    font_size: FontSize::Px(13.0),
+                    ..default()
+                },
+                TextColor(COL_TEXT_BRIGHT),
+                Pickable::IGNORE,
+                ToggleButtonLabel(kind),
+            ));
+        });
 }
 
 fn spawn_std_btn(parent: &mut ChildSpawnerCommands, label: &str, action: UiAction) -> Entity {
@@ -586,6 +658,7 @@ fn setup_hud(mut commands: Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgba(0.015, 0.025, 0.04, 0.76)),
+            GlobalZIndex(20),
             Visibility::Visible,
             UiPanelKind::MainMenu,
         ))
@@ -1002,6 +1075,7 @@ fn setup_hud(mut commands: Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgba(0.015, 0.025, 0.04, 0.80)),
+            GlobalZIndex(50),
             Visibility::Hidden,
             UiPanelKind::Settings,
         ))
@@ -1059,9 +1133,12 @@ fn setup_hud(mut commands: Commands) {
                                 },
                                 TextColor(COL_TEXT_BRIGHT),
                             ));
-                            let lbl_ent =
-                                spawn_std_btn(row, "Windowed", UiAction::ToggleFullscreen);
-                            row.commands().entity(lbl_ent).insert(FullscreenButtonLabel);
+                            spawn_toggle_btn(
+                                row,
+                                "Windowed",
+                                UiAction::ToggleFullscreen,
+                                ToggleKind::Fullscreen,
+                            );
                         });
 
                     // Audio Output row
@@ -1222,8 +1299,18 @@ fn setup_hud(mut commands: Commands) {
                             })
                             .with_children(|left| {
                                 spawn_std_btn(left, "Refresh Devices", UiAction::RefreshAudioDevices);
-                                spawn_std_btn(left, "Mute Mic", UiAction::ToggleMute);
-                                spawn_std_btn(left, "Self-Echo", UiAction::ToggleSelfEcho);
+                                spawn_toggle_btn(
+                                    left,
+                                    "Mic: LIVE",
+                                    UiAction::ToggleMute,
+                                    ToggleKind::Mute,
+                                );
+                                spawn_toggle_btn(
+                                    left,
+                                    "Self-Echo: OFF",
+                                    UiAction::ToggleSelfEcho,
+                                    ToggleKind::SelfEcho,
+                                );
                             });
                             spawn_accent_btn(row, "Done", UiAction::CloseSettings);
                         });
@@ -1241,11 +1328,13 @@ fn setup_hud(mut commands: Commands) {
                 height: Val::Percent(100.0),
                 ..default()
             },
+            GlobalZIndex(10),
+            Pickable::IGNORE,
             Visibility::Hidden,
             UiPanelKind::InGameHud,
         ))
         .with_children(|hud| {
-            // Damage / Downed subtle red screen vignette
+            // Damage / Downed subtle red screen vignette (must ignore pointer hits!)
             hud.spawn((
                 Node {
                     position_type: PositionType::Absolute,
@@ -1254,6 +1343,7 @@ fn setup_hud(mut commands: Commands) {
                     ..default()
                 },
                 BackgroundColor(Color::srgba(0.85, 0.08, 0.08, 0.0)),
+                Pickable::IGNORE,
                 DamageFlashOverlay,
             ));
 
@@ -2126,6 +2216,7 @@ fn setup_hud(mut commands: Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgba(0.015, 0.025, 0.04, 0.62)),
+            GlobalZIndex(40),
             Visibility::Hidden,
             UiPanelKind::CoopMenu,
         ))
@@ -2197,8 +2288,18 @@ fn setup_hud(mut commands: Commands) {
                         .with_children(|row| {
                             spawn_std_btn(row, "Copy Join Code", UiAction::CopyJoinCode);
                             spawn_std_btn(row, "Cycle Visor", UiAction::CycleVisor);
-                            spawn_std_btn(row, "Mute [M]", UiAction::ToggleMute);
-                            spawn_std_btn(row, "Self-Echo [V]", UiAction::ToggleSelfEcho);
+                            spawn_toggle_btn(
+                                row,
+                                "Mic: LIVE [M]",
+                                UiAction::ToggleMute,
+                                ToggleKind::Mute,
+                            );
+                            spawn_toggle_btn(
+                                row,
+                                "Self-Echo: OFF [V]",
+                                UiAction::ToggleSelfEcho,
+                                ToggleKind::SelfEcho,
+                            );
                         });
 
                     panel
@@ -2238,6 +2339,7 @@ fn setup_hud(mut commands: Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgba(0.015, 0.025, 0.04, 0.68)),
+            GlobalZIndex(30),
             Visibility::Hidden,
             UiPanelKind::ShopOverlay,
         ))
@@ -2849,31 +2951,38 @@ fn update_panel_visibility_system(
     inv: Res<PlayerInventory>,
     target: Res<CrosshairTargetState>,
     toast: Res<GameplayToast>,
-    mut panels_q: Query<(&UiPanelKind, &mut Visibility)>,
+    mut panels_q: Query<(&UiPanelKind, &mut Visibility, &mut Node)>,
 ) {
     let in_game = *screen == AppScreen::InGame;
     let gameplay_clear = in_game && !menu_open.0 && !shop_open.0 && !settings_open.0;
-    let vis = |show: bool| {
-        if show {
+
+    for (kind, mut v, mut node) in &mut panels_q {
+        let show = match kind {
+            UiPanelKind::MainMenu => !in_game && !settings_open.0,
+            UiPanelKind::Settings => settings_open.0,
+            UiPanelKind::InGameHud => in_game,
+            UiPanelKind::CoopMenu => in_game && menu_open.0 && !settings_open.0,
+            UiPanelKind::ShopOverlay => in_game && shop_open.0 && !settings_open.0,
+            UiPanelKind::Crosshair => gameplay_clear,
+            UiPanelKind::TargetCard => gameplay_clear && !target.label.is_empty(),
+            UiPanelKind::ToastCard => gameplay_clear && !toast.text.is_empty(),
+            UiPanelKind::BatteryTray => gameplay_clear && inv.battery_selector.open,
+            UiPanelKind::DiagDrawer => in_game && diag_open.0,
+        };
+        *v = if show {
             Visibility::Visible
         } else {
             Visibility::Hidden
-        }
-    };
-
-    for (kind, mut v) in &mut panels_q {
-        *v = match kind {
-            UiPanelKind::MainMenu => vis(!in_game && !settings_open.0),
-            UiPanelKind::Settings => vis(settings_open.0),
-            UiPanelKind::InGameHud => vis(in_game),
-            UiPanelKind::CoopMenu => vis(in_game && menu_open.0 && !settings_open.0),
-            UiPanelKind::ShopOverlay => vis(in_game && shop_open.0 && !settings_open.0),
-            UiPanelKind::Crosshair => vis(gameplay_clear),
-            UiPanelKind::TargetCard => vis(gameplay_clear && !target.label.is_empty()),
-            UiPanelKind::ToastCard => vis(gameplay_clear && !toast.text.is_empty()),
-            UiPanelKind::BatteryTray => vis(gameplay_clear && inv.battery_selector.open),
-            UiPanelKind::DiagDrawer => vis(in_game && diag_open.0),
         };
+        if matches!(
+            kind,
+            UiPanelKind::MainMenu
+                | UiPanelKind::Settings
+                | UiPanelKind::CoopMenu
+                | UiPanelKind::ShopOverlay
+        ) {
+            node.display = if show { Display::Flex } else { Display::None };
+        }
     }
 }
 
@@ -3535,12 +3644,13 @@ fn update_settings_widgets_system(
     mut bg_set: ParamSet<(
         Query<(&SliderSegment, &mut BackgroundColor)>,
         Query<(&SettingsMicLed, &mut BackgroundColor)>,
+        Query<(&ToggleButtonPill, &mut BackgroundColor, &mut BorderColor)>,
     )>,
     mut text_set: ParamSet<(
         Query<(&SliderValueText, &mut Text)>,
         Query<&mut Text, With<OutputDeviceLabel>>,
         Query<&mut Text, With<InputDeviceLabel>>,
-        Query<&mut Text, With<FullscreenButtonLabel>>,
+        Query<(&ToggleButtonLabel, &mut Text)>,
         Query<&mut Text, With<SettingsMicBadgeText>>,
     )>,
 ) {
@@ -3575,6 +3685,58 @@ fn update_settings_widgets_system(
         };
     }
 
+    for (pill, mut bg, mut border) in &mut bg_set.p2() {
+        let (base_col, hover_col, border_col) = match pill.kind {
+            ToggleKind::Mute => {
+                if voice_settings.muted {
+                    (
+                        Color::srgba(0.42, 0.11, 0.13, 0.98),
+                        Color::srgba(0.56, 0.17, 0.19, 0.98),
+                        COL_ACCENT_RED,
+                    )
+                } else {
+                    (
+                        Color::srgba(0.08, 0.28, 0.18, 0.96),
+                        Color::srgba(0.12, 0.39, 0.25, 0.98),
+                        COL_ACCENT_GREEN,
+                    )
+                }
+            }
+            ToggleKind::SelfEcho => {
+                if voice_settings.self_echo_test {
+                    (
+                        Color::srgba(0.09, 0.30, 0.34, 0.98),
+                        Color::srgba(0.14, 0.43, 0.47, 0.98),
+                        COL_ACCENT_CYAN,
+                    )
+                } else {
+                    (
+                        Color::srgba(0.11, 0.16, 0.22, 0.96),
+                        Color::srgba(0.18, 0.28, 0.36, 0.98),
+                        COL_BORDER_DIM,
+                    )
+                }
+            }
+            ToggleKind::Fullscreen => {
+                if user_settings.fullscreen {
+                    (
+                        Color::srgba(0.09, 0.30, 0.34, 0.98),
+                        Color::srgba(0.14, 0.43, 0.47, 0.98),
+                        COL_ACCENT_CYAN,
+                    )
+                } else {
+                    (
+                        Color::srgba(0.11, 0.16, 0.22, 0.96),
+                        Color::srgba(0.18, 0.28, 0.36, 0.98),
+                        COL_BORDER_DIM,
+                    )
+                }
+            }
+        };
+        *bg = BackgroundColor(if pill.hovered { hover_col } else { base_col });
+        *border = BorderColor::all(border_col);
+    }
+
     for (val_tag, mut t) in &mut text_set.p0() {
         t.0 = match val_tag.0 {
             SliderKind::Fov => format!("{:.0}°", user_settings.fov_deg),
@@ -3591,11 +3753,29 @@ fn update_settings_widgets_system(
     if let Ok(mut t) = text_set.p2().single_mut() {
         t.0 = truncate_device_name(user_settings.input_device.as_deref());
     }
-    if let Ok(mut t) = text_set.p3().single_mut() {
-        t.0 = if user_settings.fullscreen {
-            "Borderless Fullscreen".to_string()
-        } else {
-            "Windowed".to_string()
+    for (lbl, mut t) in &mut text_set.p3() {
+        t.0 = match lbl.0 {
+            ToggleKind::Mute => {
+                if voice_settings.muted {
+                    "Mic: MUTED [M]".to_string()
+                } else {
+                    "Mic: LIVE [M]".to_string()
+                }
+            }
+            ToggleKind::SelfEcho => {
+                if voice_settings.self_echo_test {
+                    "Self-Echo: ON [V]".to_string()
+                } else {
+                    "Self-Echo: OFF [V]".to_string()
+                }
+            }
+            ToggleKind::Fullscreen => {
+                if user_settings.fullscreen {
+                    "Borderless Fullscreen".to_string()
+                } else {
+                    "Windowed".to_string()
+                }
+            }
         };
     }
     if let Ok(mut t) = text_set.p4().single_mut() {
@@ -3646,7 +3826,7 @@ fn update_diagnostics_drawer_system(
     };
     if let Ok(mut t) = diag_q.single_mut() {
         t.0 = format!(
-            "[F3] ACOUSTIC TELEMETRY\nRT60 L/M/H: {:.2}/{:.2}/{:.2}s  |  MFP {:.1}m\n{}\nControls: [E] Use  [LMB] Strike/Break  [RMB] Foam  [F] Light  [R] Battery  [G] Flare  [T] Decoy  [B] Shop",
+            "[F3] ACOUSTIC TELEMETRY\nRT60 L/M/H: {:.2}/{:.2}/{:.2}s  |  MFP {:.1}m\n{}\nControls: [E] Interact  [RMB] Use Held Item  [LMB] Pickaxe  [R] Battery  [Q] Drop  [B] Shop",
             rev.rt60_sec.0[0],
             rev.rt60_sec.0[1],
             rev.rt60_sec.0[2],
