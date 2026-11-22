@@ -16,6 +16,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 glam = { version = "0.33.2", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 rand = "0.10"
 noise = "0.9"
 cpal = "0.18"
@@ -63,9 +64,11 @@ voxel-acoustics = { path = "crates/voxel-acoustics" }
 voxel-audio-dsp = { path = "crates/voxel-audio-dsp" }
 voxel-net = { path = "crates/voxel-net" }
 
-# Fast runtime performance in dev builds (essential for Bevy + voxel raytracing)
+# Fast runtime performance & compact dev binaries (avoids >2GB PE limit on windows-gnu!)
 [profile.dev]
 opt-level = 1
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = false

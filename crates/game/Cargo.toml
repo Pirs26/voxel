@@ -11,6 +11,8 @@ fast-dev = ["bevy/dynamic_linking"]
 [dependencies]
 bevy.workspace = true
 glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 voxel-core.workspace = true
 voxel-acoustics.workspace = true
 voxel-audio-dsp.workspace = true
