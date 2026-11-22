@@ -68,6 +68,7 @@ struct DiagnosticsDrawerOpen(bool);
 struct SaveDropdownState {
     open: bool,
     page: usize,
+    delete_armed_slot: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +160,9 @@ struct SaveDropdownPagerRow;
 
 #[derive(Component)]
 struct SaveDropdownPageLabel;
+
+#[derive(Component)]
+struct DeleteSaveLabel;
 
 #[derive(Component)]
 struct SaveNameModalTitle;
@@ -409,7 +413,6 @@ enum UiAction {
     PlaySolo,
     HostLobby,
     PasteAndJoin,
-    CancelConnecting,
     FocusNameInput,
     SelectVisor(usize),
     ToggleSaveDropdown,
@@ -417,6 +420,7 @@ enum UiAction {
     SaveListPage(i32),
     OpenNewSavePrompt,
     OpenRenameSavePrompt,
+    DeleteSaveSlot,
     FocusSaveNameInput,
     BlurSaveNameInput,
     ConfirmSaveNamePrompt,
@@ -1542,12 +1546,20 @@ fn setup_hud(mut commands: Commands) {
 
                                 sec.spawn(Node {
                                     flex_direction: FlexDirection::Row,
+                                    flex_wrap: FlexWrap::Wrap,
                                     column_gap: Val::Px(6.0),
+                                    row_gap: Val::Px(6.0),
                                     ..default()
                                 })
                                 .with_children(|row| {
-                                    spawn_std_btn(row, "+ New Save", UiAction::OpenNewSavePrompt);
+                                    spawn_std_btn(row, "+ New", UiAction::OpenNewSavePrompt);
                                     spawn_std_btn(row, "Rename", UiAction::OpenRenameSavePrompt);
+                                    let del_txt = spawn_danger_btn(
+                                        row,
+                                        "Delete",
+                                        UiAction::DeleteSaveSlot,
+                                    );
+                                    row.commands().entity(del_txt).insert(DeleteSaveLabel);
                                     spawn_std_btn(row, "Refresh", UiAction::RefreshSaveSlots);
                                 });
                             });
@@ -1591,7 +1603,6 @@ fn setup_hud(mut commands: Commands) {
                                 })
                                 .with_children(|row| {
                                     spawn_std_btn(row, "Settings", UiAction::OpenSettings);
-                                    spawn_std_btn(row, "Cancel", UiAction::CancelConnecting);
                                     spawn_danger_btn(row, "Quit", UiAction::QuitGame);
                                 });
                         });
@@ -3791,6 +3802,9 @@ fn handle_ui_actions_system(
         if !matches!(action, UiAction::FocusNameInput) {
             name_focused.0 = false;
         }
+        if !matches!(action, UiAction::DeleteSaveSlot) {
+            save_dropdown.delete_armed_slot = None;
+        }
         match action {
             UiAction::FocusNameInput => name_focused.0 = true,
             UiAction::SelectVisor(idx) => {
@@ -3855,6 +3869,41 @@ fn handle_ui_actions_system(
                 save_prompt.default_hint.clear();
                 save_prompt.target_old_name = current;
                 save_prompt.error_text.clear();
+            }
+            UiAction::DeleteSaveSlot => {
+                save_browser.refresh();
+                save_dropdown.open = false;
+                let selected_slot = save_browser.selected().cloned();
+                match selected_slot {
+                    Some(slot) if !slot.exists_on_disk => {
+                        save_dropdown.delete_armed_slot = None;
+                        coop.status_text = "No saved file on disk to delete.".into();
+                    }
+                    Some(slot)
+                        if save_dropdown.delete_armed_slot.as_deref()
+                            == Some(slot.slot_name.as_str()) =>
+                    {
+                        save_dropdown.delete_armed_slot = None;
+                        match save_browser.delete_selected_slot() {
+                            Ok(deleted) => {
+                                save_dropdown.page =
+                                    save_browser.selected_idx / SAVE_DROPDOWN_ROWS;
+                                coop.status_text = format!("Deleted save '{deleted}'");
+                            }
+                            Err(e) => coop.status_text = format!("Delete failed: {e}"),
+                        }
+                    }
+                    Some(slot) => {
+                        save_dropdown.delete_armed_slot = Some(slot.slot_name.clone());
+                        coop.status_text = format!(
+                            "Click 'Are you sure?' again to permanently delete '{}'",
+                            slot.slot_name
+                        );
+                    }
+                    None => {
+                        save_dropdown.delete_armed_slot = None;
+                    }
+                }
             }
             UiAction::FocusSaveNameInput => {
                 if save_prompt.open {
@@ -3936,13 +3985,6 @@ fn handle_ui_actions_system(
                 } else {
                     coop.status_text = "Clipboard empty — copy host's ECHO-... code first!".into();
                 }
-            }
-            UiAction::CancelConnecting => {
-                clear_remote_players(&mut commands, coop, &mut remove_voice);
-                coop.session = None;
-                coop.join_code = None;
-                coop.pending_disconnect_s = None;
-                coop.status_text = "Cancelled — Ready".into();
             }
             UiAction::OpenSettings => {
                 save_prompt.open = false;
@@ -4324,11 +4366,27 @@ fn update_save_dropdown_system(
         Query<(&SaveDropdownRowName, &mut Text, &mut TextColor)>,
         Query<(&SaveDropdownRowMeta, &mut Text)>,
         Query<&mut Text, With<SaveDropdownPageLabel>>,
+        Query<&mut Text, With<DeleteSaveLabel>>,
     )>,
 ) {
     let total_pages = save_browser.slots.len().div_ceil(SAVE_DROPDOWN_ROWS).max(1);
     if dropdown.page >= total_pages {
         dropdown.page = total_pages - 1;
+    }
+
+    let delete_armed = dropdown
+        .delete_armed_slot
+        .as_deref()
+        .is_some_and(|armed| armed == save_browser.selected_slot_name());
+    if !delete_armed {
+        dropdown.delete_armed_slot = None;
+    }
+    if let Ok(mut del_txt) = texts.p4().single_mut() {
+        del_txt.0 = if delete_armed {
+            "Are you sure?".to_string()
+        } else {
+            "Delete".to_string()
+        };
     }
 
     if let Ok(mut ch) = texts.p0().single_mut() {

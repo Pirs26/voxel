@@ -487,6 +487,32 @@ impl SaveSlotBrowser {
         }
         Ok(safe_new)
     }
+
+    /// Permanently deletes the currently selected save slot `.json` file from disk
+    /// and selects the next remaining slot (or the unsaved `default` placeholder if none remain).
+    pub fn delete_selected_slot(&mut self) -> Result<String, String> {
+        self.delete_selected_slot_in_dir(Path::new("saves"))
+    }
+
+    pub fn delete_selected_slot_in_dir(&mut self, dir: &Path) -> Result<String, String> {
+        self.refresh_in_dir(dir);
+        let Some(selected) = self.selected().cloned() else {
+            return Err("No save slot selected".to_string());
+        };
+        if !selected.exists_on_disk {
+            return Err("No saved file on disk to delete".to_string());
+        }
+        let path = dir.join(format!("{}.json", selected.slot_name));
+        if !path.exists() {
+            self.refresh_in_dir(dir);
+            return Err("Save file was already removed".to_string());
+        }
+        fs::remove_file(&path)
+            .map_err(|err| format!("Failed to delete {}: {err}", path.display()))?;
+        let deleted = selected.slot_name;
+        self.refresh_in_dir(dir);
+        Ok(deleted)
+    }
 }
 
 /// Scans `dir` for campaign save `.json` files (excluding `settings.json`) and returns sorted summaries.
@@ -842,5 +868,46 @@ mod tests {
         }
         assert_eq!(save.parkour_leaderboard.len(), MAX_PARKOUR_LEADERBOARD);
         assert_eq!(save.record_parkour_run("Slowest", 99_999).rank, None);
+    }
+
+    #[test]
+    fn delete_selected_slot_removes_file_and_handles_last_save() {
+        let path = unique_temp_save_path("delete_slot");
+        let dir = path.parent().expect("temp dir");
+        fs::create_dir_all(dir).expect("create dir");
+
+        let mut browser = SaveSlotBrowser {
+            slots: Vec::new(),
+            selected_idx: 0,
+        };
+        browser.refresh_in_dir(dir);
+        // Deleting unsaved placeholder must fail cleanly
+        assert!(browser.delete_selected_slot_in_dir(dir).is_err());
+
+        browser
+            .create_named_slot_in_dir(dir, "alpha")
+            .expect("create alpha");
+        browser
+            .create_named_slot_in_dir(dir, "beta")
+            .expect("create beta");
+        assert_eq!(browser.selected_slot_name(), "beta");
+
+        let deleted = browser
+            .delete_selected_slot_in_dir(dir)
+            .expect("delete beta");
+        assert_eq!(deleted, "beta");
+        assert!(!dir.join("beta.json").exists());
+        assert_eq!(browser.selected_slot_name(), "alpha");
+
+        let deleted_last = browser
+            .delete_selected_slot_in_dir(dir)
+            .expect("delete alpha");
+        assert_eq!(deleted_last, "alpha");
+        assert!(!dir.join("alpha.json").exists());
+        assert_eq!(browser.selected_slot_name(), DEFAULT_SAVE_SLOT);
+        assert!(!browser.selected().unwrap().exists_on_disk);
+        assert!(browser.delete_selected_slot_in_dir(dir).is_err());
+
+        let _ = fs::remove_dir_all(dir);
     }
 }
