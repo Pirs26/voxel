@@ -35,9 +35,9 @@ pub enum MonsterArchetype {
 /// `HeavyLurker` moves at ~78% of `Stalker` speed across all states.
 pub fn speeds_for_archetype(depth_tier: u8, archetype: MonsterArchetype) -> (f32, f32, f32, f32) {
     let (p, i, h, c) = match depth_tier.clamp(1, 3) {
-        1 => (0.95, 1.35, 2.15, 0.95),
-        2 => (1.15, 1.65, 2.55, 1.10),
-        _ => (1.35, 1.95, 2.95, 1.25),
+        1 => (1.10, 1.65, 2.85, 1.15),
+        2 => (1.30, 1.95, 3.25, 1.30),
+        _ => (1.50, 2.25, 3.65, 1.45),
     };
     match archetype {
         MonsterArchetype::Stalker => (p, i, h, c),
@@ -76,7 +76,7 @@ pub fn stalker_hit_aabb(feet_pos_m: Vec3) -> (Vec3, Vec3) {
 
 const STRIKE_HORIZ_RANGE_M: f32 = 1.75;
 const STRIKE_VERT_RANGE_M: f32 = 1.5;
-const ATTACK_COOLDOWN_S: f32 = 5.5;
+const ATTACK_COOLDOWN_S: f32 = 3.2;
 const FOOTSTEP_STRIDE_M: f32 = 1.35;
 const DEFAULT_PATH_MAX_NODES: usize = 600;
 
@@ -94,6 +94,7 @@ pub enum StalkerState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StalkerHitResult {
     Stunned { remaining_hp: u8, max_hp: u8 },
+    Enraged { remaining_hp: u8, max_hp: u8 },
     Killed,
 }
 
@@ -124,6 +125,10 @@ pub struct BlindStalker {
     /// While > 0, the stalker is strongly distracted by a loud Noise Decoy and ignores
     /// quieter noises like solo Heavy Relic scraping so players can slip past!
     pub decoy_lock_s: f32,
+    pub stun_immunity_s: f32,
+    pub flash_immunity_s: f32,
+    pub enrage_s: f32,
+    pub last_attacker_pos_m: Option<Vec3>,
     pub hp: u8,
     pub max_hp: u8,
     pub band_sensitivity: Bands3,
@@ -146,9 +151,14 @@ impl BlindStalker {
     ) -> Self {
         let tier = depth_tier.clamp(1, 3);
         let stalker_hp = match tier {
-            1 => 3u8,
-            2 => 4u8,
-            _ => 5u8,
+            1 => 6u8,
+            2 => 8u8,
+            _ => 10u8,
+        };
+        let lurker_hp = match tier {
+            1 => 10u8,
+            2 => 13u8,
+            _ => 16u8,
         };
         let (hearing_threshold, hunt_threshold, max_hp, band_sensitivity) = match archetype {
             MonsterArchetype::Stalker => {
@@ -168,7 +178,7 @@ impl BlindStalker {
                 };
                 // Low-frequency rumble sensitivity: Heavy Relic scraping, elevator winch machinery,
                 // and heavy impacts even through thick stone walls, while barely noticing quiet speech.
-                (hearing, hunt, stalker_hp + 2, Bands3::new(2.2, 0.55, 0.30))
+                (hearing, hunt, lurker_hp, Bands3::new(2.2, 0.55, 0.30))
             }
         };
 
@@ -188,12 +198,34 @@ impl BlindStalker {
             repath_timer_s: 0.0,
             spawn_grace_s: STALKER_SPAWN_GRACE_S,
             decoy_lock_s: 0.0,
+            stun_immunity_s: 0.0,
+            flash_immunity_s: 0.0,
+            enrage_s: 0.0,
+            last_attacker_pos_m: None,
             hp: max_hp,
             max_hp,
             band_sensitivity,
             hearing_threshold,
             hunt_threshold,
             depth_tier: tier,
+        }
+    }
+}
+
+fn apply_short_knockback(world: &VoxelWorld, stalker: &mut BlindStalker, horiz: Vec3) {
+    if horiz.length_squared() <= 0.1 {
+        return;
+    }
+    let sub_step = match stalker.archetype {
+        MonsterArchetype::Stalker => 0.20,
+        MonsterArchetype::HeavyLurker => 0.10,
+    };
+    for _ in 0..2 {
+        let cand = stalker.feet_pos_m + horiz * sub_step;
+        if !stalker_body_overlaps_solid(world, cand) {
+            stalker.feet_pos_m = cand;
+        } else {
+            break;
         }
     }
 }
@@ -211,28 +243,76 @@ pub fn apply_stalker_hit(
         return StalkerHitResult::Killed;
     }
 
-    stalker.state = StalkerState::Stunned;
-    stalker.state_timer_s = stalker.state_timer_s.max(stun_s.max(1.0));
-    stalker.waypoints.clear();
-    stalker.target_pos_m = None;
-    stalker.repath_timer_s = 0.0;
-
-    // Short collision-safe horizontal stagger away from the strike
     let horiz = Vec3::new(knockback_dir.x, 0.0, knockback_dir.z).normalize_or_zero();
     if horiz.length_squared() > 0.1 {
-        for step in [0.45f32, 0.40] {
-            let cand = stalker.feet_pos_m + horiz * step;
-            if !stalker_body_overlaps_solid(world, cand) {
-                stalker.feet_pos_m = cand;
-            } else {
-                break;
-            }
-        }
+        stalker.last_attacker_pos_m = Some(stalker.feet_pos_m - horiz * 2.2);
     }
 
-    StalkerHitResult::Stunned {
-        remaining_hp: stalker.hp,
-        max_hp: stalker.max_hp,
+    if damage == 0 {
+        // Flare Flash-Stun
+        if stalker.flash_immunity_s <= 0.0 {
+            let eff_stun_s = if stalker.archetype == MonsterArchetype::HeavyLurker {
+                (stun_s * 0.65).max(1.8)
+            } else {
+                stun_s.max(3.2)
+            };
+            stalker.state_timer_s = if stalker.state == StalkerState::Stunned {
+                stalker.state_timer_s.max(eff_stun_s)
+            } else {
+                eff_stun_s
+            };
+            stalker.state = StalkerState::Stunned;
+            stalker.flash_immunity_s = 8.0;
+            stalker.waypoints.clear();
+            stalker.repath_timer_s = 0.0;
+            apply_short_knockback(world, stalker, horiz);
+            StalkerHitResult::Stunned {
+                remaining_hp: stalker.hp,
+                max_hp: stalker.max_hp,
+            }
+        } else {
+            stalker.enrage_s = stalker.enrage_s.max(2.5);
+            stalker.state = StalkerState::Hunt;
+            stalker.state_timer_s = stalker.state_timer_s.max(6.0);
+            stalker.target_pos_m = stalker.last_attacker_pos_m.or(stalker.target_pos_m);
+            stalker.repath_timer_s = 0.0;
+            StalkerHitResult::Enraged {
+                remaining_hp: stalker.hp,
+                max_hp: stalker.max_hp,
+            }
+        }
+    } else if stalker.stun_immunity_s <= 0.0 {
+        // Pickaxe Melee Strike: brief tactical stagger
+        let eff_stun_s = if stalker.archetype == MonsterArchetype::HeavyLurker {
+            0.55
+        } else {
+            stun_s.clamp(0.85, 1.35)
+        };
+        stalker.state_timer_s = if stalker.state == StalkerState::Stunned {
+            stalker.state_timer_s.max(eff_stun_s)
+        } else {
+            eff_stun_s
+        };
+        stalker.state = StalkerState::Stunned;
+        stalker.stun_immunity_s = 6.0;
+        stalker.waypoints.clear();
+        stalker.repath_timer_s = 0.0;
+        apply_short_knockback(world, stalker, horiz);
+        StalkerHitResult::Stunned {
+            remaining_hp: stalker.hp,
+            max_hp: stalker.max_hp,
+        }
+    } else {
+        // Anti-stunlock: DO NOT STUN! Enraged counter-lunge!
+        stalker.enrage_s = 3.5;
+        stalker.state = StalkerState::Hunt;
+        stalker.state_timer_s = stalker.state_timer_s.max(6.0);
+        stalker.target_pos_m = stalker.last_attacker_pos_m.or(stalker.target_pos_m);
+        stalker.repath_timer_s = 0.0;
+        StalkerHitResult::Enraged {
+            remaining_hp: stalker.hp,
+            max_hp: stalker.max_hp,
+        }
     }
 }
 
@@ -658,12 +738,22 @@ pub fn step_stalker_ai(
     stalker.state_timer_s = (stalker.state_timer_s - dt).max(0.0);
     stalker.spawn_grace_s = (stalker.spawn_grace_s - dt).max(0.0);
     stalker.decoy_lock_s = (stalker.decoy_lock_s - dt).max(0.0);
+    stalker.stun_immunity_s = (stalker.stun_immunity_s - dt).max(0.0);
+    stalker.flash_immunity_s = (stalker.flash_immunity_s - dt).max(0.0);
+    stalker.enrage_s = (stalker.enrage_s - dt).max(0.0);
 
     if stalker.state == StalkerState::Stunned {
         if stalker.state_timer_s <= 0.0 {
-            stalker.state = StalkerState::Patrol;
-            stalker.target_pos_m = None;
             stalker.waypoints.clear();
+            stalker.repath_timer_s = 0.0;
+            if let Some(pos) = stalker.last_attacker_pos_m {
+                stalker.state = StalkerState::Hunt;
+                stalker.state_timer_s = 5.5;
+                stalker.target_pos_m = Some(pos);
+            } else {
+                stalker.state = StalkerState::Patrol;
+                stalker.target_pos_m = None;
+            }
         }
         return output;
     }
@@ -756,10 +846,11 @@ pub fn step_stalker_ai(
     // 5. Follow waypoints & steer smoothly without clipping into solid voxels
     let (patrol_spd, invest_spd, hunt_spd, cooldown_spd) =
         speeds_for_archetype(stalker.depth_tier, stalker.archetype);
+    let hunt_mult = if stalker.enrage_s > 0.0 { 1.25 } else { 1.0 };
     let speed = match stalker.state {
         StalkerState::Patrol => patrol_spd,
         StalkerState::Investigate => invest_spd,
-        StalkerState::Hunt => hunt_spd,
+        StalkerState::Hunt => hunt_spd * hunt_mult,
         StalkerState::AttackCooldown => cooldown_spd,
         StalkerState::Stunned => 0.0,
     };
@@ -1449,7 +1540,7 @@ mod tests {
         assert!(p1 < p2 && p2 < p3);
         assert!(i1 < i2 && i2 < i3);
         assert!(h1 < h2 && h2 < h3);
-        assert!(h3 < 3.5, "even Tier 3 hunt speed should stay below player walk");
+        assert!(h3 < 4.0, "even Tier 3 hunt speed should stay below player walk");
     }
 
     #[test]
@@ -1458,15 +1549,15 @@ mod tests {
         let start = voxel_feet_world_pos(cfg, IVec3::new(10, 5, 10));
         let mut stalker = BlindStalker::new(7, start, 1);
         stalker.spawn_grace_s = 0.0;
-        assert_eq!(stalker.hp, 3);
+        assert_eq!(stalker.hp, 6);
 
         // Hit 1 stuns & knocks back
-        let r1 = apply_stalker_hit(&world, &mut stalker, 1, 3.0, Vec3::X);
+        let r1 = apply_stalker_hit(&world, &mut stalker, 1, 1.15, Vec3::X);
         assert_eq!(
             r1,
             StalkerHitResult::Stunned {
-                remaining_hp: 2,
-                max_hp: 3
+                remaining_hp: 5,
+                max_hp: 6
             }
         );
         assert_eq!(stalker.state, StalkerState::Stunned);
@@ -1477,15 +1568,67 @@ mod tests {
         let step = step_stalker_ai(&world, &mut stalker, &[(1, pos_now)], 0.1);
         assert!(step.strike_target.is_none());
 
-        // Hit 2 & Hit 3 kill the stalker
-        assert!(matches!(
-            apply_stalker_hit(&world, &mut stalker, 1, 3.0, Vec3::X),
-            StalkerHitResult::Stunned { remaining_hp: 1, .. }
-        ));
+        // Subsequent hits reduce HP and eventually kill the stalker
         assert_eq!(
-            apply_stalker_hit(&world, &mut stalker, 1, 3.0, Vec3::X),
+            apply_stalker_hit(&world, &mut stalker, 5, 1.15, Vec3::X),
             StalkerHitResult::Killed
         );
+    }
+
+    #[test]
+    fn anti_stunlock_triggers_enraged_counter_lunge_while_flare_still_stuns() {
+        let (cfg, world) = build_flat_cave_room(UVec3::splat(1));
+        let start = voxel_feet_world_pos(cfg, IVec3::new(10, 5, 10));
+        let mut stalker = BlindStalker::new(8, start, 1);
+        stalker.spawn_grace_s = 0.0;
+        assert_eq!(stalker.hp, 6);
+        assert_eq!(stalker.max_hp, 6);
+
+        // 1. First melee hit staggers briefly and sets stun_immunity_s > 0.0
+        let r1 = apply_stalker_hit(&world, &mut stalker, 1, 1.15, Vec3::X);
+        assert_eq!(
+            r1,
+            StalkerHitResult::Stunned {
+                remaining_hp: 5,
+                max_hp: 6
+            }
+        );
+        assert_eq!(stalker.state, StalkerState::Stunned);
+        assert!(stalker.stun_immunity_s > 0.0);
+        assert!(stalker.last_attacker_pos_m.is_some());
+
+        // 2. Immediate second melee hit deals damage, does NOT stun, returns Enraged, enters Hunt with enrage_s > 0.0
+        let r2 = apply_stalker_hit(&world, &mut stalker, 1, 1.15, Vec3::X);
+        assert_eq!(
+            r2,
+            StalkerHitResult::Enraged {
+                remaining_hp: 4,
+                max_hp: 6
+            }
+        );
+        assert_eq!(stalker.state, StalkerState::Hunt);
+        assert!(stalker.enrage_s > 0.0);
+        assert_eq!(stalker.target_pos_m, stalker.last_attacker_pos_m);
+
+        // 3. A Flare flash-stun (damage == 0) still stuns an enraged Stalker when flash_immunity_s == 0.0!
+        assert_eq!(stalker.flash_immunity_s, 0.0);
+        let r_flare = apply_stalker_hit(&world, &mut stalker, 0, 3.5, Vec3::X);
+        assert_eq!(
+            r_flare,
+            StalkerHitResult::Stunned {
+                remaining_hp: 4,
+                max_hp: 6
+            }
+        );
+        assert_eq!(stalker.state, StalkerState::Stunned);
+        assert!(stalker.flash_immunity_s > 0.0);
+
+        // 4. Once a stun ends, the Stalker hunts toward last_attacker_pos_m rather than passively patrolling
+        stalker.state_timer_s = 0.05;
+        let expected_target = stalker.last_attacker_pos_m;
+        let _ = step_stalker_ai(&world, &mut stalker, &[], 0.10);
+        assert_eq!(stalker.state, StalkerState::Hunt);
+        assert_eq!(stalker.target_pos_m, expected_target);
     }
 
     #[test]
@@ -1508,9 +1651,10 @@ mod tests {
         stalker.spawn_grace_s = 0.0;
         lurker.spawn_grace_s = 0.0;
 
-        // 1. HeavyLurker is tankier (+2 HP) and slower across all states than Stalker
+        // 1. HeavyLurker is tankier (+4 HP in Tier 1: 10 vs 6) and slower across all states than Stalker
         assert_eq!(lurker.archetype, MonsterArchetype::HeavyLurker);
-        assert_eq!(lurker.max_hp, stalker.max_hp + 2);
+        assert_eq!(stalker.max_hp, 6);
+        assert_eq!(lurker.max_hp, 10);
         assert_eq!(lurker.hp, lurker.max_hp);
         assert_eq!(lurker.band_sensitivity, Bands3::new(2.2, 0.55, 0.30));
 

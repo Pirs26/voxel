@@ -104,7 +104,7 @@ struct ToolGateRes<'w> {
     health: Res<'w, PlayerHealthState>,
 }
 
-/// Left click: Strike a Stalker in crosshair melee range (`3.2m`, stuns & damages!) OR break
+/// Left click: Strike a Stalker in crosshair melee range (`2.55m`, stuns & damages!) OR break
 /// `CrackedRock` / `AcousticFoam` (breaching shortcuts & uncovering tunnels!).
 /// Right click: Spray/place `AcousticFoam` (consumes 1 charge from belt AcousticFoam canister!).
 #[allow(clippy::too_many_arguments)]
@@ -157,7 +157,7 @@ fn voxel_interact_system(
 
     // Priority on `[LMB]`: Check crosshair melee pickaxe strike against Blind Stalkers first!
     if break_pressed && *melee_cd_s <= 0.0 {
-        let max_melee_m = hit.as_ref().map_or(3.2f32, |h| h.distance_m.min(3.2));
+        let max_melee_m = hit.as_ref().map_or(2.55f32, |h| h.distance_m.min(2.55));
         let mut best_stalker: Option<(f32, u16, Vec3)> = None;
         for (stf, host_s, remote_s) in &stalkers_q {
             let (monster_id, archetype) = if let Some(s) = host_s {
@@ -181,11 +181,11 @@ fn voxel_interact_system(
         }
 
         if let Some((_, monster_id, hit_pos_m)) = best_stalker {
-            *melee_cd_s = 0.42;
+            *melee_cd_s = 0.95;
             strike_writer.write(StrikeStalkerEvent {
                 monster_id,
                 damage: 1,
-                stun_s: 3.2,
+                stun_s: 1.15,
                 knockback_dir: dir,
                 hit_pos_m,
             });
@@ -502,7 +502,7 @@ fn update_flares_system(
                     strike_writer.write(StrikeStalkerEvent {
                         monster_id,
                         damage: 0,
-                        stun_s: 4.0,
+                        stun_s: 3.5,
                         knockback_dir: knock,
                         hit_pos_m: pos,
                     });

@@ -2723,6 +2723,11 @@ fn blind_stalker_ai_system(
             if ev.monster_id != stalker.monster_id {
                 continue;
             }
+            let label = if stalker.archetype == MonsterArchetype::HeavyLurker {
+                "Heavy Lurker"
+            } else {
+                "Stalker"
+            };
             match apply_stalker_hit(&world, &mut stalker, ev.damage, ev.stun_s, ev.knockback_dir) {
                 StalkerHitResult::Stunned {
                     remaining_hp,
@@ -2737,18 +2742,32 @@ fn blind_stalker_ai_system(
                     });
                     if ev.damage > 0 {
                         toast.show(
-                            format!(
-                                "STUNNED Stalker ({:.1}s)! HP {remaining_hp}/{max_hp}",
-                                ev.stun_s
-                            ),
+                            format!("{label} staggered! ({remaining_hp}/{max_hp} HP) — RUN!"),
                             2.2,
                         );
                     } else {
-                        toast.show(
-                            format!("FLASH-STUNNED Stalker ({:.1}s)!", ev.stun_s),
-                            2.4,
-                        );
+                        toast.show(format!("Flash-Stunned {label}!"), 2.4);
                     }
+                }
+                StalkerHitResult::Enraged {
+                    remaining_hp,
+                    max_hp,
+                } => {
+                    sound_writer.write(PlaySpatialSoundEvent {
+                        pos_m: stalker.feet_pos_m + Vec3::Y * 1.5,
+                        clip: SynthClip::MonsterScreech,
+                        volume: 1.0,
+                        pitch: if stalker.archetype == MonsterArchetype::HeavyLurker {
+                            0.62
+                        } else {
+                            1.32
+                        },
+                        ai_event: None,
+                    });
+                    toast.show(
+                        format!("{label} ENRAGED! Stun-immune ({remaining_hp}/{max_hp} HP)"),
+                        2.4,
+                    );
                 }
                 StalkerHitResult::Killed => {
                     killed = true;
@@ -2757,11 +2776,6 @@ fn blind_stalker_ai_system(
                         75
                     } else {
                         45
-                    };
-                    let name = if stalker.archetype == MonsterArchetype::HeavyLurker {
-                        "Heavy Lurker"
-                    } else {
-                        "Stalker"
                     };
                     coop.send_monster_killed(stalker.monster_id, drop_pos);
                     sound_writer.write(PlaySpatialSoundEvent {
@@ -2789,7 +2803,7 @@ fn blind_stalker_ai_system(
                     spawn_item_writer.write(SpawnWorldItemEvent(loot_state));
                     commands.entity(ent).despawn();
                     toast.show(
-                        format!("{name} ELIMINATED! Dropped Crystal (+{bounty} cr)"),
+                        format!("{label} ELIMINATED! Dropped Crystal (+{bounty} cr)"),
                         3.2,
                     );
                     break;
