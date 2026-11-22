@@ -9,8 +9,9 @@ pub mod session;
 pub mod ticket;
 
 pub use protocol::{
-    PlayerId, PlayerInfo, ReliableMessage, UnreliableDatagram, decode_datagram, decode_reliable,
-    encode_datagram, encode_reliable,
+    ElevatorPhase, MonsterBehaviorState, PlayerHealthStatus, PlayerId, PlayerInfo,
+    ReliableMessage, UnreliableDatagram, WorldItemKind, WorldItemNetState, decode_datagram,
+    decode_reliable, encode_datagram, encode_reliable,
 };
 pub use session::{NetEvent, NetSession};
 pub use ticket::{decode_join_code, encode_join_code};
@@ -35,42 +36,198 @@ mod tests {
 
     #[test]
     fn reliable_message_roundtrip() {
-        let msg = ReliableMessage::VoxelDelta {
-            coord: IVec3::new(12, 34, 56),
-            material: VoxelId::AcousticFoam,
+        let sample_relic = WorldItemNetState {
+            id: 7,
+            kind: WorldItemKind::HeavyRelic {
+                value: 250,
+                weight_kg: 48.5,
+            },
+            pos_m: Vec3::new(10.0, 29.5, -14.2),
+            vel_m: Vec3::new(0.0, -0.5, 0.25),
+            in_shed: false,
+            carried_by: vec![0, 1],
+            active_timer_s: None,
         };
-        let bytes = encode_reliable(&msg).expect("encode");
-        let decoded = decode_reliable(&bytes).expect("decode");
-        match decoded {
-            ReliableMessage::VoxelDelta { coord, material } => {
-                assert_eq!(coord, IVec3::new(12, 34, 56));
-                assert_eq!(material, VoxelId::AcousticFoam);
-            }
-            _ => panic!("wrong variant"),
+        let sample_decoy = WorldItemNetState {
+            id: 12,
+            kind: WorldItemKind::NoiseDecoy { count: 2 },
+            pos_m: Vec3::new(1.0, 2.0, 3.0),
+            vel_m: Vec3::ZERO,
+            in_shed: true,
+            carried_by: vec![],
+            active_timer_s: Some(4.5),
+        };
+
+        let all_messages = vec![
+            ReliableMessage::Handshake {
+                player_name: "Scout".to_string(),
+                visor_rgb: [0.1, 0.9, 0.5],
+            },
+            ReliableMessage::Welcome {
+                assigned_id: 2,
+                level_seed: 0xDEAD_BEEF,
+                depth_tier: 2,
+                elevator_phase: ElevatorPhase::CaveIdle,
+                credits: 420,
+                world_items: vec![sample_relic.clone(), sample_decoy.clone()],
+                players: vec![PlayerInfo {
+                    id: 0,
+                    name: "Host".to_string(),
+                    visor_rgb: [0.2, 0.8, 1.0],
+                }],
+                voxel_edits: vec![(IVec3::new(1, 2, 3), VoxelId::AcousticFoam)],
+                beacon_pos_m: Vec3::new(5.0, 6.0, 7.0),
+            },
+            ReliableMessage::StartDescent {
+                level_seed: 998877,
+                depth_tier: 3,
+            },
+            ReliableMessage::VoxelDelta {
+                coord: IVec3::new(12, 34, 56),
+                material: VoxelId::AcousticFoam,
+            },
+            ReliableMessage::ElevatorStateSync {
+                phase: ElevatorPhase::WinchActive,
+                platform_y_m: 29.7,
+                phase_timer_s: 32.5,
+                depth_tier: 2,
+                cave_seed: 123456,
+            },
+            ReliableMessage::RequestElevatorAction { depth_tier: 3 },
+            ReliableMessage::WorldItemSpawn(sample_relic.clone()),
+            ReliableMessage::WorldItemUpdate(sample_decoy),
+            ReliableMessage::WorldItemSpawn(WorldItemNetState {
+                id: 13,
+                kind: WorldItemKind::BonusLoot { value: 65 },
+                pos_m: Vec3::ZERO,
+                vel_m: Vec3::ZERO,
+                in_shed: false,
+                carried_by: vec![],
+                active_timer_s: None,
+            }),
+            ReliableMessage::WorldItemSpawn(WorldItemNetState {
+                id: 14,
+                kind: WorldItemKind::BatteryCell { charge: 0.72 },
+                pos_m: Vec3::ZERO,
+                vel_m: Vec3::ZERO,
+                in_shed: true,
+                carried_by: vec![],
+                active_timer_s: None,
+            }),
+            ReliableMessage::WorldItemSpawn(WorldItemNetState {
+                id: 15,
+                kind: WorldItemKind::FlarePack { count: 4 },
+                pos_m: Vec3::ZERO,
+                vel_m: Vec3::ZERO,
+                in_shed: true,
+                carried_by: vec![],
+                active_timer_s: None,
+            }),
+            ReliableMessage::WorldItemSpawn(WorldItemNetState {
+                id: 16,
+                kind: WorldItemKind::FoamCanister { charges: 8 },
+                pos_m: Vec3::ZERO,
+                vel_m: Vec3::ZERO,
+                in_shed: true,
+                carried_by: vec![],
+                active_timer_s: None,
+            }),
+            ReliableMessage::WorldItemSpawn(WorldItemNetState {
+                id: 17,
+                kind: WorldItemKind::AidKit,
+                pos_m: Vec3::ZERO,
+                vel_m: Vec3::ZERO,
+                in_shed: true,
+                carried_by: vec![],
+                active_timer_s: None,
+            }),
+            ReliableMessage::WorldItemSpawn(WorldItemNetState {
+                id: 18,
+                kind: WorldItemKind::Flashlight { battery: 0.95 },
+                pos_m: Vec3::ZERO,
+                vel_m: Vec3::ZERO,
+                in_shed: true,
+                carried_by: vec![],
+                active_timer_s: None,
+            }),
+            ReliableMessage::WorldItemRemove { item_id: 7 },
+            ReliableMessage::PlayerHealthSync {
+                player_id: 1,
+                status: PlayerHealthStatus::Healthy,
+            },
+            ReliableMessage::PlayerHealthSync {
+                player_id: 1,
+                status: PlayerHealthStatus::Downed {
+                    bleedout_s: 45.25,
+                    dragged_by: Some(0),
+                },
+            },
+            ReliableMessage::PlayerHealthSync {
+                player_id: 1,
+                status: PlayerHealthStatus::Dead,
+            },
+            ReliableMessage::PlayerRevived {
+                target_id: 1,
+                reviver_id: 0,
+            },
+            ReliableMessage::CreditsSync {
+                credits: 1250,
+                unlocked_depth_tier: 3,
+            },
+            ReliableMessage::PlayerProfileSync {
+                player_name: "HostDiver".to_string(),
+                visor_rgb: [0.2, 0.8, 1.0],
+                inventory_json: r#"{"belt":["flashlight","aid_kit"]}"#.to_string(),
+            },
+            ReliableMessage::DecoyTriggered {
+                pos_m: Vec3::new(33.0, 29.8, -11.5),
+            },
+            ReliableMessage::MonsterAttack {
+                target_player_id: 1,
+                monster_pos_m: Vec3::new(34.5, 29.8, -10.0),
+            },
+        ];
+
+        for msg in all_messages {
+            let bytes = encode_reliable(&msg).expect("encode reliable");
+            let decoded = decode_reliable(&bytes).expect("decode reliable");
+            assert_eq!(decoded, msg);
         }
     }
 
     #[test]
     fn datagram_roundtrip() {
-        let pose = UnreliableDatagram::PlayerPose {
-            player_id: 2,
-            tick: 120,
-            feet_pos_m: Vec3::new(1.5, 2.0, -3.25),
-            yaw: 1.2,
-            pitch: -0.35,
-            crouching: true,
-            flashlight_on: false,
-        };
-        let bytes = encode_datagram(&pose).expect("encode pose");
-        assert_eq!(decode_datagram(&bytes).expect("decode pose"), pose);
+        let datagrams = vec![
+            UnreliableDatagram::PlayerPose {
+                player_id: 2,
+                tick: 120,
+                feet_pos_m: Vec3::new(1.5, 2.0, -3.25),
+                yaw: 1.2,
+                pitch: -0.35,
+                crouching: true,
+                flashlight_on: false,
+            },
+            UnreliableDatagram::VoiceFrame {
+                speaker_id: 1,
+                seq: 42,
+                opus_payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            },
+            UnreliableDatagram::MonsterPose {
+                monster_id: 3,
+                pos_m: Vec3::new(42.5, 29.7, -8.25),
+                yaw: -2.15,
+                state: MonsterBehaviorState::Hunt,
+            },
+            UnreliableDatagram::ItemPose {
+                item_id: 99,
+                pos_m: Vec3::new(18.0, 30.1, 4.75),
+            },
+        ];
 
-        let voice = UnreliableDatagram::VoiceFrame {
-            speaker_id: 1,
-            seq: 42,
-            opus_payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
-        };
-        let bytes = encode_datagram(&voice).expect("encode voice");
-        assert_eq!(decode_datagram(&bytes).expect("decode voice"), voice);
+        for dgram in datagrams {
+            let bytes = encode_datagram(&dgram).expect("encode datagram");
+            assert_eq!(decode_datagram(&bytes).expect("decode datagram"), dgram);
+        }
     }
 
     #[test]
@@ -130,6 +287,30 @@ mod tests {
         let join_code = join_code.expect("host did not emit HostReady in time");
         assert_eq!(host.join_code().as_deref(), Some(join_code.as_str()));
 
+        // Update host authoritative state before client joins to verify atomic Welcome sync.
+        let initial_item = WorldItemNetState {
+            id: 1,
+            kind: WorldItemKind::BatteryCell { charge: 0.85 },
+            pos_m: Vec3::new(2.0, 87.3, 1.0),
+            vel_m: Vec3::ZERO,
+            in_shed: true,
+            carried_by: vec![],
+            active_timer_s: None,
+        };
+        host.send_reliable(ReliableMessage::CreditsSync {
+            credits: 350,
+            unlocked_depth_tier: 2,
+        });
+        host.send_reliable(ReliableMessage::WorldItemSpawn(initial_item.clone()));
+        host.send_reliable(ReliableMessage::ElevatorStateSync {
+            phase: ElevatorPhase::ShedIdle,
+            platform_y_m: 87.3,
+            phase_timer_s: 0.0,
+            depth_tier: 2,
+            cave_seed: seed,
+        });
+        std::thread::sleep(Duration::from_millis(50));
+
         // 2. Start client with the host's join code.
         let client = NetSession::start_client(
             join_code,
@@ -149,12 +330,20 @@ mod tests {
                     NetEvent::Connected {
                         local_id,
                         level_seed,
+                        depth_tier,
+                        elevator_phase,
+                        credits,
+                        world_items,
                         players,
                         voxel_edits,
                         beacon_pos_m,
                     } => {
                         assert_eq!(local_id, 1);
                         assert_eq!(level_seed, seed);
+                        assert_eq!(depth_tier, 2);
+                        assert_eq!(elevator_phase, ElevatorPhase::ShedIdle);
+                        assert_eq!(credits, 350);
+                        assert_eq!(world_items, vec![initial_item.clone()]);
                         assert_eq!(beacon_pos_m, initial_beacon);
                         assert_eq!(voxel_edits, initial_edits);
                         assert_eq!(players.len(), 2);

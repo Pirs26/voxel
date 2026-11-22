@@ -15,8 +15,9 @@ use tokio::sync::{RwLock, mpsc, watch};
 use voxel_core::VoxelId;
 
 use crate::protocol::{
-    PlayerId, PlayerInfo, ReliableMessage, UnreliableDatagram, decode_datagram, encode_datagram,
-    read_reliable_frame, write_reliable_frame,
+    ElevatorPhase, MonsterBehaviorState, PlayerHealthStatus, PlayerId, PlayerInfo, ReliableMessage,
+    UnreliableDatagram, WorldItemNetState, decode_datagram, encode_datagram, read_reliable_frame,
+    write_reliable_frame,
 };
 use crate::ticket::{decode_join_code, encode_join_code};
 
@@ -41,12 +42,20 @@ pub enum NetEvent {
     Connected {
         local_id: PlayerId,
         level_seed: u64,
+        depth_tier: u8,
+        elevator_phase: ElevatorPhase,
+        credits: u32,
+        world_items: Vec<WorldItemNetState>,
         players: Vec<PlayerInfo>,
         voxel_edits: Vec<(IVec3, VoxelId)>,
         beacon_pos_m: Vec3,
     },
     PlayerJoined(PlayerInfo),
     PlayerLeft(PlayerId),
+    StartDescent {
+        level_seed: u64,
+        depth_tier: u8,
+    },
     VoxelDelta {
         coord: IVec3,
         material: VoxelId,
@@ -57,6 +66,45 @@ pub enum NetEvent {
     },
     BeaconMoved {
         pos_m: Vec3,
+    },
+    ElevatorStateSync {
+        phase: ElevatorPhase,
+        platform_y_m: f32,
+        phase_timer_s: f32,
+        depth_tier: u8,
+        cave_seed: u64,
+    },
+    RequestElevatorAction {
+        depth_tier: u8,
+    },
+    WorldItemSpawn(WorldItemNetState),
+    WorldItemUpdate(WorldItemNetState),
+    WorldItemRemove {
+        item_id: u32,
+    },
+    PlayerHealthSync {
+        player_id: PlayerId,
+        status: PlayerHealthStatus,
+    },
+    PlayerRevived {
+        target_id: PlayerId,
+        reviver_id: PlayerId,
+    },
+    CreditsSync {
+        credits: u32,
+        unlocked_depth_tier: u8,
+    },
+    PlayerProfileSync {
+        player_name: String,
+        visor_rgb: [f32; 3],
+        inventory_json: String,
+    },
+    DecoyTriggered {
+        pos_m: Vec3,
+    },
+    MonsterAttack {
+        target_player_id: PlayerId,
+        monster_pos_m: Vec3,
     },
     PlayerPose {
         player_id: PlayerId,
@@ -71,6 +119,16 @@ pub enum NetEvent {
         speaker_id: PlayerId,
         seq: u16,
         opus_payload: Vec<u8>,
+    },
+    MonsterPose {
+        monster_id: u16,
+        pos_m: Vec3,
+        yaw: f32,
+        state: MonsterBehaviorState,
+    },
+    ItemPose {
+        item_id: u32,
+        pos_m: Vec3,
     },
     Error(String),
     Disconnected(String),
@@ -299,6 +357,11 @@ struct PeerHandle {
 
 struct HostState {
     level_seed: u64,
+    depth_tier: u8,
+    elevator_phase: ElevatorPhase,
+    credits: u32,
+    unlocked_depth_tier: u8,
+    world_items: HashMap<u32, WorldItemNetState>,
     beacon_pos_m: Vec3,
     voxel_edits: HashMap<IVec3, VoxelId>,
     next_player_id: PlayerId,
@@ -313,6 +376,12 @@ impl HostState {
         list
     }
 
+    fn sorted_world_items(&self) -> Vec<WorldItemNetState> {
+        let mut list: Vec<WorldItemNetState> = self.world_items.values().cloned().collect();
+        list.sort_by_key(|item| item.id);
+        list
+    }
+
     fn voxel_edits_vec(&self) -> Vec<(IVec3, VoxelId)> {
         self.voxel_edits.iter().map(|(&k, &v)| (k, v)).collect()
     }
@@ -323,6 +392,11 @@ impl HostState {
             ReliableMessage::VoxelDelta { .. }
                 | ReliableMessage::BeaconMoved { .. }
                 | ReliableMessage::StartDescent { .. }
+                | ReliableMessage::ElevatorStateSync { .. }
+                | ReliableMessage::CreditsSync { .. }
+                | ReliableMessage::WorldItemSpawn(_)
+                | ReliableMessage::WorldItemUpdate(_)
+                | ReliableMessage::WorldItemRemove { .. }
         )
     }
 
@@ -334,9 +408,36 @@ impl HostState {
             ReliableMessage::BeaconMoved { pos_m } => {
                 self.beacon_pos_m = *pos_m;
             }
-            ReliableMessage::StartDescent { level_seed, .. } => {
+            ReliableMessage::StartDescent {
+                level_seed,
+                depth_tier,
+            } => {
                 self.level_seed = *level_seed;
+                self.depth_tier = *depth_tier;
                 self.voxel_edits.clear();
+            }
+            ReliableMessage::ElevatorStateSync {
+                phase,
+                depth_tier,
+                cave_seed,
+                ..
+            } => {
+                self.elevator_phase = *phase;
+                self.depth_tier = *depth_tier;
+                self.level_seed = *cave_seed;
+            }
+            ReliableMessage::CreditsSync {
+                credits,
+                unlocked_depth_tier,
+            } => {
+                self.credits = *credits;
+                self.unlocked_depth_tier = *unlocked_depth_tier;
+            }
+            ReliableMessage::WorldItemSpawn(item) | ReliableMessage::WorldItemUpdate(item) => {
+                self.world_items.insert(item.id, item.clone());
+            }
+            ReliableMessage::WorldItemRemove { item_id } => {
+                self.world_items.remove(item_id);
             }
             _ => {}
         }
@@ -452,6 +553,11 @@ async fn run_host_task(
 
     let state = Arc::new(RwLock::new(HostState {
         level_seed,
+        depth_tier: 1,
+        elevator_phase: ElevatorPhase::ShedIdle,
+        credits: 0,
+        unlocked_depth_tier: 1,
+        world_items: HashMap::new(),
         beacon_pos_m,
         voxel_edits,
         next_player_id: 1,
@@ -607,6 +713,10 @@ async fn handle_incoming_guest(
         let welcome = ReliableMessage::Welcome {
             assigned_id: player_id,
             level_seed: guard.level_seed,
+            depth_tier: guard.depth_tier,
+            elevator_phase: guard.elevator_phase,
+            credits: guard.credits,
+            world_items: guard.sorted_world_items(),
             players: guard.sorted_players(),
             voxel_edits: guard.voxel_edits_vec(),
             beacon_pos_m: guard.beacon_pos_m,
@@ -647,11 +757,14 @@ async fn handle_incoming_guest(
     let done_tx_rel = done_tx.clone();
     let reader_handle = tokio::spawn(async move {
         while let Ok(Some(msg)) = read_reliable_frame(&mut recv_stream).await {
+            let should_relay = !matches!(msg, ReliableMessage::RequestElevatorAction { .. });
             if HostState::mutates_state(&msg) {
                 let mut guard = state_rel.write().await;
                 guard.apply_state_mutation(&msg);
-                guard.broadcast_reliable(&msg, Some(player_id));
-            } else {
+                if should_relay {
+                    guard.broadcast_reliable(&msg, Some(player_id));
+                }
+            } else if should_relay {
                 let guard = state_rel.read().await;
                 guard.broadcast_reliable(&msg, Some(player_id));
             }
@@ -832,6 +945,10 @@ async fn run_client_task(
         ReliableMessage::Welcome {
             assigned_id,
             level_seed,
+            depth_tier,
+            elevator_phase,
+            credits,
+            world_items,
             players,
             voxel_edits,
             beacon_pos_m,
@@ -844,6 +961,10 @@ async fn run_client_task(
                 NetEvent::Connected {
                     local_id: assigned_id,
                     level_seed,
+                    depth_tier,
+                    elevator_phase,
+                    credits,
+                    world_items,
                     players,
                     voxel_edits,
                     beacon_pos_m,
@@ -978,6 +1099,16 @@ fn emit_reliable_event(events: &EventQueue, msg: ReliableMessage) {
         ReliableMessage::PlayerLeft { player_id } => {
             push_event(events, NetEvent::PlayerLeft(player_id))
         }
+        ReliableMessage::StartDescent {
+            level_seed,
+            depth_tier,
+        } => push_event(
+            events,
+            NetEvent::StartDescent {
+                level_seed,
+                depth_tier,
+            },
+        ),
         ReliableMessage::VoxelDelta { coord, material } => {
             push_event(events, NetEvent::VoxelDelta { coord, material })
         }
@@ -994,9 +1125,83 @@ fn emit_reliable_event(events: &EventQueue, msg: ReliableMessage) {
         ReliableMessage::BeaconMoved { pos_m } => {
             push_event(events, NetEvent::BeaconMoved { pos_m })
         }
-        ReliableMessage::Handshake { .. }
-        | ReliableMessage::Welcome { .. }
-        | ReliableMessage::StartDescent { .. } => {}
+        ReliableMessage::ElevatorStateSync {
+            phase,
+            platform_y_m,
+            phase_timer_s,
+            depth_tier,
+            cave_seed,
+        } => push_event(
+            events,
+            NetEvent::ElevatorStateSync {
+                phase,
+                platform_y_m,
+                phase_timer_s,
+                depth_tier,
+                cave_seed,
+            },
+        ),
+        ReliableMessage::RequestElevatorAction { depth_tier } => {
+            push_event(events, NetEvent::RequestElevatorAction { depth_tier })
+        }
+        ReliableMessage::WorldItemSpawn(item) => {
+            push_event(events, NetEvent::WorldItemSpawn(item))
+        }
+        ReliableMessage::WorldItemUpdate(item) => {
+            push_event(events, NetEvent::WorldItemUpdate(item))
+        }
+        ReliableMessage::WorldItemRemove { item_id } => {
+            push_event(events, NetEvent::WorldItemRemove { item_id })
+        }
+        ReliableMessage::PlayerHealthSync { player_id, status } => {
+            push_event(events, NetEvent::PlayerHealthSync { player_id, status })
+        }
+        ReliableMessage::PlayerRevived {
+            target_id,
+            reviver_id,
+        } => push_event(
+            events,
+            NetEvent::PlayerRevived {
+                target_id,
+                reviver_id,
+            },
+        ),
+        ReliableMessage::CreditsSync {
+            credits,
+            unlocked_depth_tier,
+        } => push_event(
+            events,
+            NetEvent::CreditsSync {
+                credits,
+                unlocked_depth_tier,
+            },
+        ),
+        ReliableMessage::PlayerProfileSync {
+            player_name,
+            visor_rgb,
+            inventory_json,
+        } => push_event(
+            events,
+            NetEvent::PlayerProfileSync {
+                player_name,
+                visor_rgb,
+                inventory_json,
+            },
+        ),
+        ReliableMessage::DecoyTriggered { pos_m } => {
+            push_event(events, NetEvent::DecoyTriggered { pos_m })
+        }
+        ReliableMessage::MonsterAttack {
+            target_player_id,
+            monster_pos_m,
+        } => push_event(
+            events,
+            NetEvent::MonsterAttack {
+                target_player_id,
+                monster_pos_m,
+            },
+        ),
+        ReliableMessage::Handshake { .. } | ReliableMessage::Welcome { .. } => {}
     }
 }
 
@@ -1034,5 +1239,22 @@ fn emit_datagram_event(events: &EventQueue, dgram: UnreliableDatagram) {
                 opus_payload,
             },
         ),
+        UnreliableDatagram::MonsterPose {
+            monster_id,
+            pos_m,
+            yaw,
+            state,
+        } => push_event(
+            events,
+            NetEvent::MonsterPose {
+                monster_id,
+                pos_m,
+                yaw,
+                state,
+            },
+        ),
+        UnreliableDatagram::ItemPose { item_id, pos_m } => {
+            push_event(events, NetEvent::ItemPose { item_id, pos_m })
+        }
     }
 }

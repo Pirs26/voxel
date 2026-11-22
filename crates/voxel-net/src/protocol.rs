@@ -22,6 +22,65 @@ pub struct PlayerInfo {
     pub visor_rgb: [f32; 3],
 }
 
+/// Authoritative phase of the seamless mineshaft elevator state machine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ElevatorPhase {
+    #[default]
+    ShedIdle,
+    Descending,
+    CaveIdle,
+    WinchActive,
+    Ascending,
+}
+
+/// Physical world item archetype synced between host and clients.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum WorldItemKind {
+    HeavyRelic { value: u32, weight_kg: f32 },
+    BonusLoot { value: u32 },
+    BatteryCell { charge: f32 },
+    FlarePack { count: u8 },
+    FoamCanister { charges: u8 },
+    NoiseDecoy { count: u8 },
+    AidKit,
+    Flashlight { battery: f32 },
+}
+
+/// Networked state snapshot of a physical item in the Shed or Cave.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldItemNetState {
+    pub id: u32,
+    pub kind: WorldItemKind,
+    pub pos_m: Vec3,
+    pub vel_m: Vec3,
+    pub in_shed: bool,
+    pub carried_by: Vec<PlayerId>,
+    pub active_timer_s: Option<f32>,
+}
+
+/// Networked health / downed / dragging status of a player.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum PlayerHealthStatus {
+    #[default]
+    Healthy,
+    Downed {
+        bleedout_s: f32,
+        dragged_by: Option<PlayerId>,
+    },
+    Dead,
+}
+
+/// High-level behavior state of a blind acoustic predator for client animation/audio cues.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MonsterBehaviorState {
+    #[default]
+    Idle,
+    Patrol,
+    Investigate,
+    Hunt,
+    Attack,
+}
+
 /// Ordered, reliable messages sent over each peer's bidirectional QUIC control stream.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ReliableMessage {
@@ -32,6 +91,10 @@ pub enum ReliableMessage {
     Welcome {
         assigned_id: PlayerId,
         level_seed: u64,
+        depth_tier: u8,
+        elevator_phase: ElevatorPhase,
+        credits: u32,
+        world_items: Vec<WorldItemNetState>,
         players: Vec<PlayerInfo>,
         voxel_edits: Vec<(IVec3, VoxelId)>,
         beacon_pos_m: Vec3,
@@ -55,6 +118,45 @@ pub enum ReliableMessage {
     BeaconMoved {
         pos_m: Vec3,
     },
+    ElevatorStateSync {
+        phase: ElevatorPhase,
+        platform_y_m: f32,
+        phase_timer_s: f32,
+        depth_tier: u8,
+        cave_seed: u64,
+    },
+    RequestElevatorAction {
+        depth_tier: u8,
+    },
+    WorldItemSpawn(WorldItemNetState),
+    WorldItemUpdate(WorldItemNetState),
+    WorldItemRemove {
+        item_id: u32,
+    },
+    PlayerHealthSync {
+        player_id: PlayerId,
+        status: PlayerHealthStatus,
+    },
+    PlayerRevived {
+        target_id: PlayerId,
+        reviver_id: PlayerId,
+    },
+    CreditsSync {
+        credits: u32,
+        unlocked_depth_tier: u8,
+    },
+    PlayerProfileSync {
+        player_name: String,
+        visor_rgb: [f32; 3],
+        inventory_json: String,
+    },
+    DecoyTriggered {
+        pos_m: Vec3,
+    },
+    MonsterAttack {
+        target_player_id: PlayerId,
+        monster_pos_m: Vec3,
+    },
 }
 
 /// Low-latency, unreliable, unordered messages sent as QUIC datagrams.
@@ -73,6 +175,16 @@ pub enum UnreliableDatagram {
         speaker_id: PlayerId,
         seq: u16,
         opus_payload: Vec<u8>,
+    },
+    MonsterPose {
+        monster_id: u16,
+        pos_m: Vec3,
+        yaw: f32,
+        state: MonsterBehaviorState,
+    },
+    ItemPose {
+        item_id: u32,
+        pos_m: Vec3,
     },
 }
 
