@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -59,8 +59,8 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Run workspace unit tests
-        run: cargo test --workspace --exclude game
+      - name: Run workspace unit tests (release profile to share cache with build)
+        run: cargo test --release --workspace --exclude game
 
       - name: Build release binary
         run: cargo build --release -p game
@@ -91,7 +91,7 @@ jobs:
           Compress-Archive -Path dist\echoes-below -DestinationPath ${{ matrix.archive }} -Force
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.archive }}
@@ -103,7 +103,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all platform archives
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-artifacts
           merge-multiple: true
