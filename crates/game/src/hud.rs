@@ -164,6 +164,49 @@ struct SaveDropdownPageLabel;
 #[derive(Component)]
 struct DeleteSaveLabel;
 
+#[derive(Component, Default, Clone, Copy)]
+struct MainMenuPlaySoloBtn {
+    hovered: bool,
+}
+
+#[derive(Component)]
+struct MainMenuPlaySoloTitleText;
+
+#[derive(Component)]
+struct MainMenuPlaySoloSubText;
+
+#[derive(Component, Default, Clone, Copy)]
+struct MainMenuHostBtn {
+    hovered: bool,
+}
+
+#[derive(Component)]
+struct MainMenuHostTitleText;
+
+#[derive(Component)]
+struct MainMenuHostSubText;
+
+#[derive(Component, Default, Clone, Copy)]
+struct MainMenuNewSaveBtn {
+    hovered: bool,
+}
+
+#[derive(Component)]
+struct MainMenuNewSaveLabel;
+
+#[derive(Component, Default, Clone, Copy)]
+struct MainMenuRenameSaveBtn {
+    hovered: bool,
+}
+
+#[derive(Component)]
+struct MainMenuRenameSaveLabel;
+
+#[derive(Component, Default, Clone, Copy)]
+struct MainMenuDeleteSaveBtn {
+    hovered: bool,
+}
+
 #[derive(Component)]
 struct SaveNameModalTitle;
 
@@ -483,6 +526,7 @@ impl Plugin for HudPlugin {
                     handle_ui_actions_system,
                     update_panel_visibility_system,
                     update_menu_and_shop_system,
+                    update_main_menu_save_guard_system,
                     update_save_dropdown_system,
                     update_save_name_modal_system,
                     update_parkour_hud_system,
@@ -504,16 +548,17 @@ impl Plugin for HudPlugin {
 // UI BUILDER HELPERS
 // =============================================================================
 
-fn spawn_pill_button(
+#[allow(clippy::type_complexity)]
+fn spawn_pill_button_entities(
     parent: &mut ChildSpawnerCommands,
     label: &str,
     action: UiAction,
     base_color: Color,
     hover_color: Color,
     border_color: Color,
-) -> Entity {
+) -> (Entity, Entity) {
     let mut text_ent = Entity::PLACEHOLDER;
-    parent
+    let btn_ent = parent
         .spawn((
             Node {
                 padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
@@ -533,14 +578,30 @@ fn spawn_pill_button(
             },
         )
         .observe(
-            move |over: On<PointerOver>, mut bg_q: Query<&mut BackgroundColor>| {
+            move |over: On<PointerOver>,
+                  mut bg_q: Query<
+                      &mut BackgroundColor,
+                      (
+                          Without<MainMenuNewSaveBtn>,
+                          Without<MainMenuRenameSaveBtn>,
+                          Without<MainMenuDeleteSaveBtn>,
+                      ),
+                  >| {
                 if let Ok(mut bg) = bg_q.get_mut(over.entity) {
                     *bg = BackgroundColor(hover_color);
                 }
             },
         )
         .observe(
-            move |out: On<PointerOut>, mut bg_q: Query<&mut BackgroundColor>| {
+            move |out: On<PointerOut>,
+                  mut bg_q: Query<
+                      &mut BackgroundColor,
+                      (
+                          Without<MainMenuNewSaveBtn>,
+                          Without<MainMenuRenameSaveBtn>,
+                          Without<MainMenuDeleteSaveBtn>,
+                      ),
+                  >| {
                 if let Ok(mut bg) = bg_q.get_mut(out.entity) {
                     *bg = BackgroundColor(base_color);
                 }
@@ -558,8 +619,20 @@ fn spawn_pill_button(
                     Pickable::IGNORE,
                 ))
                 .id();
-        });
-    text_ent
+        })
+        .id();
+    (btn_ent, text_ent)
+}
+
+fn spawn_pill_button(
+    parent: &mut ChildSpawnerCommands,
+    label: &str,
+    action: UiAction,
+    base_color: Color,
+    hover_color: Color,
+    border_color: Color,
+) -> Entity {
+    spawn_pill_button_entities(parent, label, action, base_color, hover_color, border_color).1
 }
 
 /// Interactive toggle pill whose background, border, and label dynamically reflect live ON/OFF state.
@@ -660,10 +733,12 @@ fn spawn_menu_action_tile(
     subtitle: &str,
     accent: Color,
     action: UiAction,
-) {
+) -> (Entity, Entity, Entity) {
     let base_bg = Color::srgba(0.08, 0.12, 0.18, 0.96);
     let hover_bg = Color::srgba(0.13, 0.20, 0.28, 0.98);
-    parent
+    let mut title_ent = Entity::PLACEHOLDER;
+    let mut sub_ent = Entity::PLACEHOLDER;
+    let tile_ent = parent
         .spawn((
             Node {
                 width: Val::Percent(100.0),
@@ -694,37 +769,53 @@ fn spawn_menu_action_tile(
             },
         )
         .observe(
-            move |over: On<PointerOver>, mut bg_q: Query<&mut BackgroundColor>| {
+            move |over: On<PointerOver>,
+                  mut bg_q: Query<
+                      &mut BackgroundColor,
+                      (Without<MainMenuPlaySoloBtn>, Without<MainMenuHostBtn>),
+                  >| {
                 if let Ok(mut bg) = bg_q.get_mut(over.entity) {
                     *bg = BackgroundColor(hover_bg);
                 }
             },
         )
         .observe(
-            move |out: On<PointerOut>, mut bg_q: Query<&mut BackgroundColor>| {
+            move |out: On<PointerOut>,
+                  mut bg_q: Query<
+                      &mut BackgroundColor,
+                      (Without<MainMenuPlaySoloBtn>, Without<MainMenuHostBtn>),
+                  >| {
                 if let Ok(mut bg) = bg_q.get_mut(out.entity) {
                     *bg = BackgroundColor(base_bg);
                 }
             },
         )
         .with_children(|tile| {
-            tile.spawn((
-                Text::new(title),
-                TextFont {
-                    font_size: FontSize::Px(15.0),
-                    ..default()
-                },
-                TextColor(COL_TEXT_BRIGHT),
-            ));
-            tile.spawn((
-                Text::new(subtitle),
-                TextFont {
-                    font_size: FontSize::Px(11.5),
-                    ..default()
-                },
-                TextColor(COL_TEXT_MUTED),
-            ));
-        });
+            title_ent = tile
+                .spawn((
+                    Text::new(title),
+                    TextFont {
+                        font_size: FontSize::Px(15.0),
+                        ..default()
+                    },
+                    TextColor(COL_TEXT_BRIGHT),
+                    Pickable::IGNORE,
+                ))
+                .id();
+            sub_ent = tile
+                .spawn((
+                    Text::new(subtitle),
+                    TextFont {
+                        font_size: FontSize::Px(11.5),
+                        ..default()
+                    },
+                    TextColor(COL_TEXT_MUTED),
+                    Pickable::IGNORE,
+                ))
+                .id();
+        })
+        .id();
+    (tile_ent, title_ent, sub_ent)
 }
 
 fn spawn_slider_row(parent: &mut ChildSpawnerCommands, title: &str, kind: SliderKind) {
@@ -1563,13 +1654,93 @@ fn setup_hud(mut commands: Commands) {
                                     ..default()
                                 })
                                 .with_children(|row| {
-                                    spawn_std_btn(row, "+ New", UiAction::OpenNewSavePrompt);
-                                    spawn_std_btn(row, "Rename", UiAction::OpenRenameSavePrompt);
-                                    let del_txt = spawn_danger_btn(
+                                    let (new_btn, new_txt) = spawn_pill_button_entities(
+                                        row,
+                                        "+ New",
+                                        UiAction::OpenNewSavePrompt,
+                                        Color::srgba(0.11, 0.16, 0.22, 0.96),
+                                        Color::srgba(0.18, 0.28, 0.36, 0.98),
+                                        Color::srgba(0.26, 0.36, 0.46, 0.85),
+                                    );
+                                    row.commands()
+                                        .entity(new_btn)
+                                        .insert(MainMenuNewSaveBtn::default())
+                                        .observe(
+                                            |over: On<PointerOver>,
+                                             mut q: Query<&mut MainMenuNewSaveBtn>| {
+                                                if let Ok(mut b) = q.get_mut(over.entity) {
+                                                    b.hovered = true;
+                                                }
+                                            },
+                                        )
+                                        .observe(
+                                            |out: On<PointerOut>,
+                                             mut q: Query<&mut MainMenuNewSaveBtn>| {
+                                                if let Ok(mut b) = q.get_mut(out.entity) {
+                                                    b.hovered = false;
+                                                }
+                                            },
+                                        );
+                                    row.commands().entity(new_txt).insert(MainMenuNewSaveLabel);
+
+                                    let (ren_btn, ren_txt) = spawn_pill_button_entities(
+                                        row,
+                                        "Rename",
+                                        UiAction::OpenRenameSavePrompt,
+                                        Color::srgba(0.11, 0.16, 0.22, 0.96),
+                                        Color::srgba(0.18, 0.28, 0.36, 0.98),
+                                        Color::srgba(0.26, 0.36, 0.46, 0.85),
+                                    );
+                                    row.commands()
+                                        .entity(ren_btn)
+                                        .insert(MainMenuRenameSaveBtn::default())
+                                        .observe(
+                                            |over: On<PointerOver>,
+                                             mut q: Query<&mut MainMenuRenameSaveBtn>| {
+                                                if let Ok(mut b) = q.get_mut(over.entity) {
+                                                    b.hovered = true;
+                                                }
+                                            },
+                                        )
+                                        .observe(
+                                            |out: On<PointerOut>,
+                                             mut q: Query<&mut MainMenuRenameSaveBtn>| {
+                                                if let Ok(mut b) = q.get_mut(out.entity) {
+                                                    b.hovered = false;
+                                                }
+                                            },
+                                        );
+                                    row.commands()
+                                        .entity(ren_txt)
+                                        .insert(MainMenuRenameSaveLabel);
+
+                                    let (del_btn, del_txt) = spawn_pill_button_entities(
                                         row,
                                         "Delete",
                                         UiAction::DeleteSaveSlot,
+                                        Color::srgba(0.32, 0.11, 0.13, 0.96),
+                                        Color::srgba(0.48, 0.17, 0.19, 0.98),
+                                        Color::srgba(0.88, 0.30, 0.32, 0.85),
                                     );
+                                    row.commands()
+                                        .entity(del_btn)
+                                        .insert(MainMenuDeleteSaveBtn::default())
+                                        .observe(
+                                            |over: On<PointerOver>,
+                                             mut q: Query<&mut MainMenuDeleteSaveBtn>| {
+                                                if let Ok(mut b) = q.get_mut(over.entity) {
+                                                    b.hovered = true;
+                                                }
+                                            },
+                                        )
+                                        .observe(
+                                            |out: On<PointerOut>,
+                                             mut q: Query<&mut MainMenuDeleteSaveBtn>| {
+                                                if let Ok(mut b) = q.get_mut(out.entity) {
+                                                    b.hovered = false;
+                                                }
+                                            },
+                                        );
                                     row.commands().entity(del_txt).insert(DeleteSaveLabel);
                                     spawn_std_btn(row, "Refresh", UiAction::RefreshSaveSlots);
                                 });
@@ -1584,20 +1755,78 @@ fn setup_hud(mut commands: Commands) {
                             ..default()
                         })
                         .with_children(|right| {
-                            spawn_menu_action_tile(
+                            let (solo_btn, solo_title, solo_sub) = spawn_menu_action_tile(
                                 right,
                                 "PLAY SOLO",
                                 "Load selected save offline",
                                 COL_ACCENT_CYAN,
                                 UiAction::PlaySolo,
                             );
-                            spawn_menu_action_tile(
+                            right
+                                .commands()
+                                .entity(solo_btn)
+                                .insert(MainMenuPlaySoloBtn::default())
+                                .observe(
+                                    |over: On<PointerOver>,
+                                     mut q: Query<&mut MainMenuPlaySoloBtn>| {
+                                        if let Ok(mut b) = q.get_mut(over.entity) {
+                                            b.hovered = true;
+                                        }
+                                    },
+                                )
+                                .observe(
+                                    |out: On<PointerOut>,
+                                     mut q: Query<&mut MainMenuPlaySoloBtn>| {
+                                        if let Ok(mut b) = q.get_mut(out.entity) {
+                                            b.hovered = false;
+                                        }
+                                    },
+                                );
+                            right
+                                .commands()
+                                .entity(solo_title)
+                                .insert(MainMenuPlaySoloTitleText);
+                            right
+                                .commands()
+                                .entity(solo_sub)
+                                .insert(MainMenuPlaySoloSubText);
+
+                            let (host_btn, host_title, host_sub) = spawn_menu_action_tile(
                                 right,
                                 "HOST CO-OP",
                                 "Generate ECHO-... P2P code",
                                 COL_ACCENT_GREEN,
                                 UiAction::HostLobby,
                             );
+                            right
+                                .commands()
+                                .entity(host_btn)
+                                .insert(MainMenuHostBtn::default())
+                                .observe(
+                                    |over: On<PointerOver>,
+                                     mut q: Query<&mut MainMenuHostBtn>| {
+                                        if let Ok(mut b) = q.get_mut(over.entity) {
+                                            b.hovered = true;
+                                        }
+                                    },
+                                )
+                                .observe(
+                                    |out: On<PointerOut>,
+                                     mut q: Query<&mut MainMenuHostBtn>| {
+                                        if let Ok(mut b) = q.get_mut(out.entity) {
+                                            b.hovered = false;
+                                        }
+                                    },
+                                );
+                            right
+                                .commands()
+                                .entity(host_title)
+                                .insert(MainMenuHostTitleText);
+                            right
+                                .commands()
+                                .entity(host_sub)
+                                .insert(MainMenuHostSubText);
+
                             spawn_menu_action_tile(
                                 right,
                                 "JOIN BY CODE",
@@ -3829,10 +4058,16 @@ fn handle_ui_actions_system(
                 }
             }
             UiAction::ToggleSaveDropdown => {
-                save_dropdown.open = !save_dropdown.open;
-                if save_dropdown.open {
-                    save_browser.refresh();
-                    save_dropdown.page = save_browser.selected_idx / SAVE_DROPDOWN_ROWS;
+                save_browser.refresh();
+                if !save_browser.has_selected_world() {
+                    save_dropdown.open = false;
+                    coop.status_text =
+                        "Create or select a world (+ New) before starting!".into();
+                } else {
+                    save_dropdown.open = !save_dropdown.open;
+                    if save_dropdown.open {
+                        save_dropdown.page = save_browser.selected_idx / SAVE_DROPDOWN_ROWS;
+                    }
                 }
             }
             UiAction::SelectSaveRow(row_idx) => {
@@ -3852,11 +4087,17 @@ fn handle_ui_actions_system(
             UiAction::RefreshSaveSlots => {
                 save_browser.refresh();
                 save_dropdown.page = save_browser.selected_idx / SAVE_DROPDOWN_ROWS;
-                coop.status_text = format!(
-                    "Found {} save slot(s) — '{}'",
-                    save_browser.slots.len(),
-                    save_browser.selected_slot_name()
-                );
+                if save_browser.has_selected_world() {
+                    coop.status_text = format!(
+                        "Found {} save slot(s) — '{}'",
+                        save_browser.slots.len(),
+                        save_browser.selected_slot_name()
+                    );
+                } else {
+                    save_dropdown.open = false;
+                    coop.status_text =
+                        "No world saves found — click '+ New' to create a world!".into();
+                }
             }
             UiAction::OpenNewSavePrompt => {
                 save_browser.refresh();
@@ -3873,48 +4114,59 @@ fn handle_ui_actions_system(
             UiAction::OpenRenameSavePrompt => {
                 save_browser.refresh();
                 save_dropdown.open = false;
-                let current = save_browser.selected_slot_name().to_string();
-                save_prompt.open = true;
-                save_prompt.focused = true;
-                save_prompt.caret_reset_s = res.time.elapsed_secs();
-                save_prompt.mode = Some(SaveNamePromptMode::Rename);
-                save_prompt.buffer = current.clone();
-                save_prompt.default_hint.clear();
-                save_prompt.target_old_name = current;
-                save_prompt.error_text.clear();
+                if !save_browser.has_selected_world() {
+                    coop.status_text =
+                        "Create or select a world (+ New) before renaming!".into();
+                } else {
+                    let current = save_browser.selected_slot_name().to_string();
+                    save_prompt.open = true;
+                    save_prompt.focused = true;
+                    save_prompt.caret_reset_s = res.time.elapsed_secs();
+                    save_prompt.mode = Some(SaveNamePromptMode::Rename);
+                    save_prompt.buffer = current.clone();
+                    save_prompt.default_hint.clear();
+                    save_prompt.target_old_name = current;
+                    save_prompt.error_text.clear();
+                }
             }
             UiAction::DeleteSaveSlot => {
                 save_browser.refresh();
                 save_dropdown.open = false;
-                let selected_slot = save_browser.selected().cloned();
-                match selected_slot {
-                    Some(slot) if !slot.exists_on_disk => {
-                        save_dropdown.delete_armed_slot = None;
-                        coop.status_text = "No saved file on disk to delete.".into();
-                    }
-                    Some(slot)
-                        if save_dropdown.delete_armed_slot.as_deref()
-                            == Some(slot.slot_name.as_str()) =>
-                    {
-                        save_dropdown.delete_armed_slot = None;
-                        match save_browser.delete_selected_slot() {
-                            Ok(deleted) => {
-                                save_dropdown.page =
-                                    save_browser.selected_idx / SAVE_DROPDOWN_ROWS;
-                                coop.status_text = format!("Deleted save '{deleted}'");
-                            }
-                            Err(e) => coop.status_text = format!("Delete failed: {e}"),
+                if !save_browser.has_selected_world() {
+                    save_dropdown.delete_armed_slot = None;
+                    coop.status_text =
+                        "Create or select a world (+ New) before deleting!".into();
+                } else {
+                    let selected_slot = save_browser.selected().cloned();
+                    match selected_slot {
+                        Some(slot) if !slot.exists_on_disk => {
+                            save_dropdown.delete_armed_slot = None;
+                            coop.status_text = "No saved file on disk to delete.".into();
                         }
-                    }
-                    Some(slot) => {
-                        save_dropdown.delete_armed_slot = Some(slot.slot_name.clone());
-                        coop.status_text = format!(
-                            "Click 'Are you sure?' again to permanently delete '{}'",
-                            slot.slot_name
-                        );
-                    }
-                    None => {
-                        save_dropdown.delete_armed_slot = None;
+                        Some(slot)
+                            if save_dropdown.delete_armed_slot.as_deref()
+                                == Some(slot.slot_name.as_str()) =>
+                        {
+                            save_dropdown.delete_armed_slot = None;
+                            match save_browser.delete_selected_slot() {
+                                Ok(deleted) => {
+                                    save_dropdown.page =
+                                        save_browser.selected_idx / SAVE_DROPDOWN_ROWS;
+                                    coop.status_text = format!("Deleted save '{deleted}'");
+                                }
+                                Err(e) => coop.status_text = format!("Delete failed: {e}"),
+                            }
+                        }
+                        Some(slot) => {
+                            save_dropdown.delete_armed_slot = Some(slot.slot_name.clone());
+                            coop.status_text = format!(
+                                "Click 'Are you sure?' again to permanently delete '{}'",
+                                slot.slot_name
+                            );
+                        }
+                        None => {
+                            save_dropdown.delete_armed_slot = None;
+                        }
                     }
                 }
             }
@@ -3975,17 +4227,27 @@ fn handle_ui_actions_system(
             },
             UiAction::PlaySolo => {
                 save_prompt.open = false;
-                user_settings.sanitize();
-                coop.local_name = user_settings.player_name.clone();
-                coop.visor_idx = user_settings.visor_idx % VISOR_PALETTE.len();
-                lifecycle_writer.write(SessionLifecycleEvent::StartSolo);
+                if !save_browser.has_selected_world() {
+                    coop.status_text =
+                        "Create or select a world (+ New) before starting!".into();
+                } else {
+                    user_settings.sanitize();
+                    coop.local_name = user_settings.player_name.clone();
+                    coop.visor_idx = user_settings.visor_idx % VISOR_PALETTE.len();
+                    lifecycle_writer.write(SessionLifecycleEvent::StartSolo);
+                }
             }
             UiAction::HostLobby => {
                 save_prompt.open = false;
-                user_settings.sanitize();
-                coop.local_name = user_settings.player_name.clone();
-                coop.visor_idx = user_settings.visor_idx % VISOR_PALETTE.len();
-                lifecycle_writer.write(SessionLifecycleEvent::StartHost);
+                if !save_browser.has_selected_world() {
+                    coop.status_text =
+                        "Create or select a world (+ New) before starting!".into();
+                } else {
+                    user_settings.sanitize();
+                    coop.local_name = user_settings.player_name.clone();
+                    coop.visor_idx = user_settings.visor_idx % VISOR_PALETTE.len();
+                    lifecycle_writer.write(SessionLifecycleEvent::StartHost);
+                }
             }
             UiAction::PasteAndJoin => {
                 save_prompt.open = false;
@@ -4209,7 +4471,7 @@ fn update_menu_and_shop_system(
     mut texts: ParamSet<(
         Query<&mut Text, With<MainMenuNameText>>,
         Query<&mut Text, With<MainMenuStatusText>>,
-        Query<&mut Text, With<MainMenuSaveNameText>>,
+        Query<(&mut Text, &mut TextColor), With<MainMenuSaveNameText>>,
         Query<&mut Text, With<MainMenuSaveMetaText>>,
         Query<&mut Text, With<CoopPanelStatusText>>,
         Query<(&mut Text, &mut TextColor), With<ShopCreditsText>>,
@@ -4244,29 +4506,38 @@ fn update_menu_and_shop_system(
         t.0 = coop.status_text.clone();
     }
 
-    let slot_unlocked_tier = save_browser
-        .selected()
-        .map_or(1, |s| s.unlocked_depth_tier.clamp(1, 3));
-    if let Ok(mut t) = texts.p2().single_mut() {
-        let total = save_browser.slots.len().max(1);
-        let idx = (save_browser.selected_idx + 1).min(total);
-        t.0 = format!("{}  ({}/{})", save_browser.selected_slot_name(), idx, total);
+    let has_world = save_browser.has_selected_world();
+    let slot_unlocked_tier = if has_world {
+        save_browser
+            .selected()
+            .map_or(0, |s| s.unlocked_depth_tier.clamp(1, 3))
+    } else {
+        0
+    };
+    if let Ok((mut t, mut col)) = texts.p2().single_mut() {
+        if has_world {
+            let total = save_browser.slots.len().max(1);
+            let idx = (save_browser.selected_idx + 1).min(total);
+            t.0 = format!("{}  ({}/{})", save_browser.selected_slot_name(), idx, total);
+            *col = TextColor(COL_ACCENT_CYAN);
+        } else {
+            t.0 = "No World Created".to_string();
+            *col = TextColor(Color::srgb(0.92, 0.72, 0.30));
+        }
     }
     if let Ok(mut t) = texts.p3().single_mut() {
-        t.0 = if let Some(slot) = save_browser.selected() {
-            if slot.exists_on_disk {
-                format!(
-                    "{} cr  •  Tier {}  •  {} dive(s)  •  {} miner(s)",
-                    slot.credits,
-                    slot.unlocked_depth_tier,
-                    slot.dives_completed,
-                    slot.player_count
-                )
-            } else {
-                format!("New Campaign  •  {} cr", slot.credits)
-            }
+        t.0 = if let Some(slot) = save_browser.selected()
+            && slot.exists_on_disk
+        {
+            format!(
+                "{} cr  •  Tier {}  •  {} dive(s)  •  {} miner(s)",
+                slot.credits,
+                slot.unlocked_depth_tier,
+                slot.dives_completed,
+                slot.player_count
+            )
         } else {
-            "New Campaign".to_string()
+            "Click '+ New' to create a world save".to_string()
         };
     }
 
@@ -4436,6 +4707,185 @@ fn update_menu_and_shop_system(
 }
 
 #[allow(clippy::type_complexity)]
+fn update_main_menu_save_guard_system(
+    save_browser: Res<SaveSlotBrowser>,
+    mut buttons: ParamSet<(
+        Query<(&MainMenuPlaySoloBtn, &mut BackgroundColor, &mut BorderColor)>,
+        Query<(&MainMenuHostBtn, &mut BackgroundColor, &mut BorderColor)>,
+        Query<(&MainMenuNewSaveBtn, &mut BackgroundColor, &mut BorderColor)>,
+        Query<(&MainMenuRenameSaveBtn, &mut BackgroundColor, &mut BorderColor)>,
+        Query<(&MainMenuDeleteSaveBtn, &mut BackgroundColor, &mut BorderColor)>,
+    )>,
+    mut labels: ParamSet<(
+        Query<&mut TextColor, With<MainMenuPlaySoloTitleText>>,
+        Query<&mut TextColor, With<MainMenuPlaySoloSubText>>,
+        Query<&mut TextColor, With<MainMenuHostTitleText>>,
+        Query<&mut TextColor, With<MainMenuHostSubText>>,
+        Query<&mut TextColor, With<MainMenuNewSaveLabel>>,
+        Query<&mut TextColor, With<MainMenuRenameSaveLabel>>,
+        Query<&mut TextColor, With<DeleteSaveLabel>>,
+    )>,
+) {
+    let has_world = save_browser.has_selected_world();
+    let disabled_bg = Color::srgba(0.10, 0.12, 0.15, 0.72);
+    let disabled_border = Color::srgba(0.20, 0.24, 0.29, 0.55);
+    let disabled_accent = Color::srgba(0.26, 0.31, 0.37, 0.65);
+    let disabled_text = Color::srgb(0.45, 0.50, 0.56);
+    let disabled_subtext = Color::srgb(0.38, 0.43, 0.49);
+
+    let tile_base_bg = Color::srgba(0.08, 0.12, 0.18, 0.96);
+    let tile_hover_bg = Color::srgba(0.13, 0.20, 0.28, 0.98);
+
+    // 1. Play Solo Tile
+    for (btn, mut bg, mut border) in &mut buttons.p0() {
+        if has_world {
+            *bg = BackgroundColor(if btn.hovered {
+                tile_hover_bg
+            } else {
+                tile_base_bg
+            });
+            *border = BorderColor {
+                left: COL_ACCENT_CYAN,
+                top: COL_BORDER_DIM,
+                right: COL_BORDER_DIM,
+                bottom: COL_BORDER_DIM,
+            };
+        } else {
+            *bg = BackgroundColor(disabled_bg);
+            *border = BorderColor {
+                left: disabled_accent,
+                top: disabled_border,
+                right: disabled_border,
+                bottom: disabled_border,
+            };
+        }
+    }
+    if let Ok(mut col) = labels.p0().single_mut() {
+        *col = TextColor(if has_world {
+            COL_TEXT_BRIGHT
+        } else {
+            disabled_text
+        });
+    }
+    if let Ok(mut col) = labels.p1().single_mut() {
+        *col = TextColor(if has_world {
+            COL_TEXT_MUTED
+        } else {
+            disabled_subtext
+        });
+    }
+
+    // 2. Host Co-op Tile
+    for (btn, mut bg, mut border) in &mut buttons.p1() {
+        if has_world {
+            *bg = BackgroundColor(if btn.hovered {
+                tile_hover_bg
+            } else {
+                tile_base_bg
+            });
+            *border = BorderColor {
+                left: COL_ACCENT_GREEN,
+                top: COL_BORDER_DIM,
+                right: COL_BORDER_DIM,
+                bottom: COL_BORDER_DIM,
+            };
+        } else {
+            *bg = BackgroundColor(disabled_bg);
+            *border = BorderColor {
+                left: disabled_accent,
+                top: disabled_border,
+                right: disabled_border,
+                bottom: disabled_border,
+            };
+        }
+    }
+    if let Ok(mut col) = labels.p2().single_mut() {
+        *col = TextColor(if has_world {
+            COL_TEXT_BRIGHT
+        } else {
+            disabled_text
+        });
+    }
+    if let Ok(mut col) = labels.p3().single_mut() {
+        *col = TextColor(if has_world {
+            COL_TEXT_MUTED
+        } else {
+            disabled_subtext
+        });
+    }
+
+    // 3. + New Save Button (highlighted with emerald/cyan accent when no world exists)
+    for (btn, mut bg, mut border) in &mut buttons.p2() {
+        if has_world {
+            *bg = BackgroundColor(if btn.hovered {
+                Color::srgba(0.18, 0.28, 0.36, 0.98)
+            } else {
+                Color::srgba(0.11, 0.16, 0.22, 0.96)
+            });
+            *border = BorderColor::all(Color::srgba(0.26, 0.36, 0.46, 0.85));
+        } else {
+            *bg = BackgroundColor(if btn.hovered {
+                Color::srgba(0.14, 0.46, 0.43, 1.0)
+            } else {
+                Color::srgba(0.09, 0.32, 0.30, 0.98)
+            });
+            *border = BorderColor::all(COL_ACCENT_GREEN);
+        }
+    }
+    if let Ok(mut col) = labels.p4().single_mut() {
+        *col = TextColor(if has_world {
+            COL_TEXT_BRIGHT
+        } else {
+            COL_ACCENT_CYAN
+        });
+    }
+
+    // 4. Rename Save Button
+    for (btn, mut bg, mut border) in &mut buttons.p3() {
+        if has_world {
+            *bg = BackgroundColor(if btn.hovered {
+                Color::srgba(0.18, 0.28, 0.36, 0.98)
+            } else {
+                Color::srgba(0.11, 0.16, 0.22, 0.96)
+            });
+            *border = BorderColor::all(Color::srgba(0.26, 0.36, 0.46, 0.85));
+        } else {
+            *bg = BackgroundColor(disabled_bg);
+            *border = BorderColor::all(disabled_border);
+        }
+    }
+    if let Ok(mut col) = labels.p5().single_mut() {
+        *col = TextColor(if has_world {
+            COL_TEXT_BRIGHT
+        } else {
+            disabled_text
+        });
+    }
+
+    // 5. Delete Save Button
+    for (btn, mut bg, mut border) in &mut buttons.p4() {
+        if has_world {
+            *bg = BackgroundColor(if btn.hovered {
+                Color::srgba(0.48, 0.17, 0.19, 0.98)
+            } else {
+                Color::srgba(0.32, 0.11, 0.13, 0.96)
+            });
+            *border = BorderColor::all(Color::srgba(0.88, 0.30, 0.32, 0.85));
+        } else {
+            *bg = BackgroundColor(disabled_bg);
+            *border = BorderColor::all(disabled_border);
+        }
+    }
+    if let Ok(mut col) = labels.p6().single_mut() {
+        *col = TextColor(if has_world {
+            COL_TEXT_BRIGHT
+        } else {
+            disabled_text
+        });
+    }
+}
+
+#[allow(clippy::type_complexity)]
 fn update_save_dropdown_system(
     save_browser: Res<SaveSlotBrowser>,
     mut dropdown: ResMut<SaveDropdownState>,
@@ -4452,6 +4902,10 @@ fn update_save_dropdown_system(
         Query<&mut Text, With<DeleteSaveLabel>>,
     )>,
 ) {
+    if !save_browser.has_selected_world() {
+        dropdown.open = false;
+        dropdown.delete_armed_slot = None;
+    }
     let total_pages = save_browser.slots.len().div_ceil(SAVE_DROPDOWN_ROWS).max(1);
     if dropdown.page >= total_pages {
         dropdown.page = total_pages - 1;
@@ -5637,5 +6091,111 @@ fn update_diagnostics_drawer_system(
             rev.mean_free_path_m,
             beacon
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{net_bridge::DEFAULT_LEVEL_SEED, save::SaveSlotSummary};
+    use voxel_core::{VoxelConfig, generate_world};
+
+    #[test]
+    fn main_menu_save_guard_disables_play_and_host_until_world_created() {
+        let (_, level_info) = generate_world(
+            DEFAULT_LEVEL_SEED,
+            VoxelConfig::half_player_scale(glam::UVec3::splat(3)),
+        );
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<KeyboardInput>()
+            .add_message::<AppExit>()
+            .add_message::<SessionLifecycleEvent>()
+            .add_message::<ShopActionEvent>()
+            .add_message::<UpdaterCommand>()
+            .add_message::<RemoveVoiceSpeakerEvent>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .insert_resource(AppScreen::MainMenu)
+            .init_resource::<CoopMenuOpen>()
+            .init_resource::<ShopOverlayOpen>()
+            .init_resource::<SettingsMenuOpen>()
+            .init_resource::<CoopState>()
+            .init_resource::<UserSettings>()
+            .init_resource::<VoiceSettings>()
+            .init_resource::<AudioDeviceCatalog>()
+            .insert_resource(SaveSlotBrowser {
+                slots: Vec::new(),
+                selected_idx: 0,
+            })
+            .init_resource::<CampaignState>()
+            .init_resource::<PlayerInventory>()
+            .init_resource::<ParkourTimerState>()
+            .init_resource::<UpdaterState>()
+            .init_resource::<CrosshairTargetState>()
+            .init_resource::<GameplayToast>()
+            .init_resource::<AcousticTelemetry>()
+            .insert_resource(ElevatorState::from_level_info(
+                &level_info,
+                DEFAULT_LEVEL_SEED,
+            ))
+            .init_resource::<PlayerHealthState>()
+            .add_plugins(HudPlugin);
+
+        app.update();
+
+        // 1. With no world created, save box displays "No World Created" and Play Solo is dimmed.
+        {
+            let world = app.world_mut();
+            let mut save_name_q = world.query_filtered::<&Text, With<MainMenuSaveNameText>>();
+            assert_eq!(save_name_q.single(world).unwrap().0, "No World Created");
+
+            let mut solo_q =
+                world.query_filtered::<&BackgroundColor, With<MainMenuPlaySoloBtn>>();
+            assert_eq!(
+                solo_q.single(world).unwrap().0,
+                Color::srgba(0.10, 0.12, 0.15, 0.72)
+            );
+        }
+
+        // 2. Clicking Play Solo or Host Co-op while !has_selected_world() must NOT emit StartSolo/StartHost.
+        app.world_mut()
+            .write_message(TriggerUiAction(UiAction::PlaySolo));
+        app.world_mut()
+            .write_message(TriggerUiAction(UiAction::HostLobby));
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<CoopState>().status_text,
+            "Create or select a world (+ New) before starting!"
+        );
+
+        // 3. Selecting an on-disk world save re-enables Play Solo & Host Co-op styling.
+        app.world_mut().resource_mut::<SaveSlotBrowser>().slots.push(
+            SaveSlotSummary {
+                slot_name: "expedition_1".to_string(),
+                credits: 60,
+                unlocked_depth_tier: 1,
+                dives_completed: 0,
+                player_count: 1,
+                exists_on_disk: true,
+            },
+        );
+        app.update();
+
+        {
+            let world = app.world_mut();
+            let mut save_name_q = world.query_filtered::<&Text, With<MainMenuSaveNameText>>();
+            assert_eq!(
+                save_name_q.single(world).unwrap().0,
+                "expedition_1  (1/1)"
+            );
+
+            let mut solo_q =
+                world.query_filtered::<&BackgroundColor, With<MainMenuPlaySoloBtn>>();
+            assert_eq!(
+                solo_q.single(world).unwrap().0,
+                Color::srgba(0.08, 0.12, 0.18, 0.96)
+            );
+        }
     }
 }

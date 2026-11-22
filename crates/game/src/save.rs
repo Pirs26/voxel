@@ -357,27 +357,21 @@ impl SaveSlotBrowser {
     }
 
     fn refresh_in_dir(&mut self, dir: &Path) {
-        let prev_name = self.selected_slot_name().to_string();
+        let prev_name = self.selected().map(|s| s.slot_name.clone());
         self.slots = list_save_slots_in_dir(dir);
-        if self.slots.is_empty() {
-            self.slots.push(SaveSlotSummary {
-                slot_name: DEFAULT_SAVE_SLOT.to_string(),
-                credits: STARTER_CREDITS,
-                unlocked_depth_tier: 1,
-                dives_completed: 0,
-                player_count: 0,
-                exists_on_disk: false,
-            });
-        }
-        self.selected_idx = self
-            .slots
-            .iter()
-            .position(|s| s.slot_name == prev_name)
+        self.selected_idx = prev_name
+            .as_deref()
+            .and_then(|prev| self.slots.iter().position(|s| s.slot_name == prev))
             .unwrap_or(0);
     }
 
     pub fn selected(&self) -> Option<&SaveSlotSummary> {
         self.slots.get(self.selected_idx).or_else(|| self.slots.first())
+    }
+
+    /// Returns `true` when at least one campaign save exists on disk and is currently selected.
+    pub fn has_selected_world(&self) -> bool {
+        self.selected().is_some_and(|s| s.exists_on_disk)
     }
 
     pub fn selected_slot_name(&self) -> &str {
@@ -462,6 +456,9 @@ impl SaveSlotBrowser {
         new_name: &str,
     ) -> Result<String, String> {
         self.refresh_in_dir(dir);
+        if !self.has_selected_world() {
+            return Err("No save slot selected to rename".to_string());
+        }
         let safe_new = validate_save_slot_name(new_name)?;
         let old_name = self.selected_slot_name().to_string();
         if safe_new == old_name {
@@ -889,15 +886,21 @@ mod tests {
             selected_idx: 0,
         };
         browser.refresh_in_dir(dir);
-        // Deleting unsaved placeholder must fail cleanly
+        // Empty save directory must have no slots and has_selected_world() == false
+        assert!(browser.slots.is_empty());
+        assert!(!browser.has_selected_world());
+        assert!(browser.selected().is_none());
         assert!(browser.delete_selected_slot_in_dir(dir).is_err());
+        assert!(browser.rename_selected_slot_in_dir(dir, "renamed").is_err());
 
         browser
             .create_named_slot_in_dir(dir, "alpha")
             .expect("create alpha");
+        assert!(browser.has_selected_world());
         browser
             .create_named_slot_in_dir(dir, "beta")
             .expect("create beta");
+        assert!(browser.has_selected_world());
         assert_eq!(browser.selected_slot_name(), "beta");
 
         let deleted = browser
@@ -905,6 +908,7 @@ mod tests {
             .expect("delete beta");
         assert_eq!(deleted, "beta");
         assert!(!dir.join("beta.json").exists());
+        assert!(browser.has_selected_world());
         assert_eq!(browser.selected_slot_name(), "alpha");
 
         let deleted_last = browser
@@ -912,8 +916,9 @@ mod tests {
             .expect("delete alpha");
         assert_eq!(deleted_last, "alpha");
         assert!(!dir.join("alpha.json").exists());
-        assert_eq!(browser.selected_slot_name(), DEFAULT_SAVE_SLOT);
-        assert!(!browser.selected().unwrap().exists_on_disk);
+        assert!(browser.slots.is_empty());
+        assert!(!browser.has_selected_world());
+        assert!(browser.selected().is_none());
         assert!(browser.delete_selected_slot_in_dir(dir).is_err());
 
         let _ = fs::remove_dir_all(dir);

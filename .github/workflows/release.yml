@@ -73,6 +73,8 @@ jobs:
           mkdir -p dist/echoes-below
           cp target/release/${{ matrix.bin_name }} dist/echoes-below/echoes-below
           cp -R assets dist/echoes-below/assets
+          test -f dist/echoes-below/assets/fonts/JetBrainsMono-Regular.ttf
+          test -f dist/echoes-below/assets/fonts/OFL.txt
           (cd dist && zip -r ../${{ matrix.archive }} echoes-below)
 
       - name: Package release archive (Linux)
@@ -81,6 +83,8 @@ jobs:
           mkdir -p dist/echoes-below
           cp target/release/${{ matrix.bin_name }} dist/echoes-below/echoes-below
           cp -R assets dist/echoes-below/assets
+          test -f dist/echoes-below/assets/fonts/JetBrainsMono-Regular.ttf
+          test -f dist/echoes-below/assets/fonts/OFL.txt
           tar -czf ${{ matrix.archive }} -C dist echoes-below
 
       - name: Package release archive (Windows)
@@ -90,6 +94,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist\echoes-below | Out-Null
           Copy-Item target\release\${{ matrix.bin_name }} dist\echoes-below\echoes-below.exe
           Copy-Item -Recurse assets dist\echoes-below\assets
+          if (-not (Test-Path dist\echoes-below\assets\fonts\JetBrainsMono-Regular.ttf)) { throw "Missing bundled JetBrainsMono-Regular.ttf" }
+          if (-not (Test-Path dist\echoes-below\assets\fonts\OFL.txt)) { throw "Missing bundled OFL.txt font license" }
           Compress-Archive -Path dist\echoes-below -DestinationPath ${{ matrix.archive }} -Force
 
       - name: Upload build artifact
