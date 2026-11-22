@@ -332,10 +332,26 @@ stateDiagram-v2
   - Cross-platform release packaging scripts/builds for macOS, Windows, and Linux.
 - **Exit Criterion:** A full, replayable co-op game night with friends with zero setup friction beyond pasting the host's join code.
 
-### Month 2+ Architecture Hooks (Planned, Deferred)
-- **Machinery (Minecarts, Forklifts) & Power:** Already supported by low-frequency `AcousticEvent` bands and `EntityPoseBatch` host authority.
-- **Ropes, Anchors & Item Winches:** Meter-based physics & vertical shafts accommodate spline/rope constraints cleanly.
-- **Modular Ancient Ruins, Extra Monster Archetypes, Full Skin Editor & Training Course:** Plug directly into `worldgen.rs`, `ai_blind.rs`, and `shed.rs`.
+### Post-Month-1 Roadmap (`v0.2` – `v0.5`)
+
+- **`v0.2` (Big Release — *"First Game Night Ready"*):**
+  - **Full Companion Carrying & Corpse Recovery:** Synced P2P fireman-carry/drag for **Downed** teammates (voice whisper still works over carrier's shoulder, `[Space]`/`[Q]` escape to prevent griefing) + physical carryable **Fallen Bodies** for **Dead** teammates. Extracting with a fallen teammate's body saves their carried gear; leaving a companion behind incurs a **Company Recovery Fine (`-50 cr` per unrecovered body)**. Shared credits are signed (`i32`)—when in negative debt, the Supply Terminal refuses purchases until debt is paid off with extracted relics.
+  - **First-Person Held Tool Viewmodel:** Blocky diegetic held items (Flashlight, Pickaxe with `[LMB]` swing animation, Flare, Foam Canister, Noise Decoy, Aid Kit, two-handed carry state).
+  - **Scarce Cave Salvage v1:** Rare, partially-used emergency supplies (20%–55% batteries, single flares, partial foam canisters, rusty decoys) tucked behind breakable `CrackedRock` alcoves (never replacing the Shed economy).
+  - **Shed Hub Polish:** In-world **Decibel Calibration Wall** (live 3D LED meter reacting to teammates' voices in the Shed) + wooden gear shelves/racks.
+  - **Readability & Co-op Hardening:** Monster collapse animation, subtle Heavy Relic hum/pulse, and 2–4 player desync/reconnect fixes.
+- **`v0.3` (Big Release — *Modular Ruins, Verticality & Heavy Haulers*):**
+  - **Full Modular Ancient Ruins:** Stamped architectural prefabs (`PillaredNave`, `CollapsedCloister`, `SideCrypt`, `SunkenAltar`) with dense rubble/column cover, sealed crypt vaults, and higher-risk loot.
+  - **Ropes & Anchors:** Purchasable & salvageable climbing ropes for vertical drop-chutes and elevated ruin balconies.
+  - **Pushable Minecart / Utility Cart:** Multi-relic hauler emitting heavy low-frequency rumble that pulls **Heavy Lurkers** from across the maze.
+  - **Upgraded Gear Tiers:** High-capacity batteries and reinforced acoustic foam.
+- **`v0.4` (Big Release — *Acoustic Biomes & 3rd Predator*):**
+  - **Acoustic Spore Biome:** Pitch-black by default; sound-reactive **Echo-Bloom** flora (pulses brief light when loud sound hits it), noisy **Snap-Pods** (crack loudly when stepped on), and sound-dampening **Moss** stealth paths.
+  - **Obsidian Resonance Crystal Biome:** Dark glinting crystal walls/overhangs (keeping walkable floors clean), extreme high-frequency reverb (`RT60 > 3.0s`), and shatterable loud crystal veins.
+  - **3rd Blind Predator — Echo Mimic:** Replays muffled snippets of recent player voices/clicks down branching tunnels to split teams up.
+  - **Environmental Hazards:** Loudness-triggered ceiling rockfall dust and shallow water pools.
+- **`v0.5` (Big Release — *Foley & Scale Pass*):**
+  - Curated CC0/custom Foley WAV pass replacing remaining procedural synths, Shed suit/visor customizer + acoustic training corridor, and `1/4`-scale (`0.45 m`) voxel benchmark/evaluation.
 
 ---
 
