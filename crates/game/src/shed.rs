@@ -17,6 +17,7 @@ pub enum ShedStation {
     ElevatorWinchCave,
     ShopTerminal,
     ChargerBench,
+    ParkourBell,
 }
 
 /// Visual accent color/style for the graphical crosshair & floating target badge.
@@ -187,6 +188,18 @@ pub fn raycast_shed_station(
         false,
     );
 
+    // Parkour Summit Victory Bell AABB atop the suspended center podium
+    let bell_min = info.parkour_bell_pos_m + Vec3::new(-0.42, 0.0, -0.42);
+    let bell_max = info.parkour_bell_pos_m + Vec3::new(0.42, 1.35, 0.42);
+    consider_box(
+        ShedStation::ParkourBell,
+        bell_min,
+        bell_max,
+        "Parkour Summit Bell".to_string(),
+        "Ring to celebrate!".to_string(),
+        false,
+    );
+
     best.map(|(t, station, label, sublabel, blocked)| (station, label, sublabel, t, blocked))
 }
 
@@ -306,6 +319,70 @@ pub fn spawn_shed_landmarks(
                     ..default()
                 },
                 Transform::from_xyz(0.0, 1.25, 0.0),
+            ));
+        });
+
+    // 3. Parkour Room Summit Trophy Bell + overhead industrial Parkour Hall lights
+    let bell_base_mesh = meshes.add(Cuboid::new(0.46, 0.72, 0.46));
+    let bell_dome_mesh = meshes.add(Cylinder::new(0.20, 0.30));
+    let bell_cap_mesh = meshes.add(Sphere::new(0.11));
+    let gold_bell_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.80, 0.20),
+        emissive: LinearRgba::new(4.2, 2.9, 0.45, 1.0),
+        metallic: 0.90,
+        perceptual_roughness: 0.22,
+        ..default()
+    });
+    let bell_post_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.22, 0.25, 0.30),
+        metallic: 0.75,
+        perceptual_roughness: 0.42,
+        ..default()
+    });
+
+    commands
+        .spawn((
+            Transform::from_translation(info.parkour_bell_pos_m),
+            Visibility::default(),
+            ShedLandmarkVisual,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Mesh3d(bell_base_mesh),
+                MeshMaterial3d(bell_post_mat),
+                Transform::from_xyz(0.0, 0.36, 0.0),
+            ));
+            parent.spawn((
+                Mesh3d(bell_dome_mesh),
+                MeshMaterial3d(gold_bell_mat.clone()),
+                Transform::from_xyz(0.0, 0.88, 0.0),
+            ));
+            parent.spawn((
+                Mesh3d(bell_cap_mesh),
+                MeshMaterial3d(gold_bell_mat),
+                Transform::from_xyz(0.0, 1.06, 0.0),
+            ));
+            // Dedicated child PointLight illuminating the Summit Bell (NO Mesh3d)
+            parent.spawn((
+                PointLight {
+                    color: Color::srgb(1.0, 0.84, 0.38),
+                    intensity: 42_000.0,
+                    range: 16.0,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::from_xyz(0.0, 1.65, 0.0),
+            ));
+            // Dedicated lower hall PointLight illuminating the entrance & warm-up steps (NO Mesh3d)
+            parent.spawn((
+                PointLight {
+                    color: Color::srgb(0.86, 0.92, 1.0),
+                    intensity: 52_000.0,
+                    range: 22.0,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::from_xyz(-3.2, -3.2, 2.2),
             ));
         });
 }
@@ -440,11 +517,11 @@ mod tests {
         world.flush();
 
         let mut shed_q = world.query::<&ShedLandmarkVisual>();
-        assert_eq!(shed_q.iter(&world).count(), 2);
+        assert_eq!(shed_q.iter(&world).count(), 3);
 
         let mut light_q = world.query::<(&PointLight, Option<&Mesh3d>)>();
         let lights: Vec<_> = light_q.iter(&world).collect();
-        assert_eq!(lights.len(), 2);
+        assert_eq!(lights.len(), 4);
         for (_, mesh) in lights {
             assert!(
                 mesh.is_none(),

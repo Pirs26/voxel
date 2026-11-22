@@ -901,6 +901,7 @@ fn station_and_item_interact_system(
     mut remove_item_writer: MessageWriter<RemoveWorldItemEvent>,
     mut revive_writer: MessageWriter<ReviveCompletedEvent>,
     mut sound_writer: MessageWriter<PlaySpatialSoundEvent>,
+    mut parkour_clears: Local<u32>,
 ) {
     let screen = &menus.screen;
     let menu_open = &menus.menu_open;
@@ -1364,6 +1365,21 @@ fn station_and_item_interact_system(
                     clip: SynthClip::BatteryClick,
                     volume: 0.6,
                     pitch: 1.25,
+                    ai_event: None,
+                });
+            }
+            ShedStation::ParkourBell => {
+                *parkour_clears = parkour_clears.saturating_add(1);
+                let count = *parkour_clears;
+                toast.show(
+                    format!("PARKOUR COMPLETE! Rang the Summit Bell ({count} clear(s))"),
+                    3.2,
+                );
+                sound_writer.write(PlaySpatialSoundEvent {
+                    pos_m: level_info.0.parkour_bell_pos_m + Vec3::Y * 0.9,
+                    clip: SynthClip::BeaconPing,
+                    volume: 0.92,
+                    pitch: 1.35,
                     ai_event: None,
                 });
             }
