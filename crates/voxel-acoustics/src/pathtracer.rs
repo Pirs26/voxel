@@ -155,7 +155,7 @@ pub fn trace_listener_reverb(
     // Eyring acoustic formula: RT60 = (-60 dB) / (20 * log10(R)) * (MFP / c)
     // Scaled with enclosure factor so open sky leaks reverb energy naturally.
     let mut rt60 = [0.0f32; 3];
-    for b in 0..3 {
+    for (b, slot) in rt60.iter_mut().enumerate() {
         let effective_r = (mean_refl.0[b] * (0.35 + 0.65 * enclosure)).clamp(0.05, 0.96);
         let db_loss_per_bounce = -20.0 * effective_r.log10(); // positive dB
         let bounces_to_60db = 60.0 / db_loss_per_bounce.max(0.25);
@@ -166,7 +166,7 @@ pub fn trace_listener_reverb(
             1 => 4.2,
             _ => 2.8,
         };
-        rt60[b] = raw_rt60.clamp(0.15, air_cap);
+        *slot = raw_rt60.clamp(0.15, air_cap);
     }
 
     let mean_r = mean_refl.mean();
