@@ -181,6 +181,20 @@ pub enum ReliableMessage {
     },
 }
 
+/// Compact third-person held tool / two-handed carry indicator synced in `PlayerPose`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HeldItemNetKind {
+    #[default]
+    None,
+    Flashlight,
+    GlowFlare,
+    AcousticFoam,
+    NoiseDecoy,
+    AidKit,
+    BonusCrystal,
+    TwoHandedCarry,
+}
+
 /// Low-latency, unreliable, unordered messages sent as QUIC datagrams.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum UnreliableDatagram {
@@ -192,6 +206,8 @@ pub enum UnreliableDatagram {
         pitch: f32,
         crouching: bool,
         flashlight_on: bool,
+        held_item: HeldItemNetKind,
+        pickaxe_swing: bool,
     },
     VoiceFrame {
         speaker_id: PlayerId,

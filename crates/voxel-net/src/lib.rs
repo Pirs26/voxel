@@ -9,7 +9,7 @@ pub mod session;
 pub mod ticket;
 
 pub use protocol::{
-    ElevatorPhase, MonsterBehaviorState, PlayerHealthStatus, PlayerId, PlayerInfo,
+    ElevatorPhase, HeldItemNetKind, MonsterBehaviorState, PlayerHealthStatus, PlayerId, PlayerInfo,
     ReliableMessage, UnreliableDatagram, WorldItemKind, WorldItemNetState, decode_datagram,
     decode_reliable, encode_datagram, encode_reliable,
 };
@@ -207,6 +207,8 @@ mod tests {
                 pitch: -0.35,
                 crouching: true,
                 flashlight_on: false,
+                held_item: HeldItemNetKind::AcousticFoam,
+                pickaxe_swing: true,
             },
             UnreliableDatagram::VoiceFrame {
                 speaker_id: 1,

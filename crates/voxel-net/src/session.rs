@@ -15,9 +15,9 @@ use tokio::sync::{RwLock, mpsc, watch};
 use voxel_core::VoxelId;
 
 use crate::protocol::{
-    ElevatorPhase, MonsterBehaviorState, PlayerHealthStatus, PlayerId, PlayerInfo, ReliableMessage,
-    UnreliableDatagram, WorldItemNetState, decode_datagram, encode_datagram, read_reliable_frame,
-    write_reliable_frame,
+    ElevatorPhase, HeldItemNetKind, MonsterBehaviorState, PlayerHealthStatus, PlayerId, PlayerInfo,
+    ReliableMessage, UnreliableDatagram, WorldItemNetState, decode_datagram, encode_datagram,
+    read_reliable_frame, write_reliable_frame,
 };
 use crate::ticket::{decode_join_code, encode_join_code};
 
@@ -131,6 +131,8 @@ pub enum NetEvent {
         pitch: f32,
         crouching: bool,
         flashlight_on: bool,
+        held_item: HeldItemNetKind,
+        pickaxe_swing: bool,
     },
     VoiceFrame {
         speaker_id: PlayerId,
@@ -1287,6 +1289,8 @@ fn emit_datagram_event(events: &EventQueue, dgram: UnreliableDatagram) {
             pitch,
             crouching,
             flashlight_on,
+            held_item,
+            pickaxe_swing,
         } => push_event(
             events,
             NetEvent::PlayerPose {
@@ -1297,6 +1301,8 @@ fn emit_datagram_event(events: &EventQueue, dgram: UnreliableDatagram) {
                 pitch,
                 crouching,
                 flashlight_on,
+                held_item,
+                pickaxe_swing,
             },
         ),
         UnreliableDatagram::VoiceFrame {
