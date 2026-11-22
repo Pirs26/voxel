@@ -14,23 +14,64 @@ use voxel_core::{VoxelConfig, VoxelWorld, raycast_solid};
 /// never rushes the elevator before players step out and orient themselves.
 pub const STALKER_SPAWN_GRACE_S: f32 = 12.0;
 
-/// Returns `(patrol, investigate, hunt, cooldown)` speeds in m/s scaled gently by `depth_tier`.
-/// Even at Tier 3, the stalker stays slower than a walking player (`4.0 m/s`), making tunnel
-/// jukes, breakable shortcuts, and stun counterplay fair while keeping solo relic drags tense!
-pub fn stalker_speeds_for_tier(depth_tier: u8) -> (f32, f32, f32, f32) {
-    match depth_tier.clamp(1, 3) {
+/// Frequency-selective blind predator archetype (`DESIGN.md` Stage C).
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MonsterArchetype {
+    /// Nimble hunter hyper-sensitive to Mid/High frequencies and sharp transients
+    /// (voices, dropped items, breaking rock, sprinting).
+    #[default]
+    Stalker,
+    /// Hulking armored cavern brute sensitive to Low-frequency seismic rumble
+    /// (heavy relic scraping, elevator winch machinery, heavy impacts even through thick stone walls).
+    HeavyLurker,
+}
+
+/// Returns `(patrol, investigate, hunt, cooldown)` speeds in m/s scaled gently by `depth_tier`
+/// and `archetype`.
+///
+/// Even at Tier 3, monsters stay slower than a walking player (`4.0 m/s`), making tunnel
+/// jukes, breakable shortcuts, and stun counterplay fair while keeping solo relic drags tense.
+/// `HeavyLurker` moves at ~78% of `Stalker` speed across all states.
+pub fn speeds_for_archetype(depth_tier: u8, archetype: MonsterArchetype) -> (f32, f32, f32, f32) {
+    let (p, i, h, c) = match depth_tier.clamp(1, 3) {
         1 => (0.95, 1.35, 2.15, 0.95),
         2 => (1.15, 1.65, 2.55, 1.10),
         _ => (1.35, 1.95, 2.95, 1.25),
+    };
+    match archetype {
+        MonsterArchetype::Stalker => (p, i, h, c),
+        MonsterArchetype::HeavyLurker => (p * 0.78, i * 0.78, h * 0.78, c * 0.78),
+    }
+}
+
+/// Returns `(patrol, investigate, hunt, cooldown)` speeds in m/s scaled gently by `depth_tier`.
+/// Even at Tier 3, the stalker stays slower than a walking player (`4.0 m/s`), making tunnel
+/// jukes, breakable shortcuts, and stun counterplay fair while keeping solo relic drags tense!
+#[allow(dead_code)]
+pub fn stalker_speeds_for_tier(depth_tier: u8) -> (f32, f32, f32, f32) {
+    speeds_for_archetype(depth_tier, MonsterArchetype::Stalker)
+}
+
+/// Returns the world-space melee/crosshair hit AABB `(min_m, max_m)` for a monster of `archetype`
+/// at `feet_pos_m`.
+pub fn stalker_hit_aabb_for(feet_pos_m: Vec3, archetype: MonsterArchetype) -> (Vec3, Vec3) {
+    match archetype {
+        MonsterArchetype::Stalker => (
+            feet_pos_m + Vec3::new(-0.55, 0.0, -0.55),
+            feet_pos_m + Vec3::new(0.55, 2.15, 0.55),
+        ),
+        MonsterArchetype::HeavyLurker => (
+            feet_pos_m + Vec3::new(-0.75, 0.0, -0.75),
+            feet_pos_m + Vec3::new(0.75, 2.38, 0.75),
+        ),
     }
 }
 
 /// Returns the world-space melee/crosshair hit AABB `(min_m, max_m)` for a Stalker at `feet_pos_m`.
+#[allow(dead_code)]
 pub fn stalker_hit_aabb(feet_pos_m: Vec3) -> (Vec3, Vec3) {
-    (
-        feet_pos_m + Vec3::new(-0.55, 0.0, -0.55),
-        feet_pos_m + Vec3::new(0.55, 2.15, 0.55),
-    )
+    stalker_hit_aabb_for(feet_pos_m, MonsterArchetype::Stalker)
 }
 
 const STRIKE_HORIZ_RANGE_M: f32 = 1.75;
@@ -67,6 +108,7 @@ pub enum StalkerReaction {
 #[derive(Component, Clone, Debug)]
 pub struct BlindStalker {
     pub monster_id: u16,
+    pub archetype: MonsterArchetype,
     pub feet_pos_m: Vec3,
     pub yaw: f32,
     pub state: StalkerState,
@@ -91,18 +133,48 @@ pub struct BlindStalker {
 }
 
 impl BlindStalker {
+    #[allow(dead_code)]
     pub fn new(monster_id: u16, feet_pos_m: Vec3, depth_tier: u8) -> Self {
+        Self::new_with_archetype(monster_id, feet_pos_m, depth_tier, MonsterArchetype::Stalker)
+    }
+
+    pub fn new_with_archetype(
+        monster_id: u16,
+        feet_pos_m: Vec3,
+        depth_tier: u8,
+        archetype: MonsterArchetype,
+    ) -> Self {
         let tier = depth_tier.clamp(1, 3);
-        let (hearing_threshold, hunt_threshold, max_hp) = match tier {
-            1 => (0.40, 1.10, 3u8),
-            2 => (0.32, 0.90, 4u8),
-            _ => (0.26, 0.76, 5u8),
+        let stalker_hp = match tier {
+            1 => 3u8,
+            2 => 4u8,
+            _ => 5u8,
         };
-        // High Mid/High frequency sensitivity: voices, dropped items, rock breaches, sprinting.
-        let band_sensitivity = Bands3::new(0.45, 1.25, 1.65);
+        let (hearing_threshold, hunt_threshold, max_hp, band_sensitivity) = match archetype {
+            MonsterArchetype::Stalker => {
+                let (hearing, hunt) = match tier {
+                    1 => (0.40, 1.10),
+                    2 => (0.32, 0.90),
+                    _ => (0.26, 0.76),
+                };
+                // High Mid/High frequency sensitivity: voices, dropped items, rock breaches, sprinting.
+                (hearing, hunt, stalker_hp, Bands3::new(0.45, 1.25, 1.65))
+            }
+            MonsterArchetype::HeavyLurker => {
+                let (hearing, hunt) = match tier {
+                    1 => (0.18, 0.55),
+                    2 => (0.15, 0.46),
+                    _ => (0.12, 0.38),
+                };
+                // Low-frequency rumble sensitivity: Heavy Relic scraping, elevator winch machinery,
+                // and heavy impacts even through thick stone walls, while barely noticing quiet speech.
+                (hearing, hunt, stalker_hp + 2, Bands3::new(2.2, 0.55, 0.30))
+            }
+        };
 
         Self {
             monster_id,
+            archetype,
             feet_pos_m,
             yaw: 0.0,
             state: StalkerState::Patrol,
@@ -683,7 +755,7 @@ pub fn step_stalker_ai(
 
     // 5. Follow waypoints & steer smoothly without clipping into solid voxels
     let (patrol_spd, invest_spd, hunt_spd, cooldown_spd) =
-        stalker_speeds_for_tier(stalker.depth_tier);
+        speeds_for_archetype(stalker.depth_tier, stalker.archetype);
     let speed = match stalker.state {
         StalkerState::Patrol => patrol_spd,
         StalkerState::Investigate => invest_spd,
@@ -776,27 +848,35 @@ pub fn step_stalker_ai(
     stalker.step_accum_m += moved_m;
     if stalker.step_accum_m >= FOOTSTEP_STRIDE_M {
         stalker.step_accum_m -= FOOTSTEP_STRIDE_M;
-        let vol = match stalker.state {
+        let base_vol: f32 = match stalker.state {
             StalkerState::Hunt => 0.85,
             StalkerState::Investigate => 0.58,
             StalkerState::Patrol | StalkerState::AttackCooldown | StalkerState::Stunned => 0.38,
         };
+        let vol = match stalker.archetype {
+            MonsterArchetype::Stalker => base_vol,
+            MonsterArchetype::HeavyLurker => (base_vol + 0.12).min(1.0),
+        };
         output.emit_footstep = Some((stalker.feet_pos_m, vol));
     }
 
-    // 7. Periodic eerie vocalization so players can track the blind stalker by its cavern echoes
+    // 7. Periodic eerie vocalization so players can track the blind predator by its cavern echoes
     stalker.vocal_timer_s -= dt;
     if stalker.vocal_timer_s <= 0.0 && output.emit_vocal.is_none() {
         let jitter = ((deterministic_hash(
             (stalker.monster_id as u64) ^ (stalker.feet_pos_m.x.to_bits() as u64),
         ) & 0xff) as f32)
             / 255.0;
-        let (next_interval, vol, pitch) = match stalker.state {
+        let (next_interval, vol, stalker_pitch) = match stalker.state {
             StalkerState::Hunt => (3.0 + jitter * 1.4, 0.85, 1.12),
             StalkerState::Investigate => (4.5 + jitter * 1.8, 0.65, 1.00),
             StalkerState::Patrol | StalkerState::AttackCooldown | StalkerState::Stunned => {
                 (6.5 + jitter * 2.6, 0.50, 0.88)
             }
+        };
+        let pitch = match stalker.archetype {
+            MonsterArchetype::Stalker => stalker_pitch,
+            MonsterArchetype::HeavyLurker => 0.58,
         };
         stalker.vocal_timer_s = next_interval;
         output.emit_vocal = Some((SynthClip::MonsterGrowl, vol, pitch));
@@ -808,12 +888,40 @@ pub fn step_stalker_ai(
 /// Spawns the Bevy 0.20 blocky voxel visual hierarchy for a Blind Acoustic Stalker (~2.15m tall):
 /// spindly obsidian legs, hunched ribcage torso, eyeless elongated skull with pale bone-like
 /// acoustic ear-crests, and long claws. Faces `-Z` in local space.
+#[allow(dead_code)]
 pub fn spawn_stalker_visual(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     feet_pos_m: Vec3,
 ) -> Entity {
+    spawn_monster_visual(
+        commands,
+        meshes,
+        materials,
+        feet_pos_m,
+        MonsterArchetype::Stalker,
+    )
+}
+
+/// Spawns the Bevy 0.20 blocky voxel visual hierarchy for a blind cave predator of `archetype`
+/// at `feet_pos_m`, facing `-Z` in local space:
+/// - `MonsterArchetype::Stalker` (~2.15m tall): spindly digitigrade legs, exposed ribcage, pale
+///   bone acoustic ear-fins, and long wicked claws.
+/// - `MonsterArchetype::HeavyLurker` (~2.35m tall): hulking wide-shouldered armored cavern brute
+///   with broad obsidian carapace plates, glowing muted amber-rust seismic resonance vents & jaw,
+///   thick pillar legs, and heavy hammer forearms.
+pub fn spawn_monster_visual(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    feet_pos_m: Vec3,
+    archetype: MonsterArchetype,
+) -> Entity {
+    if archetype == MonsterArchetype::HeavyLurker {
+        return spawn_heavy_lurker_visual(commands, meshes, materials, feet_pos_m);
+    }
+
     let obsidian_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.05, 0.055, 0.075),
         perceptual_roughness: 0.72,
@@ -969,6 +1077,179 @@ pub fn spawn_stalker_visual(
                             .with_rotation(Quat::from_rotation_x(0.32)),
                     ));
                 }
+            }
+        })
+        .id()
+}
+
+fn spawn_heavy_lurker_visual(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    feet_pos_m: Vec3,
+) -> Entity {
+    let carapace_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.06, 0.055, 0.065),
+        perceptual_roughness: 0.64,
+        metallic: 0.28,
+        ..default()
+    });
+    let underhide_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.13, 0.10, 0.09),
+        perceptual_roughness: 0.88,
+        ..default()
+    });
+    let seismic_amber_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.82, 0.42, 0.16),
+        emissive: LinearRgba::new(0.45, 0.16, 0.04, 1.0),
+        perceptual_roughness: 0.52,
+        ..default()
+    });
+
+    let foot_plate_mesh = meshes.add(Cuboid::new(0.32, 0.12, 0.40));
+    let pillar_shin_mesh = meshes.add(Cuboid::new(0.28, 0.62, 0.30));
+    let pillar_thigh_mesh = meshes.add(Cuboid::new(0.34, 0.56, 0.34));
+    let carapace_plate_mesh = meshes.add(Cuboid::new(0.96, 0.20, 0.60));
+    let seismic_vent_mesh = meshes.add(Cuboid::new(0.78, 0.06, 0.48));
+    let pauldron_mesh = meshes.add(Cuboid::new(0.36, 0.38, 0.52));
+    let receptor_drum_mesh = meshes.add(Cuboid::new(0.10, 0.24, 0.28));
+    let upper_arm_mesh = meshes.add(Cuboid::new(0.28, 0.62, 0.28));
+    let hammer_forearm_mesh = meshes.add(Cuboid::new(0.34, 0.72, 0.36));
+    let knuckle_fist_mesh = meshes.add(Cuboid::new(0.38, 0.26, 0.40));
+    let knuckle_seam_mesh = meshes.add(Cuboid::new(0.32, 0.08, 0.42));
+
+    commands
+        .spawn((
+            Transform::from_translation(feet_pos_m),
+            Visibility::default(),
+        ))
+        .with_children(|root| {
+            // Thick pillar legs & stomping foot plates (left & right)
+            for side in [-1.0f32, 1.0f32] {
+                root.spawn((
+                    Mesh3d(foot_plate_mesh.clone()),
+                    MeshMaterial3d(carapace_mat.clone()),
+                    Transform::from_xyz(side * 0.30, 0.06, -0.02),
+                ));
+                root.spawn((
+                    Mesh3d(pillar_shin_mesh.clone()),
+                    MeshMaterial3d(carapace_mat.clone()),
+                    Transform::from_xyz(side * 0.30, 0.38, 0.04)
+                        .with_rotation(Quat::from_rotation_x(0.08)),
+                ));
+                root.spawn((
+                    Mesh3d(pillar_thigh_mesh.clone()),
+                    MeshMaterial3d(underhide_mat.clone()),
+                    Transform::from_xyz(side * 0.31, 0.88, -0.02)
+                        .with_rotation(Quat::from_rotation_x(-0.14)),
+                ));
+            }
+
+            // Heavy armored hip girdle / pelvis
+            root.spawn((
+                Mesh3d(meshes.add(Cuboid::new(0.78, 0.28, 0.48))),
+                MeshMaterial3d(underhide_mat.clone()),
+                Transform::from_xyz(0.0, 1.16, 0.02),
+            ));
+
+            // Barrel torso & layered obsidian carapace plates with glowing amber-rust seismic vents
+            root.spawn((
+                Mesh3d(meshes.add(Cuboid::new(0.86, 0.78, 0.54))),
+                MeshMaterial3d(underhide_mat.clone()),
+                Transform::from_xyz(0.0, 1.56, -0.05)
+                    .with_rotation(Quat::from_rotation_x(-0.20)),
+            ));
+            for (y, z) in [(1.36, -0.03), (1.56, -0.07), (1.76, -0.11)] {
+                root.spawn((
+                    Mesh3d(carapace_plate_mesh.clone()),
+                    MeshMaterial3d(carapace_mat.clone()),
+                    Transform::from_xyz(0.0, y, z)
+                        .with_rotation(Quat::from_rotation_x(-0.20)),
+                ));
+                root.spawn((
+                    Mesh3d(seismic_vent_mesh.clone()),
+                    MeshMaterial3d(seismic_amber_mat.clone()),
+                    Transform::from_xyz(0.0, y - 0.10, z - 0.05)
+                        .with_rotation(Quat::from_rotation_x(-0.20)),
+                ));
+            }
+
+            // Hulking wide-shouldered mantle & angled obsidian pauldrons (~2.35m total silhouette)
+            root.spawn((
+                Mesh3d(meshes.add(Cuboid::new(1.18, 0.34, 0.56))),
+                MeshMaterial3d(carapace_mat.clone()),
+                Transform::from_xyz(0.0, 1.98, -0.12),
+            ));
+            for side in [-1.0f32, 1.0f32] {
+                root.spawn((
+                    Mesh3d(pauldron_mesh.clone()),
+                    MeshMaterial3d(carapace_mat.clone()),
+                    Transform::from_xyz(side * 0.56, 2.04, -0.12)
+                        .with_rotation(Quat::from_rotation_z(-side * 0.22)),
+                ));
+            }
+
+            // Dorsal armored carapace ridge & glowing seismic resonance vent crown (~2.35m peak)
+            root.spawn((
+                Mesh3d(meshes.add(Cuboid::new(0.56, 0.24, 0.48))),
+                MeshMaterial3d(carapace_mat.clone()),
+                Transform::from_xyz(0.0, 2.20, -0.08)
+                    .with_rotation(Quat::from_rotation_x(-0.15)),
+            ));
+            root.spawn((
+                Mesh3d(meshes.add(Cuboid::new(0.26, 0.10, 0.42))),
+                MeshMaterial3d(seismic_amber_mat.clone()),
+                Transform::from_xyz(0.0, 2.31, -0.09)
+                    .with_rotation(Quat::from_rotation_x(-0.15)),
+            ));
+
+            // Low-slung eyeless armored skull, glowing amber-rust crusher jaw & lateral seismic drums
+            root.spawn((
+                Mesh3d(meshes.add(Cuboid::new(0.46, 0.30, 0.44))),
+                MeshMaterial3d(carapace_mat.clone()),
+                Transform::from_xyz(0.0, 1.90, -0.43)
+                    .with_rotation(Quat::from_rotation_x(0.10)),
+            ));
+            root.spawn((
+                Mesh3d(meshes.add(Cuboid::new(0.42, 0.16, 0.38))),
+                MeshMaterial3d(seismic_amber_mat.clone()),
+                Transform::from_xyz(0.0, 1.71, -0.46)
+                    .with_rotation(Quat::from_rotation_x(0.18)),
+            ));
+            for side in [-1.0f32, 1.0f32] {
+                root.spawn((
+                    Mesh3d(receptor_drum_mesh.clone()),
+                    MeshMaterial3d(seismic_amber_mat.clone()),
+                    Transform::from_xyz(side * 0.26, 1.90, -0.38),
+                ));
+            }
+
+            // Massive upper arms & heavy hammer forearms / seismic knuckle-crushers
+            for side in [-1.0f32, 1.0f32] {
+                root.spawn((
+                    Mesh3d(upper_arm_mesh.clone()),
+                    MeshMaterial3d(underhide_mat.clone()),
+                    Transform::from_xyz(side * 0.64, 1.62, -0.18)
+                        .with_rotation(Quat::from_rotation_x(0.20)),
+                ));
+                root.spawn((
+                    Mesh3d(hammer_forearm_mesh.clone()),
+                    MeshMaterial3d(carapace_mat.clone()),
+                    Transform::from_xyz(side * 0.68, 0.98, -0.32)
+                        .with_rotation(Quat::from_rotation_x(0.28)),
+                ));
+                root.spawn((
+                    Mesh3d(knuckle_fist_mesh.clone()),
+                    MeshMaterial3d(carapace_mat.clone()),
+                    Transform::from_xyz(side * 0.68, 0.52, -0.42)
+                        .with_rotation(Quat::from_rotation_x(0.28)),
+                ));
+                root.spawn((
+                    Mesh3d(knuckle_seam_mesh.clone()),
+                    MeshMaterial3d(seismic_amber_mat.clone()),
+                    Transform::from_xyz(side * 0.68, 0.44, -0.44)
+                        .with_rotation(Quat::from_rotation_x(0.28)),
+                ));
             }
         })
         .id()
@@ -1204,6 +1485,92 @@ mod tests {
         assert_eq!(
             apply_stalker_hit(&world, &mut stalker, 1, 3.0, Vec3::X),
             StalkerHitResult::Killed
+        );
+    }
+
+    #[test]
+    fn heavy_lurker_hears_low_frequency_rumble_behind_stone_wall_and_ignores_whisper() {
+        let (cfg, mut world) = build_flat_cave_room(UVec3::splat(1));
+
+        // Seal a 2-voxel-thick solid stone wall across the entire room cross-section at x = 12..=13
+        for y in 0..32 {
+            for z in 0..32 {
+                world.set(IVec3::new(12, y, z), VoxelId::CaveStone);
+                world.set(IVec3::new(13, y, z), VoxelId::CaveStone);
+            }
+        }
+
+        let monster_feet = voxel_feet_world_pos(cfg, IVec3::new(17, 5, 10));
+        let mut stalker =
+            BlindStalker::new_with_archetype(10, monster_feet, 1, MonsterArchetype::Stalker);
+        let mut lurker =
+            BlindStalker::new_with_archetype(11, monster_feet, 1, MonsterArchetype::HeavyLurker);
+        stalker.spawn_grace_s = 0.0;
+        lurker.spawn_grace_s = 0.0;
+
+        // 1. HeavyLurker is tankier (+2 HP) and slower across all states than Stalker
+        assert_eq!(lurker.archetype, MonsterArchetype::HeavyLurker);
+        assert_eq!(lurker.max_hp, stalker.max_hp + 2);
+        assert_eq!(lurker.hp, lurker.max_hp);
+        assert_eq!(lurker.band_sensitivity, Bands3::new(2.2, 0.55, 0.30));
+
+        for tier in 1..=3 {
+            let (sp, si, sh, sc) = speeds_for_archetype(tier, MonsterArchetype::Stalker);
+            let (lp, li, lh, lc) = speeds_for_archetype(tier, MonsterArchetype::HeavyLurker);
+            assert!(lp < sp && li < si && lh < sh && lc < sc);
+            assert!((lh / sh - 0.78).abs() < 0.02);
+        }
+
+        // Hit AABB for HeavyLurker is wider and taller (~2.38m) than Stalker (~2.15m)
+        let (s_min, s_max) = stalker_hit_aabb_for(monster_feet, MonsterArchetype::Stalker);
+        let (l_min, l_max) = stalker_hit_aabb_for(monster_feet, MonsterArchetype::HeavyLurker);
+        assert!(l_max.y - l_min.y > s_max.y - s_min.y);
+        assert!(l_max.x - l_min.x > s_max.x - s_min.x);
+
+        // 2. Behind the stone wall, a quiet high-band whisper is ignored by HeavyLurker
+        let source_pos = cfg.voxel_to_world_center(IVec3::new(8, 6, 10));
+        let whisper = AcousticEvent {
+            pos_m: source_pos,
+            energy: Bands3::new(0.25, 0.70, 0.95),
+            sharpness: 0.4,
+            kind: AcousticEventKind::VoiceSpeech,
+        };
+        assert_eq!(
+            process_acoustic_event_for_stalker(&world, &mut lurker, whisper),
+            None,
+            "HeavyLurker must ignore a quiet high-band whisper behind a stone wall"
+        );
+        assert_eq!(lurker.state, StalkerState::Patrol);
+
+        // 3. Behind the exact same sealed stone wall, a low-frequency heavy rumble (RelicScrape)
+        // penetrates the stone in the Low band and alerts HeavyLurker, while the Mid/High-tuned
+        // Stalker cannot hear it through the wall!
+        let relic_scrape = AcousticEvent {
+            pos_m: source_pos,
+            energy: Bands3::new(2.1, 1.9, 1.4),
+            sharpness: 0.45,
+            kind: AcousticEventKind::RelicScrape,
+        };
+        assert_eq!(
+            process_acoustic_event_for_stalker(&world, &mut stalker, relic_scrape),
+            None,
+            "Stalker should not hear solo RelicScrape through a sealed 2-voxel stone wall"
+        );
+        let lurker_reaction =
+            process_acoustic_event_for_stalker(&world, &mut lurker, relic_scrape);
+        assert!(
+            lurker_reaction.is_some(),
+            "HeavyLurker must detect low-frequency RelicScrape rumble even through a stone wall"
+        );
+        assert_ne!(lurker.state, StalkerState::Patrol);
+        assert!(lurker.target_pos_m.is_some());
+
+        // 4. Verify HeavyLurker emits its deeper 0.58 growl pitch
+        lurker.vocal_timer_s = 0.01;
+        let step_out = step_stalker_ai(&world, &mut lurker, &[], 0.05);
+        assert_eq!(
+            step_out.emit_vocal,
+            Some((SynthClip::MonsterGrowl, 0.65, 0.58))
         );
     }
 }

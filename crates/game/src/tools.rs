@@ -8,7 +8,7 @@ use voxel_audio_dsp::SynthClip;
 use voxel_core::{Destructibility, VoxelId, raycast_solid};
 
 use crate::{
-    ai_blind::{BlindStalker, RemoteSyncedStalker, stalker_hit_aabb},
+    ai_blind::{BlindStalker, MonsterArchetype, RemoteSyncedStalker, stalker_hit_aabb_for},
     audio_bridge::{AcousticBeaconState, PlaySpatialSoundEvent},
     gameplay::GameplayToast,
     health::PlayerHealthState,
@@ -158,14 +158,19 @@ fn voxel_interact_system(
         let max_melee_m = hit.as_ref().map_or(3.2f32, |h| h.distance_m.min(3.2));
         let mut best_stalker: Option<(f32, u16, Vec3)> = None;
         for (stf, host_s, remote_s) in &stalkers_q {
-            let monster_id = if let Some(s) = host_s {
-                s.monster_id
+            let (monster_id, archetype) = if let Some(s) = host_s {
+                (s.monster_id, s.archetype)
             } else if let Some(rs) = remote_s {
-                rs.monster_id
+                let arch = if rs.monster_id >= 2 {
+                    MonsterArchetype::HeavyLurker
+                } else {
+                    MonsterArchetype::Stalker
+                };
+                (rs.monster_id, arch)
             } else {
                 continue;
             };
-            let (mn, mx) = stalker_hit_aabb(stf.translation);
+            let (mn, mx) = stalker_hit_aabb_for(stf.translation, archetype);
             if let Some(t) = ray_aabb_intersect(origin, dir, mn, mx, max_melee_m)
                 && best_stalker.as_ref().is_none_or(|(bd, _, _)| t < *bd)
             {
@@ -470,12 +475,12 @@ fn update_flares_system(
         }
 
         if bounced && impact_speed > 2.2 {
-            let vol = (impact_speed / 12.0).clamp(0.18, 0.75);
+            let vol = (impact_speed / 12.0).clamp(0.18, 0.65);
             sound_writer.write(PlaySpatialSoundEvent {
                 pos_m: pos,
-                clip: SynthClip::FootstepStone,
+                clip: SynthClip::BatteryClick,
                 volume: vol,
-                pitch: 1.35,
+                pitch: 1.18,
                 ai_event: Some(AcousticEvent {
                     pos_m: pos,
                     energy: Bands3::splat(vol * 1.6),
@@ -492,8 +497,7 @@ fn update_flares_system(
     }
 }
 
-/// Press `K` to move the looping Acoustic Test Beacon right to your position
-/// for A/B muffling & echo tests (freed `[E]` for contextual gameplay interactions!).
+/// Press `K` to toggle the optional Acoustic Test Beacon ON at your position (or OFF to silence it).
 #[allow(clippy::too_many_arguments)]
 fn move_beacon_system(
     keys: Res<ButtonInput<KeyCode>>,
@@ -504,6 +508,7 @@ fn move_beacon_system(
     coop: Res<CoopState>,
     player_q: Query<&Transform, With<PlayerController>>,
     mut beacon: ResMut<AcousticBeaconState>,
+    mut toast: ResMut<GameplayToast>,
 ) {
     if *screen != AppScreen::InGame
         || menu_open.0
@@ -514,8 +519,14 @@ fn move_beacon_system(
         return;
     }
     if let Ok(cam_tf) = player_q.single() {
-        let new_pos = cam_tf.translation + cam_tf.forward().as_vec3() * 1.2;
-        beacon.pos_m = new_pos;
-        coop.send_beacon_moved(new_pos);
+        beacon.enabled = !beacon.enabled;
+        if beacon.enabled {
+            let new_pos = cam_tf.translation + cam_tf.forward().as_vec3() * 1.2;
+            beacon.pos_m = new_pos;
+            coop.send_beacon_moved(new_pos);
+            toast.show("Acoustic Test Beacon ON (press [K] again to turn off)", 2.6);
+        } else {
+            toast.show("Acoustic Test Beacon OFF", 1.8);
+        }
     }
 }

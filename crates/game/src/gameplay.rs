@@ -20,9 +20,9 @@ use voxel_net::{
 
 use crate::{
     ai_blind::{
-        BlindStalker, RemoteSyncedStalker, StalkerHitResult, StalkerReaction, StalkerState,
-        apply_stalker_hit, process_acoustic_event_for_stalker, spawn_stalker_visual,
-        stalker_hit_aabb, step_stalker_ai,
+        BlindStalker, MonsterArchetype, RemoteSyncedStalker, StalkerHitResult, StalkerReaction,
+        StalkerState, apply_stalker_hit, process_acoustic_event_for_stalker, spawn_monster_visual,
+        stalker_hit_aabb_for, step_stalker_ai,
     },
     audio_bridge::{
         AcousticBeaconState, AcousticTelemetry, PlaySpatialSoundEvent, RemoveVoiceSpeakerEvent,
@@ -694,9 +694,14 @@ fn inventory_input_system(
             inv.close_battery_selector();
             return;
         }
-    } else if keys.just_pressed(KeyCode::KeyR) {
-        inv.open_battery_selector();
-        return;
+    } else {
+        if scroll_delta != 0 && !inv.is_hands_occupied() {
+            inv.scroll_active_slot(scroll_delta);
+        }
+        if keys.just_pressed(KeyCode::KeyR) {
+            inv.open_battery_selector();
+            return;
+        }
     }
 
     // 3. Normal `[Q]`: release Heavy Relic / stop dragging / drop active belt item physically
@@ -1025,21 +1030,47 @@ fn station_and_item_interact_system(
         }
     }
 
-    // 1d. Blind Acoustic Stalkers within melee `[LMB]` pickaxe strike range (`3.2m`)
+    // 1d. Blind Acoustic Predators (Stalker / Heavy Lurker) within melee `[LMB]` strike range (`3.2m`)
     let melee_limit = ray_limit_m.min(3.2);
     for (stf, host_s, remote_s) in &stalkers_q {
-        let (monster_id, hp, max_hp, stunned) = if let Some(s) = host_s {
-            (s.monster_id, s.hp, s.max_hp, s.state == StalkerState::Stunned)
+        let (monster_id, archetype, hp, max_hp, stunned) = if let Some(s) = host_s {
+            (
+                s.monster_id,
+                s.archetype,
+                s.hp,
+                s.max_hp,
+                s.state == StalkerState::Stunned,
+            )
         } else if let Some(rs) = remote_s {
-            (rs.monster_id, 3, 3, rs.state == StalkerState::Stunned)
+            let arch = if rs.monster_id >= 2 {
+                MonsterArchetype::HeavyLurker
+            } else {
+                MonsterArchetype::Stalker
+            };
+            let est_hp = if arch == MonsterArchetype::HeavyLurker {
+                5
+            } else {
+                3
+            };
+            (
+                rs.monster_id,
+                arch,
+                est_hp,
+                est_hp,
+                rs.state == StalkerState::Stunned,
+            )
         } else {
             continue;
         };
-        let (mn, mx) = stalker_hit_aabb(stf.translation);
+        let (mn, mx) = stalker_hit_aabb_for(stf.translation, archetype);
         if let Some(t_hit) = ray_aabb_intersect(cam_origin, cam_dir, mn, mx, melee_limit) {
             let pips: String = (0..max_hp)
                 .map(|i| if i < hp { '●' } else { '○' })
                 .collect();
+            let title = match archetype {
+                MonsterArchetype::Stalker => "Strike Stalker",
+                MonsterArchetype::HeavyLurker => "Strike Heavy Lurker",
+            };
             let sublabel = if stunned {
                 format!("HP {pips} • STUNNED!")
             } else {
@@ -1054,7 +1085,7 @@ fn station_and_item_interact_system(
                     stunned,
                 },
                 key_badge: "LMB".to_string(),
-                label: "Strike Stalker".to_string(),
+                label: title.to_string(),
                 sublabel,
                 accent: TargetAccent::Danger,
             });
@@ -1613,13 +1644,29 @@ fn elevator_runtime_system(
             spawn_world_item_visual(&mut commands, &mut meshes, &mut materials, &net_state);
         }
 
-        // Spawn Blind Acoustic Stalker(s) deep in the cave
+        // Spawn Blind Acoustic Predators deep in the cave:
+        // Monster #1 is a nimble Mid/High-hearing Stalker; Monster #2 (Tier 2+) is a hulking
+        // Low-frequency rumble-tracking Heavy Lurker!
         for (idx, &spawn_pos) in level_info.0.monster_spawns_m.iter().enumerate() {
             let monster_id = (idx + 1) as u16;
-            let ent = spawn_stalker_visual(&mut commands, &mut meshes, &mut materials, spawn_pos);
-            commands
-                .entity(ent)
-                .insert(BlindStalker::new(monster_id, spawn_pos, elevator.depth_tier));
+            let archetype = if idx == 0 {
+                MonsterArchetype::Stalker
+            } else {
+                MonsterArchetype::HeavyLurker
+            };
+            let ent = spawn_monster_visual(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                spawn_pos,
+                archetype,
+            );
+            commands.entity(ent).insert(BlindStalker::new_with_archetype(
+                monster_id,
+                spawn_pos,
+                elevator.depth_tier,
+                archetype,
+            ));
         }
 
         coop.send_elevator_sync(elevator);
@@ -2109,18 +2156,32 @@ fn blind_stalker_ai_system(
                 StalkerHitResult::Killed => {
                     killed = true;
                     let drop_pos = stalker.feet_pos_m + Vec3::Y * 0.65;
+                    let bounty = if stalker.archetype == MonsterArchetype::HeavyLurker {
+                        75
+                    } else {
+                        45
+                    };
+                    let name = if stalker.archetype == MonsterArchetype::HeavyLurker {
+                        "Heavy Lurker"
+                    } else {
+                        "Stalker"
+                    };
                     coop.send_monster_killed(stalker.monster_id, drop_pos);
                     sound_writer.write(PlaySpatialSoundEvent {
                         pos_m: drop_pos,
                         clip: SynthClip::MonsterScreech,
                         volume: 1.0,
-                        pitch: 0.68,
+                        pitch: if stalker.archetype == MonsterArchetype::HeavyLurker {
+                            0.52
+                        } else {
+                            0.68
+                        },
                         ai_event: None,
                     });
                     let loot_id = item_reg.alloc_id();
                     let loot_state = WorldItemNetState {
                         id: loot_id,
-                        kind: WorldItemKind::BonusLoot { value: 45 },
+                        kind: WorldItemKind::BonusLoot { value: bounty },
                         pos_m: drop_pos,
                         vel_m: Vec3::new(0.0, 2.2, 0.0),
                         in_shed: false,
@@ -2130,7 +2191,10 @@ fn blind_stalker_ai_system(
                     coop.send_world_item_spawn(loot_state.clone());
                     spawn_item_writer.write(SpawnWorldItemEvent(loot_state));
                     commands.entity(ent).despawn();
-                    toast.show("Stalker ELIMINATED! Dropped Crystal (+45 cr)", 3.2);
+                    toast.show(
+                        format!("{name} ELIMINATED! Dropped Crystal (+{bounty} cr)"),
+                        3.2,
+                    );
                     break;
                 }
             }
@@ -2174,11 +2238,15 @@ fn blind_stalker_ai_system(
             });
         }
         if let Some((step_pos, vol)) = out.emit_footstep {
+            let (clip, step_vol, pitch) = match stalker.archetype {
+                MonsterArchetype::Stalker => (SynthClip::FootstepStone, vol, 0.88),
+                MonsterArchetype::HeavyLurker => (SynthClip::HeavyImpact, vol * 0.55, 0.68),
+            };
             sound_writer.write(PlaySpatialSoundEvent {
-                pos_m: step_pos + Vec3::Y * 0.15,
-                clip: SynthClip::FootstepStone,
-                volume: vol,
-                pitch: 0.72,
+                pos_m: step_pos + Vec3::Y * 0.25,
+                clip,
+                volume: step_vol,
+                pitch,
                 ai_event: None,
             });
         }
@@ -2379,7 +2447,12 @@ pub fn upsert_remote_stalker(
             return;
         }
     }
-    let ent = spawn_stalker_visual(commands, meshes, materials, pos_m);
+    let archetype = if monster_id >= 2 {
+        MonsterArchetype::HeavyLurker
+    } else {
+        MonsterArchetype::Stalker
+    };
+    let ent = spawn_monster_visual(commands, meshes, materials, pos_m, archetype);
     commands.entity(ent).insert(RemoteSyncedStalker {
         monster_id,
         target_pos_m: pos_m,
